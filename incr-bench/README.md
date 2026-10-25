@@ -19,13 +19,13 @@ Build each with `go-toolchain`.
 - `scripts/grok-bench.sh`: `ci-bench.sh` on the local grok-build checkout.
 - `scripts/ci-bench.sh`: one CI leg. A workload (grok or syn) with one compiler config, incremental and non-incremental, cold and after each edit.
 - `scripts/ci-*.sh`: the other steps of `.github/workflows/incr-bench.yml`. `ci-syn-corpus.sh` builds the syn workspace from `corpus/syn-ws` and the crates.io source.
+- `scripts/absl-bench.sh`: abseil-cpp build, output against CMake metadata.
+- `scripts/fish-bench.sh`, `fish-edits.sh`, `fish-sizes.sh`: fish-shell C++ against Rust builds.
+- `scripts/incr-prof-run.sh`, `incr-prof-wrap.sh`: one grok-build edit, profiled per crate.
 
 ## CI benchmark
 
 A push that changes `ci-request.env` runs `.github/workflows/incr-bench.yml`. The file names `baseline`, `patched`, `grok_ref`, `workloads`, and one `config=NAME baseline|patched [RUSTC FLAGS]` line per config. Each config and workload is one leg. The report lands in the job summary and in `results/ci/<run id>.md`.
-- `scripts/absl-bench.sh`: abseil-cpp build, output against CMake metadata.
-- `scripts/fish-bench.sh`, `fish-edits.sh`, `fish-sizes.sh`: fish-shell C++ against Rust builds.
-- `scripts/incr-prof-run.sh`, `incr-prof-wrap.sh`: one grok-build edit, profiled per crate.
 
 ## Results
 
