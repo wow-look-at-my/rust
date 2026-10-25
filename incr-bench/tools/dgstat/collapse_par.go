@@ -114,6 +114,10 @@ func collapsePar(g dag, keep []bool, liveCap, memo, workers int, sink func(w, p 
 	if err != nil {
 		return st, err
 	}
+	st.levels = len(starts) - 1
+	for l := 0; l+1 < len(starts); l++ {
+		st.widest = max(st.widest, starts[l+1]-starts[l])
+	}
 
 	store := newClosureStore(n)
 	closID := make([]int32, n)
@@ -230,20 +234,21 @@ func collapsePar(g dag, keep []bool, liveCap, memo, workers int, sink func(w, p 
 
 	for l := 0; l+1 < len(starts); l++ {
 		nodes := byLevel[starts[l]:starts[l+1]]
-		if len(nodes) <= 1024 || len(ws) == 1 {
+		if len(nodes) < 2*len(ws) || len(ws) == 1 {
 			for _, p := range nodes {
 				process(ws[0], int(p))
 			}
 		} else {
+			// A node can walk a long chain of big nodes, so even a small level splits across workers.
+			chunk := max(1, min(256, len(nodes)/(8*len(ws))))
 			var next atomic.Int64
 			var wg sync.WaitGroup
 			for _, w := range ws {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					const chunk = 256
 					for {
-						s := int(next.Add(chunk)) - chunk
+						s := int(next.Add(int64(chunk))) - chunk
 						if s >= len(nodes) {
 							return
 						}
