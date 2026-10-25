@@ -33,6 +33,7 @@ fn round_trip(entries: &[(u32, DepNode, Fingerprint, Vec<u32>)], flush_before: &
     let mut values = IndexVec::<SerializedDepNodeIndex, _>::from_elem_n(Fingerprint::ZERO, max);
     let mut d = MemDecoder::new(&data, 0).unwrap();
     let mut prev_index = None;
+    let mut history = Vec::new();
     for (index, node, value, edges) in entries {
         let record = NodeRecord::decode(&mut d, prev_index, &nodes, &values);
         assert_eq!(record.index.as_u32(), *index);
@@ -46,7 +47,7 @@ fn round_trip(entries: &[(u32, DepNode, Fingerprint, Vec<u32>)], flush_before: &
         assert_eq!(record.num_edges as usize, edges.len());
         let width = record.head.bytes_per_index();
         let mut raw = Vec::new();
-        record.decode_edges(&mut d, &mut raw);
+        record.decode_edges(&mut d, &mut raw, &mut history);
         assert_eq!(raw.len(), width * edges.len());
         for (chunk, &edge) in raw.chunks(width).zip(edges) {
             let mut bytes = [0u8; 4];
@@ -80,6 +81,28 @@ fn round_trip_refs_gaps_and_flushes() {
     let len = round_trip(&entries, &[301]);
     // The fixed header alone was many bytes per node.
     assert!(len < entries.len() * 38, "encoded {len} bytes");
+}
+
+#[test]
+fn edge_back_references_restart_at_a_flush() {
+    let far = 0x0100_0000;
+    let entries = vec![
+        (0, node(1, 1), fp(1), vec![]),
+        (1, node(1, 2), fp(2), vec![far, 0, far + 7]),
+        // Each far target repeats, so its edge is a short back-reference.
+        (2, node(1, 3), fp(3), vec![far + 7, far, 0, far]),
+        // After the flush a back-reference to the block before is not valid.
+        (3, node(1, 4), fp(4), vec![far, far + 7]),
+        (4, node(1, 5), fp(5), vec![far + 7, far]),
+    ];
+    round_trip(&entries, &[3]);
+    let without_repeats = vec![
+        (0, node(1, 1), fp(1), vec![]),
+        (1, node(1, 2), fp(2), vec![far, 0, far + 7]),
+        (2, node(1, 3), fp(3), vec![far + 20, far + 30, 0, far + 40]),
+    ];
+    let repeats = round_trip(&entries[..3], &[]);
+    assert!(repeats < round_trip(&without_repeats, &[]), "back-references saved nothing");
 }
 
 #[test]
