@@ -40,7 +40,9 @@ fn round_trip(entries: &[(u32, DepNode, Fingerprint, Vec<u32>)], flush_before: &
         assert_eq!(record.value_fingerprint, *value);
         assert_eq!(record.num_edges as usize, edges.len());
         let width = record.head.bytes_per_index();
-        let raw = d.read_raw_bytes(width * edges.len());
+        let mut raw = Vec::new();
+        record.decode_edges(&mut d, &mut raw);
+        assert_eq!(raw.len(), width * edges.len());
         for (chunk, &edge) in raw.chunks(width).zip(edges) {
             let mut bytes = [0u8; 4];
             bytes[..width].copy_from_slice(chunk);

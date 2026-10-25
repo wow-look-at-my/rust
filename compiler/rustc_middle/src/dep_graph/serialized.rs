@@ -365,10 +365,8 @@ impl SerializedDepGraph {
 
             value_fingerprints[index] = record.value_fingerprint;
 
-            // The edges index list uses the same varint strategy as rmeta tables; we select the
-            // number of byte elements per-array not per-element. This lets us read the whole edge
-            // list for a node with one decoder call and also use the on-disk format in memory.
-            let edges_len_bytes = record.head.bytes_per_index() * (record.num_edges as usize);
+            // In memory, the edges index list uses the same varint strategy as rmeta tables; we
+            // select the number of byte elements per-array not per-element.
             // The in-memory structure for the edges list stores the byte width of the edges on
             // this node with the offset into the global edge data array.
             let edges_header = EdgeHeader {
@@ -377,7 +375,7 @@ impl SerializedDepGraph {
                 num_edges: record.num_edges,
             };
 
-            edge_list_data.extend(d.read_raw_bytes(edges_len_bytes));
+            record.decode_edges(d, &mut edge_list_data);
 
             edge_list_indices[index] = edges_header;
         }
@@ -546,6 +544,17 @@ impl NodeRecord {
         NodeRecord { head, index, node, value_fingerprint, num_edges }
     }
 
+    /// Reads this node's edge targets and appends them to `out` at the head's byte width.
+    fn decode_edges(&self, d: &mut MemDecoder<'_>, out: &mut Vec<u8>) {
+        let width = self.head.bytes_per_index();
+        let mut prev = self.index.as_u32() as i64;
+        for _ in 0..self.num_edges {
+            prev += d.read_i64();
+            let target = u32::try_from(prev).expect("dep graph edge target out of range");
+            out.extend_from_slice(&target.to_le_bytes()[..width]);
+        }
+    }
+
     fn decode_ref(
         d: &mut MemDecoder<'_>,
         index: SerializedDepNodeIndex,
@@ -663,12 +672,12 @@ impl NodeInfo<'_> {
             e.emit_u32(edges.len().try_into().unwrap());
         }
 
-        let bytes_per_index = head.bytes_per_index();
+        // Each target is a signed leb128 distance from the one before it, the first from this node.
+        let mut prev = index as i64;
         for node_index in edges.iter() {
-            e.write_with(|dest| {
-                *dest = node_index.as_u32().to_le_bytes();
-                bytes_per_index
-            });
+            let target = node_index.as_u32() as i64;
+            e.emit_i64(target - prev);
+            prev = target;
         }
     }
 }
