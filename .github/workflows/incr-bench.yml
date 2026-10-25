@@ -1,7 +1,10 @@
 name: incr-bench
 
-# Measures the incremental cache of two compilers on grok-build. Each leg runs for hours, so a person dispatches it.
+# Measures the incremental cache of two compilers on grok-build. Each leg runs for hours. A run starts on a dispatch, or on a push that changes incr-bench/ci-request.env, which holds the same inputs.
 on:
+  push:
+    branches: ['**']
+    paths: [incr-bench/ci-request.env]
   workflow_dispatch:
     inputs:
       baseline:
@@ -26,7 +29,21 @@ permissions:
   id-token: write
 
 jobs:
+  config:
+    runs-on: ubuntu-latest
+    outputs:
+      baseline: ${{ steps.cfg.outputs.baseline }}
+      patched: ${{ steps.cfg.outputs.patched }}
+      grok_ref: ${{ steps.cfg.outputs.grok_ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: incr-bench
+      - id: cfg
+        run: incr-bench/scripts/ci-bench-inputs.sh "${{ github.event_name }}" "${{ inputs.baseline }}" "${{ inputs.patched }}" "${{ inputs.grok_ref }}"
+
   bench:
+    needs: config
     name: bench ${{ matrix.label }}
     # The same image as grok-build's own Linux CI.
     runs-on: ubuntu-22.04
@@ -36,9 +53,9 @@ jobs:
       matrix:
         include:
           - label: baseline
-            commit: ${{ inputs.baseline }}
+            commit: ${{ needs.config.outputs.baseline }}
           - label: patched
-            commit: ${{ inputs.patched || github.sha }}
+            commit: ${{ needs.config.outputs.patched }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -86,7 +103,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: wow-look-at-my/grok-build
-          ref: ${{ inputs.grok_ref }}
+          ref: ${{ needs.config.outputs.grok_ref }}
           path: grok
 
       - uses: ./grok/.github/actions/setup-protoc
