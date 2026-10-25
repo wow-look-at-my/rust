@@ -68,7 +68,7 @@ measure() {
 }
 
 build() {
-	local tdir=$1 mode=$2 step=$3 incr=1 start end log reuse
+	local tdir=$1 mode=$2 step=$3 incr=1 start end log reuse graph
 	[[ $mode == noincr ]] && incr=0
 	log=$target_root/$mode.${step//:/-}.log
 	start=$(date +%s.%N)
@@ -83,6 +83,21 @@ build() {
 	if [[ $reuse != $'0\t0\t0' ]]; then
 		printf '%s\t%s\t%s\t%s\n' "$config" "$mode" "$step" "$reuse" >> "${results%.tsv}.reuse.tsv"
 		echo "rmeta reuse $mode $step: $reuse (decoded, requested, green)"
+	fi
+	# An -Zincremental-info run also prints the bytes each crate's dep graph spends on node heads, keys, values and edges.
+	graph=$({ grep -oE 'dep graph node bytes: total [0-9]+ heads [0-9]+ keys [0-9]+ values [0-9]+ edges [0-9]+' "$log" || true; } | awk '{t += $6; h += $8; k += $10; v += $12; e += $14} END {printf "%d\t%d\t%d\t%d\t%d", t, h, k, v, e}')
+	if [[ $graph != $'0\t0\t0\t0\t0' ]]; then
+		printf '%s\t%s\t%s\t%s\n' "$config" "$mode" "$step" "$graph" >> "${results%.tsv}.graph.tsv"
+		echo "dep graph bytes $mode $step: $graph (total, heads, keys, values, edges)"
+	fi
+	if [[ $step == cold && $graph != $'0\t0\t0\t0\t0' ]]; then
+		# The per-kind table rows end in the bytes column. Sum each kind over all crates.
+		awk -F'|' 'NF == 6 && $5 ~ /^ *[0-9]+ *$/ {
+			kind = $1; sub(/^\[incremental\] +/, "", kind); sub(/ +$/, "", kind)
+			n[kind] += $3; b[kind] += $5
+		} END { for (k in b) printf "%s\t%d\t%d\n", k, n[k], b[k] }' "$log" | sort -t$'\t' -k3,3nr > "${results%.tsv}.kinds.tsv"
+		echo "top dep kinds by graph bytes (kind, nodes, bytes):"
+		head -n 25 "${results%.tsv}.kinds.tsv"
 	fi
 	measure "$tdir" "$mode" "$step" "$(echo "$end - $start" | bc)"
 }

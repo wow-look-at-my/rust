@@ -628,8 +628,31 @@ struct NodeInfo<'a> {
     edges: &'a [DepNodeIndex],
 }
 
+/// The bytes one encoded node spends on each part of its record.
+#[derive(Clone, Copy, Default)]
+struct NodeBytes {
+    head: u64,
+    key: u64,
+    value: u64,
+    edges: u64,
+}
+
+impl NodeBytes {
+    fn add(&mut self, other: NodeBytes) {
+        self.head += other.head;
+        self.key += other.key;
+        self.value += other.value;
+        self.edges += other.edges;
+    }
+
+    fn total(&self) -> u64 {
+        self.head + self.key + self.value + self.edges
+    }
+}
+
 impl NodeInfo<'_> {
-    fn encode(&self, e: &mut MemEncoder, index: DepNodeIndex, refs: &mut EncoderRefs) {
+    fn encode(&self, e: &mut MemEncoder, index: DepNodeIndex, refs: &mut EncoderRefs) -> NodeBytes {
+        let start = e.position();
         let NodeInfo { ref node, value_fingerprint, edges } = *self;
         // The largest index picks the byte width of the edge list.
         let edge_max = edges.iter().map(|e| e.as_u32()).max().unwrap_or(0);
@@ -665,17 +688,20 @@ impl NodeInfo<'_> {
         if !index_is_next {
             e.write_array(index.to_le_bytes());
         }
+        let key_start = e.position();
         match key_ref {
             _ if key_is_absent => {}
             Some(target) => e.emit_u32(index - target),
             None => e.write_array(key_fingerprint.to_le_bytes()),
         }
+        let value_start = e.position();
         if !value_is_zero {
             match value_ref {
                 Some(target) => e.emit_u32(index - target),
                 None => e.write_array(value_fingerprint.to_le_bytes()),
             }
         }
+        let edges_start = e.position();
 
         if head.len().is_none() {
             // The edges are all unique and the number of unique indices is less than u32::MAX.
@@ -689,6 +715,12 @@ impl NodeInfo<'_> {
             e.emit_i64(target - prev);
             prev = target;
         }
+        NodeBytes {
+            head: (key_start - start) as u64,
+            key: (value_start - key_start) as u64,
+            value: (edges_start - value_start) as u64,
+            edges: (e.position() - edges_start) as u64,
+        }
     }
 }
 
@@ -696,6 +728,7 @@ struct Stat {
     kind: DepKind,
     node_counter: u64,
     edge_counter: u64,
+    bytes: NodeBytes,
 }
 
 struct LocalEncoderState {
@@ -787,6 +820,7 @@ impl EncoderState {
         index: DepNodeIndex,
         edge_count: usize,
         edges: &[DepNodeIndex],
+        bytes: NodeBytes,
         retained_graph: &Option<Lock<RetainedDepGraph>>,
         local: &mut LocalEncoderState,
     ) {
@@ -811,10 +845,15 @@ impl EncoderState {
             // Outline the stats code as it's typically disabled and cold.
             outline(move || {
                 let mut stats = stats.lock();
-                let stat =
-                    stats.entry(kind).or_insert(Stat { kind, node_counter: 0, edge_counter: 0 });
+                let stat = stats.entry(kind).or_insert(Stat {
+                    kind,
+                    node_counter: 0,
+                    edge_counter: 0,
+                    bytes: NodeBytes::default(),
+                });
                 stat.node_counter += 1;
                 stat.edge_counter += edge_count as u64;
+                stat.bytes.add(bytes);
             });
         }
     }
@@ -837,9 +876,17 @@ impl EncoderState {
         retained_graph: &Option<Lock<RetainedDepGraph>>,
         local: &mut LocalEncoderState,
     ) {
-        node.encode(&mut local.encoder, index, &mut local.refs);
+        let bytes = node.encode(&mut local.encoder, index, &mut local.refs);
         self.flush_mem_encoder(&mut *local);
-        self.record(&node.node, index, node.edges.len(), node.edges, retained_graph, &mut *local);
+        self.record(
+            &node.node,
+            index,
+            node.edges.len(),
+            node.edges,
+            bytes,
+            retained_graph,
+            &mut *local,
+        );
     }
 
     /// Encodes a node that was promoted from the previous graph, reading the node and its
@@ -949,6 +996,18 @@ impl EncoderState {
             eprintln!("[incremental]");
             eprintln!("[incremental] Total Node Count: {}", total_node_count);
             eprintln!("[incremental] Total Edge Count: {}", total_edge_count);
+            let mut bytes = NodeBytes::default();
+            for stat in &stats {
+                bytes.add(stat.bytes);
+            }
+            eprintln!(
+                "[incremental] dep graph node bytes: total {} heads {} keys {} values {} edges {}",
+                bytes.total(),
+                bytes.head,
+                bytes.key,
+                bytes.value,
+                bytes.edges,
+            );
 
             if cfg!(debug_assertions) {
                 let total_read_count = current.total_read_count.load(Ordering::Relaxed);
@@ -960,8 +1019,8 @@ impl EncoderState {
 
             eprintln!("[incremental]");
             eprintln!(
-                "[incremental]  {:<36}| {:<17}| {:<12}| {:<17}|",
-                "Node Kind", "Node Frequency", "Node Count", "Avg. Edge Count"
+                "[incremental]  {:<36}| {:<17}| {:<12}| {:<17}| {:<12}|",
+                "Node Kind", "Node Frequency", "Node Count", "Avg. Edge Count", "Bytes"
             );
             eprintln!("{SEPARATOR}");
 
@@ -971,11 +1030,12 @@ impl EncoderState {
                 let node_kind_avg_edges = (stat.edge_counter as f64) / (stat.node_counter as f64);
 
                 eprintln!(
-                    "[incremental]  {:<36}|{:>16.1}% |{:>12} |{:>17.1} |",
+                    "[incremental]  {:<36}|{:>16.1}% |{:>12} |{:>17.1} |{:>12} |",
                     format!("{:?}", stat.kind),
                     node_kind_ratio,
                     stat.node_counter,
                     node_kind_avg_edges,
+                    stat.bytes.total(),
                 );
             }
 
