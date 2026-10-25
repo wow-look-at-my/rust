@@ -353,6 +353,7 @@ impl SerializedDepGraph {
             Vec::with_capacity(graph_bytes.saturating_sub(node_count * NodeRecord::MIN_SIZE));
 
         let mut prev_index = None;
+        let mut edge_history = Vec::new();
         for _ in 0..node_count {
             let record = NodeRecord::decode(d, prev_index, &nodes, &value_fingerprints);
             let index = record.index;
@@ -375,7 +376,7 @@ impl SerializedDepGraph {
                 num_edges: record.num_edges,
             };
 
-            record.decode_edges(d, &mut edge_list_data);
+            record.decode_edges(d, &mut edge_list_data, &mut edge_history);
 
             edge_list_indices[index] = edges_header;
         }
@@ -499,6 +500,8 @@ const FLAG_VALUE_IS_REF: u8 = 1 << 2;
 const FLAG_VALUE_IS_ZERO: u8 = 1 << 3;
 /// The node is anon. Its key is never looked up again, so it is not stored and decodes as zero.
 const FLAG_KEY_IS_ABSENT: u8 = 1 << 4;
+/// The node is the first of a block that one thread wrote. Edge back-references start again here.
+const FLAG_EDGES_RESTART: u8 = 1 << 5;
 
 /// One node of the serialized stream, without its edge targets.
 struct NodeRecord {
@@ -507,6 +510,11 @@ struct NodeRecord {
     node: DepNode,
     value_fingerprint: Fingerprint,
     num_edges: u32,
+    edges_restart: bool,
+}
+
+fn leb_len(x: u64) -> u32 {
+    (64 - x.leading_zeros()).max(1).div_ceil(7)
 }
 
 impl NodeRecord {
@@ -547,17 +555,36 @@ impl NodeRecord {
 
         let num_edges = head.len().unwrap_or_else(|| d.read_u32());
         let node = DepNode { kind: head.kind(), key_fingerprint };
-        NodeRecord { head, index, node, value_fingerprint, num_edges }
+        let edges_restart = flags & FLAG_EDGES_RESTART != 0;
+        NodeRecord { head, index, node, value_fingerprint, num_edges, edges_restart }
     }
 
     /// Reads this node's edge targets and appends them to `out` at the head's byte width.
-    fn decode_edges(&self, d: &mut MemDecoder<'_>, out: &mut Vec<u8>) {
+    /// `history` holds the targets of the block so far, for back-references.
+    fn decode_edges(&self, d: &mut MemDecoder<'_>, out: &mut Vec<u8>, history: &mut Vec<u32>) {
+        if self.edges_restart {
+            history.clear();
+        }
         let width = self.head.bytes_per_index();
         let mut prev = self.index.as_u32() as i64;
         for _ in 0..self.num_edges {
-            prev += d.read_i64();
-            let target = u32::try_from(prev).expect("dep graph edge target out of range");
+            let code = d.read_u64();
+            let target = if code & 1 != 0 {
+                let zigzag = code >> 1;
+                prev + ((zigzag >> 1) as i64 ^ -((zigzag & 1) as i64))
+            } else {
+                let distance = (code >> 1) as usize;
+                let at = history
+                    .len()
+                    .checked_sub(distance)
+                    .filter(|_| distance != 0)
+                    .expect("dep graph edge back-reference does not point at an earlier edge");
+                i64::from(history[at])
+            };
+            let target = u32::try_from(target).expect("dep graph edge target out of range");
+            history.push(target);
             out.extend_from_slice(&target.to_le_bytes()[..width]);
+            prev = i64::from(target);
         }
     }
 
@@ -609,6 +636,10 @@ struct EncoderRefs {
     prev_index: Option<u32>,
     keys: FingerprintRefs,
     values: FingerprintRefs,
+    /// The position of the last edge of the unflushed buffer to each target.
+    edge_positions: FxHashMap<u32, u32>,
+    /// The number of edges in the unflushed buffer.
+    edge_count: u32,
 }
 
 impl EncoderRefs {
@@ -617,6 +648,8 @@ impl EncoderRefs {
             prev_index: None,
             keys: FingerprintRefs::new(),
             values: FingerprintRefs::new(),
+            edge_positions: FxHashMap::default(),
+            edge_count: 0,
         }
     }
 }
@@ -666,11 +699,18 @@ impl NodeInfo<'_> {
         let value_ref =
             if value_is_zero { None } else { refs.values.replace(value_fingerprint, index) };
         let index_is_next = refs.prev_index.is_some_and(|prev| prev + 1 == index);
+        // A flush resets `prev_index`, so this node starts a block.
+        let edges_restart = refs.prev_index.is_none();
         refs.prev_index = Some(index);
 
         let mut flags = 0;
         if index_is_next {
             flags |= FLAG_INDEX_IS_NEXT;
+        }
+        if edges_restart {
+            flags |= FLAG_EDGES_RESTART;
+            refs.edge_positions.clear();
+            refs.edge_count = 0;
         }
         if key_is_absent {
             flags |= FLAG_KEY_IS_ABSENT;
@@ -708,12 +748,21 @@ impl NodeInfo<'_> {
             e.emit_u32(edges.len().try_into().unwrap());
         }
 
-        // Each target is a signed leb128 distance from the one before it, the first from this node.
+        // Each target is the shorter of leb128 codes.
         let mut prev = index as i64;
         for node_index in edges.iter() {
-            let target = node_index.as_u32() as i64;
-            e.emit_i64(target - prev);
-            prev = target;
+            let target = node_index.as_u32();
+            let delta = i64::from(target) - prev;
+            let delta_code = ((((delta << 1) ^ (delta >> 63)) as u64) << 1) | 1;
+            let code = match refs.edge_positions.insert(target, refs.edge_count) {
+                Some(at) if leb_len(u64::from(refs.edge_count - at) << 1) < leb_len(delta_code) => {
+                    u64::from(refs.edge_count - at) << 1
+                }
+                _ => delta_code,
+            };
+            e.emit_u64(code);
+            refs.edge_count += 1;
+            prev = i64::from(target);
         }
         NodeBytes {
             head: (key_start - start) as u64,
