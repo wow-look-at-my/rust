@@ -51,20 +51,22 @@ sum_sizes() {
 # Appends one row for the incremental dir of target dir $1.
 measure() {
 	local mode=$2 step=$3 secs=$4 inc=$1/debug/incremental
-	local graph=0 qc=0 objs=0 total=0 crate_dirs=0 sessions=0
+	local graph=0 qc=0 objs=0 total=0 linked=0 crate_dirs=0 sessions=0
 	if [[ -d $inc ]]; then
 		graph=$(sum_sizes "$inc" -name dep-graph.bin)
 		qc=$(sum_sizes "$inc" -name query-cache.bin)
 		objs=$(sum_sizes "$inc" -name '*.o')
-		total=$(sum_sizes "$inc")
+		# A file with another link, like the metadata.rmeta of a session, shares its blocks with the target dir. It costs no disk here.
+		linked=$(sum_sizes "$inc" -links +1 ! -name dep-graph.bin ! -name query-cache.bin ! -name "*.o")
+		total=$(( $(sum_sizes "$inc") - linked ))
 		crate_dirs=$(find "$inc" -mindepth 1 -maxdepth 1 -type d | wc -l)
 		sessions=$(find "$inc" -mindepth 2 -maxdepth 2 -type d -name 's-*' | wc -l)
 	fi
 	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.1f\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n' \
 		"$workload" "$config" "$compiler" "$toolchain" "$flags" "$mode" "$step" "$secs" \
 		"$graph" "$qc" "$objs" "$((total - graph - qc - objs))" "$total" "$crate_dirs" "$sessions" >> "$results"
-	printf '%-5s %-22s %-7s %-14s %8.1fs graph=%d qcache=%d objs=%d total=%d crate_dirs=%d sessions=%d\n' \
-		"$workload" "$config" "$mode" "$step" "$secs" "$graph" "$qc" "$objs" "$total" "$crate_dirs" "$sessions"
+	printf '%-5s %-22s %-7s %-14s %8.1fs graph=%d qcache=%d objs=%d total=%d linked=%d crate_dirs=%d sessions=%d\n' \
+		"$workload" "$config" "$mode" "$step" "$secs" "$graph" "$qc" "$objs" "$total" "$linked" "$crate_dirs" "$sessions"
 }
 
 build() {
