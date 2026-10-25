@@ -79,12 +79,9 @@ pub struct Ent {
     pub key: [u8; 16],
     pub pos: u64,
     pub len: u32,
-<<<<<<< HEAD
-=======
     /// The value without rustc's leading tag and trailing length: `pos + skip.
     pub skip: u8,
     pub inner: u32,
->>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
 }
 
 pub struct Real {
@@ -99,13 +96,10 @@ pub struct Real {
     pub hygiene: usize,
     pub values_without_node: usize,
     pub kind_bits: u32,
-<<<<<<< HEAD
-=======
     /// Values whose span holds more than one frame, so the trailing length was not found.
     pub irregular: usize,
     /// Bytes of the footer's `query_values_index`, which the in-place file replaces.
     pub value_index_bytes: u64,
->>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
 }
 
 impl Real {
@@ -114,11 +108,6 @@ impl Real {
         &self.qc[e.pos as usize..e.pos as usize + e.len as usize]
     }
 
-<<<<<<< HEAD
-    pub fn data_start(&self) -> usize {
-        7 + self.qc[6] as usize
-    }
-=======
     /// The bytes that are neither a value span nor the value index: allocations,
     /// hygiene, side effects, the file table.
     pub fn tables_bytes(&self) -> u64 {
@@ -160,7 +149,6 @@ fn frame(b: &[u8], pos: usize, span: usize) -> Option<(usize, usize)> {
         }
     }
     None
->>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
 }
 
 /// Returns `(kind, key)` per node index. Kind a value of zero marks an index with no node.
@@ -250,10 +238,7 @@ pub struct Footer {
     pub allocs: Vec<u64>,
     pub hygiene: Vec<u64>,
     pub footer_pos: u64,
-<<<<<<< HEAD
-=======
     pub value_index_bytes: u64,
->>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
 }
 
 pub fn parse_footer(b: &[u8]) -> Result<Footer, String> {
@@ -267,16 +252,12 @@ pub fn parse_footer(b: &[u8]) -> Result<Footer, String> {
         c.bytes(24)?;
     }
     let mut lists = [Vec::new(), Vec::new()];
-<<<<<<< HEAD
-    for l in &mut lists {
-=======
     let index_start = c.p;
     let mut value_index_bytes = 0;
     for (li, l) in lists.iter_mut().enumerate() {
         if li == 1 {
             value_index_bytes = (c.p - index_start) as u64;
         }
->>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
         let n = c.uleb()?;
         l.reserve(n as usize);
         for _ in 0..n {
@@ -311,11 +292,7 @@ pub fn parse_footer(b: &[u8]) -> Result<Footer, String> {
     if c.p != b.len() - 8 {
         return Err(format!("footer ended at {}, want {}", c.p, b.len() - 8));
     }
-<<<<<<< HEAD
-    Ok(Footer { values, side, allocs, hygiene, footer_pos })
-=======
     Ok(Footer { values, side, allocs, hygiene, footer_pos, value_index_bytes })
->>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
 }
 
 /// Today's load step: decode the footer and build the index map rustc keeps.
@@ -384,10 +361,7 @@ pub fn load_files(qc_path: &Path, dg_path: &Path) -> Result<Real, String> {
     };
     let mut values = Vec::with_capacity(f.values.len());
     let mut without = 0;
-<<<<<<< HEAD
-=======
     let mut irregular = 0;
->>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
     for &(index, pos) in &f.values {
         let mut c = Cur { b: &qc, p: pos as usize, end: qc.len() };
         if c.uleb()? != index as u64 {
@@ -399,9 +373,6 @@ pub fn load_files(qc_path: &Path, dg_path: &Path) -> Result<Real, String> {
             continue;
         }
         let len = (next(pos) - pos) as u32;
-<<<<<<< HEAD
-        values.push(Ent { index, kind, key, pos, len });
-=======
         let (skip, inner) = match frame(&qc, pos as usize, len as usize) {
             Some((t, v)) => (t as u8, v as u32),
             None => {
@@ -414,7 +385,6 @@ pub fn load_files(qc_path: &Path, dg_path: &Path) -> Result<Real, String> {
             }
         };
         values.push(Ent { index, kind, key, pos, len, skip, inner });
->>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
     }
     Ok(Real {
         qc,
@@ -428,10 +398,7 @@ pub fn load_files(qc_path: &Path, dg_path: &Path) -> Result<Real, String> {
         hygiene: f.hygiene.len(),
         values_without_node: without,
         kind_bits,
-<<<<<<< HEAD
-=======
         irregular,
         value_index_bytes: f.value_index_bytes,
->>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
     })
 }
