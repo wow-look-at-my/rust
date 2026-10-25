@@ -27,7 +27,7 @@
 //! values into their fully-deserialized type, we use a fixed-size read of the encoded array
 //! then mask off any errant bytes we read. The array of edge index bytes is padded to permit this.
 //!
-//! We also encode and decode the entire rest of each node using [`SerializedNodeHeader`]
+//! We also encode and decode the entire rest of each node using [`NodeHead`]
 //! to let this encoding and decoding be done in one fixed-size operation. These headers contain
 //! two [`Fingerprint`]s along with the serialized [`DepKind`], and the number of edge indices
 //! in the node and the number of bytes used to encode the edge indices for this node. The
@@ -342,7 +342,7 @@ impl SerializedDepGraph {
 
         // This estimation assumes that all of the encoded bytes are for the edge lists or for the
         // fixed-size node headers. But that's not necessarily true; if any edge list has a length
-        // that spills out of the size we can bit-pack into SerializedNodeHeader then some of the
+        // that spills out of the size we can bit-pack into NodeHead then some of the
         // total serialized size is also used by leb128-encoded edge list lengths. Neglecting that
         // contribution to graph_bytes means our estimation of the bytes needed for edge_list_data
         // slightly overshoots. But it cannot overshoot by much; consider that the worse case is
