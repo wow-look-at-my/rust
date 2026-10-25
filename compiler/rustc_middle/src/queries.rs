@@ -784,6 +784,7 @@ rustc_queries! {
     /// Normally you would just use `tcx.erase_and_anonymize_regions(value)`,
     /// however, which uses this query as a kind of cache.
     query erase_and_anonymize_regions_ty(ty: Ty<'tcx>) -> Ty<'tcx> {
+        anon
         desc { "erasing regions from `{}`", ty }
         // Not hashing the return value appears to give marginally better perf for this query,
         // which should always be marked green for having no dependencies anyway.
@@ -2087,6 +2088,7 @@ rustc_queries! {
     /// Given a crate and a trait, look up all impls of that trait in the crate.
     /// Return `(impl_id, self_ty)`.
     query implementations_of_trait(_: (CrateNum, DefId)) -> &'tcx [(DefId, Option<SimplifiedType>)] {
+        anon
         desc { "looking up implementations of a trait in a crate" }
         separate_provide_extern
     }
@@ -2671,6 +2673,7 @@ rustc_queries! {
     query evaluate_root_goal_for_proof_tree_raw(
         key: (solve::CanonicalInput<'tcx>, usize)
     ) -> (solve::QueryResult<'tcx>, &'tcx solve::inspect::Probe<TyCtxt<'tcx>>, RequiredDepth) {
+        anon
         no_hash
         desc { "computing proof tree for `{}` with depth `{}`", key.0.canonical.value.goal.predicate, key.1 }
     }

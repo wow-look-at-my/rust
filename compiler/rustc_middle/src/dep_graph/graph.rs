@@ -414,7 +414,7 @@ impl DepGraphData {
     ///
     /// FIXME: This could perhaps return a `WithDepNode` to ensure that the
     /// user of this function actually performs the read.
-    fn with_anon_task_inner<'tcx, OP, R>(
+    pub fn with_anon_task_inner<'tcx, OP, R>(
         &self,
         tcx: TyCtxt<'tcx>,
         dep_kind: DepKind,
@@ -520,6 +520,11 @@ impl DepGraph {
                         panic_on_forbidden_read(data, dep_node_index)
                     }
                 };
+                // This node has no deps and is green in every session, so an edge to it
+                // can never turn a reader red.
+                if dep_node_index == DepNodeIndex::SINGLETON_ZERO_DEPS_ANON_NODE {
+                    return;
+                }
                 let task_deps = &mut *task_deps;
 
                 if cfg!(debug_assertions) {
