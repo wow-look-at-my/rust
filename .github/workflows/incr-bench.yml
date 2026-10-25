@@ -1,0 +1,169 @@
+name: incr-bench
+
+# Measures the incremental cache of two compilers on grok-build. Each leg runs for hours, so a person dispatches it.
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Baseline compiler commit or ref of this repository.
+        required: true
+        default: dc44e7f2c436b6041742e138b9c2176f093196d5
+      patched:
+        description: Patched compiler commit or ref of this repository. Empty means the commit this run is on.
+        required: false
+        default: ''
+      grok_ref:
+        description: Commit or branch of wow-look-at-my/grok-build to build.
+        required: true
+        default: master
+
+concurrency:
+  group: gha_${{ github.repository }}_${{ github.workflow }}_${{ github.ref != 'refs/heads/master' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  bench:
+    name: bench ${{ matrix.label }}
+    # The same image as grok-build's own Linux CI.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: baseline
+            commit: ${{ inputs.baseline }}
+          - label: patched
+            commit: ${{ inputs.patched || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: bench
+          sparse-checkout: incr-bench
+
+      - name: Resolve the compiler commit and its toolchain key
+        id: key
+        run: bench/incr-bench/scripts/ci-toolchain-key.sh "${{ matrix.commit }}" "${{ runner.temp }}/keyrepo"
+
+      - name: Free disk
+        run: bench/incr-bench/scripts/ci-free-disk.sh
+
+      - name: Restore the stage1 toolchain
+        id: toolchain
+        uses: wow-look-at-my/buildhost/.github/actions/buildhost-cache-restore@lkgb
+        with:
+          path: toolchain
+          key: ${{ steps.key.outputs.key }}
+
+      - name: Check out the compiler
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          path: rustc-src
+          ref: ${{ steps.key.outputs.sha }}
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Build the stage1 toolchain
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        run: bench/incr-bench/scripts/ci-build-stage1.sh rustc-src toolchain
+
+      - name: Save the stage1 toolchain
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        uses: wow-look-at-my/buildhost/.github/actions/buildhost-cache-save@lkgb
+        with:
+          path: toolchain
+          key: ${{ steps.key.outputs.key }}
+
+      - name: Delete the compiler build
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        run: rm -rf rustc-src && df -h /
+
+      - uses: actions/checkout@v4
+        with:
+          repository: wow-look-at-my/grok-build
+          ref: ${{ inputs.grok_ref }}
+          path: grok
+
+      - uses: ./grok/.github/actions/setup-protoc
+
+      # grok-build's .cargo/config.toml links with mold.
+      - name: Install mold
+        uses: wow-look-at-my/actions@cached-apt#latest
+        with:
+          packages: mold
+
+      # Cargo comes from the toolchain grok-build pins. The bench sets RUSTC to the stage1 compiler.
+      - name: Install grok-build's pinned cargo
+        working-directory: grok
+        run: rustup show
+
+      - name: Benchmark
+        run: bench/incr-bench/scripts/grok-bench.sh "$GITHUB_WORKSPACE/toolchain/bin/rustc" "${{ matrix.label }}"
+        env:
+          GROK_REPO: ${{ github.workspace }}/grok
+          GROK_TARGET: ${{ runner.temp }}/grok-target
+          GROK_BACKUP: ${{ runner.temp }}/grok-shell-lib.rs.bak
+          GROK_RESULTS: ${{ github.workspace }}/results/${{ matrix.label }}.tsv
+          GROK_TOOLCHAIN_ID: ${{ steps.key.outputs.sha }}
+          # The widest -j the hosted runner's RAM holds for grok-build, as its own CI measured.
+          CARGO_BUILD_JOBS: "3"
+
+      - name: Record the inputs of this leg
+        run: echo "- ${{ matrix.label }}, compiler \`${{ steps.key.outputs.sha }}\`, grok-build \`$(git -C grok rev-parse HEAD)\`" > "results/${{ matrix.label }}.meta"
+
+      - name: Leg table
+        run: bench/incr-bench/scripts/ci-report.sh "results/${{ matrix.label }}.tsv" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
+        with:
+          mode: send
+          name: results-${{ matrix.label }}
+          path: results
+
+  report:
+    needs: bench
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: incr-bench
+          fetch-depth: 0
+          filter: tree:0
+
+      - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
+        with:
+          mode: receive
+          name: results-baseline
+          path: in-baseline
+
+      - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
+        with:
+          mode: receive
+          name: results-patched
+          path: in-patched
+
+      - name: Write the report
+        run: |
+          mkdir -p incr-bench/results/ci
+          {
+            echo "# grok-build incremental benchmark, run [${{ github.run_id }}]($RUN_URL)"
+            echo
+            cat in-baseline/baseline.meta in-patched/patched.meta
+            echo
+            incr-bench/scripts/ci-report.sh in-baseline/baseline.tsv in-patched/patched.tsv
+          } > "incr-bench/results/ci/${{ github.run_id }}.md"
+          cat "incr-bench/results/ci/${{ github.run_id }}.md" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      - name: Commit the report
+        run: |
+          incr-bench/scripts/ci-commit-results.sh "incr-bench/results/ci/${{ github.run_id }}.md" "incr-bench: grok-build benchmark results of run ${{ github.run_id }}"
