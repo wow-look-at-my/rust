@@ -104,8 +104,10 @@ build() {
 	fi
 	if [[ -s $log.crates ]]; then
 		echo "slowest crate compiles $mode $step (crate:kind, seconds):"
-		sort -t$'\t' -k2,2nr "$log.crates" | head -n 8
-		sort -t$'\t' -k2,2nr "$log.crates" | head -n 20 | sed "s|^|$config\t$mode\t$step\t|" >> "${results%.tsv}.crates.tsv"
+		# sort writes to a file: a `sort | head` pipe fails under pipefail.
+		sort -t$'\t' -k2,2nr -o "$log.crates" "$log.crates"
+		sed -n 1,8p "$log.crates"
+		sed -n "1,20s|^|$config\t$mode\t$step\t|p" "$log.crates" >> "${results%.tsv}.crates.tsv"
 	fi
 	measure "$tdir" "$mode" "$step" "$(echo "$end - $start" | bc)"
 }
