@@ -389,12 +389,14 @@ impl SerializedDepGraph {
         // counting sort for `LazyNodeIndex`.
         let mut kinds = Vec::with_capacity(DepKind::NUM_VARIANTS);
         let mut offset = 0u32;
-        for _ in 0..(DepKind::NUM_VARIANTS) {
+        for k in 0..(DepKind::NUM_VARIANTS) {
             let len = d.read_u32();
+            // An anon key is not stored, so an anon kind is never looked up.
+            let len = if DepKind::from_u16(k as u16).is_anon() { 0 } else { len };
             kinds.push(LazyKindIndex { start: offset, len, map: OnceLock::new() });
             offset += len;
         }
-        debug_assert_eq!(offset as usize, node_count);
+        debug_assert!(offset as usize <= node_count);
 
         let session_count = d.read_u64();
 
@@ -402,12 +404,12 @@ impl SerializedDepGraph {
         // points at the next free slot in kind `k`'s range, so a kind's nodes end
         // up contiguous. Slots start as `None` and are each filled exactly once
         // (the counts sum to the number of non-`Null` nodes).
-        let mut nodes_by_kind = vec![None; node_count];
+        let mut nodes_by_kind = vec![None; offset as usize];
         let mut fill: Vec<u32> = kinds.iter().map(|k| k.start).collect();
         for (idx, node) in nodes.iter_enumerated() {
             // Unused indices from batch allocation stay `Null`; they carry no
             // encoded node and are never looked up by fingerprint, so skip them.
-            if node.kind == DepKind::Null {
+            if node.kind == DepKind::Null || node.kind.is_anon() {
                 continue;
             }
             let k = node.kind.as_usize();
@@ -495,6 +497,8 @@ const FLAG_KEY_IS_REF: u8 = 1 << 1;
 const FLAG_VALUE_IS_REF: u8 = 1 << 2;
 /// The value fingerprint is `Fingerprint::ZERO` and is not stored.
 const FLAG_VALUE_IS_ZERO: u8 = 1 << 3;
+/// The node is anon. Its key is never looked up again, so it is not stored and decodes as zero.
+const FLAG_KEY_IS_ABSENT: u8 = 1 << 4;
 
 /// One node of the serialized stream, without its edge targets.
 struct NodeRecord {
@@ -525,7 +529,9 @@ impl NodeRecord {
             SerializedDepNodeIndex::from_u32(u32::from_le_bytes(d.read_array()))
         };
 
-        let key_fingerprint = if flags & FLAG_KEY_IS_REF != 0 {
+        let key_fingerprint = if flags & FLAG_KEY_IS_ABSENT != 0 {
+            Fingerprint::ZERO.into()
+        } else if flags & FLAG_KEY_IS_REF != 0 {
             nodes[Self::decode_ref(d, index, nodes)].key_fingerprint
         } else {
             Fingerprint::from_le_bytes(d.read_array()).into()
@@ -631,7 +637,8 @@ impl NodeInfo<'_> {
 
         let index = index.as_u32();
         let key_fingerprint: Fingerprint = node.key_fingerprint.into();
-        let key_ref = refs.keys.replace(key_fingerprint, index);
+        let key_is_absent = node.kind.is_anon();
+        let key_ref = if key_is_absent { None } else { refs.keys.replace(key_fingerprint, index) };
         let value_is_zero = value_fingerprint == Fingerprint::ZERO;
         let value_ref =
             if value_is_zero { None } else { refs.values.replace(value_fingerprint, index) };
@@ -642,7 +649,9 @@ impl NodeInfo<'_> {
         if index_is_next {
             flags |= FLAG_INDEX_IS_NEXT;
         }
-        if key_ref.is_some() {
+        if key_is_absent {
+            flags |= FLAG_KEY_IS_ABSENT;
+        } else if key_ref.is_some() {
             flags |= FLAG_KEY_IS_REF;
         }
         if value_is_zero {
@@ -657,6 +666,7 @@ impl NodeInfo<'_> {
             e.write_array(index.to_le_bytes());
         }
         match key_ref {
+            _ if key_is_absent => {}
             Some(target) => e.emit_u32(index - target),
             None => e.write_array(key_fingerprint.to_le_bytes()),
         }
