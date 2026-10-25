@@ -1198,6 +1198,8 @@ impl_decodable_via_ref_decodable_for_foreign_types! {
     &'tcx [(ty::Clause<'tcx>, Span)],
     &'tcx [DefId],
     &'tcx [Spanned<MonoItem<'tcx>>],
+    &'tcx [rustc_middle::middle::dead_code::DeadCodeBodyUse],
+    &'tcx [rustc_middle::middle::reachable::ReachableBodyRef],
     &'tcx [ty::Variance],
     &'tcx rustc_ast::tokenstream::TokenStream,
     // tidy-alphabetical-end

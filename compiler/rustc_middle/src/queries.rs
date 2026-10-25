@@ -82,7 +82,7 @@ use rustc_target::spec::PanicStrategy;
 use crate::infer::canonical::{self, Canonical};
 use crate::lint::LintExpectation;
 use crate::middle::codegen_fn_attrs::{CodegenFnAttrs, SanitizerFnAttrs};
-use crate::middle::dead_code::DeadCodeLivenessSummary;
+use crate::middle::dead_code::{DeadCodeBodyUse, DeadCodeLivenessSummary};
 use crate::middle::debugger_visualizer::DebuggerVisualizerFile;
 use crate::middle::deduced_param_attrs::DeducedParamAttrs;
 use crate::middle::exported_symbols::{ExportedSymbol, SymbolExportInfo};
@@ -1235,6 +1235,12 @@ rustc_queries! {
         desc { "finding live symbols in crate" }
     }
 
+    /// The uses that the body of `key` adds to the dead-code worklist.
+    query dead_code_body_uses(key: LocalDefId) -> Result<&'tcx [DeadCodeBodyUse], ErrorGuaranteed> {
+        desc { "finding the dead-code uses in `{}`", tcx.def_path_str(key) }
+        cache_on_disk
+    }
+
     query check_mod_deathness(key: LocalModId) {
         desc { "checking deathness of variables in {}", describe_as_module(key, tcx) }
     }
@@ -1435,6 +1441,12 @@ rustc_queries! {
     query reachable_set(_: ()) -> &'tcx LocalDefIdSet {
         arena_cache
         desc { "reachability" }
+        cache_on_disk
+    }
+
+    /// The local items that the body of `key` refers to. Only `reachable_set` calls it.
+    query reachable_body_refs(key: LocalDefId) -> &'tcx [rustc_middle::middle::reachable::ReachableBodyRef] {
+        desc { "finding the items that `{}` refers to", tcx.def_path_str(key) }
         cache_on_disk
     }
 
