@@ -169,6 +169,12 @@ pub(crate) fn query_cache_path(incr_comp_session: &IncrCompSession) -> PathBuf {
     in_incr_comp_dir_sess(incr_comp_session, QUERY_CACHE_FILENAME)
 }
 
+/// The append-only file of query values that `-Zincremental-inplace-cache`
+/// shares across the sessions of a crate.
+pub(crate) fn query_values_path(incr_comp_session: &IncrCompSession) -> PathBuf {
+    incr_comp_session.new_session_directory.parent().unwrap().join("query-values.bin")
+}
+
 /// Locks a given session directory.
 fn lock_file_path(session_dir: &Path) -> PathBuf {
     let crate_dir = session_dir.parent().unwrap();

@@ -700,6 +700,15 @@ impl DepGraphData {
         matches!(self.colors.get(prev_index), DepNodeColor::Green(_))
     }
 
+    /// The current index of a previous-session node that is green, or `None`.
+    #[inline]
+    pub fn green_index(&self, prev_index: SerializedDepNodeIndex) -> Option<DepNodeIndex> {
+        match self.colors.get(prev_index) {
+            DepNodeColor::Green(index) => Some(index),
+            DepNodeColor::Red | DepNodeColor::Unknown => None,
+        }
+    }
+
     #[inline]
     pub fn prev_value_fingerprint_of(&self, prev_index: SerializedDepNodeIndex) -> Fingerprint {
         self.previous.value_fingerprint_for_index(prev_index)

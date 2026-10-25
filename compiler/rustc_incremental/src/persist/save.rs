@@ -73,7 +73,23 @@ pub(crate) fn save_dep_graph(tcx: TyCtxt<'_>) {
                     // quite a lot of work, especially in builds with few or no changes.
                     // Can we be smarter about how we identify values that need promotion?
                     // Can we promote values without decoding them into the memory cache?
-                    tcx.dep_graph.exec_cache_promotions(tcx);
+                    let inplace = sess.opts.unstable_opts.incremental_inplace_cache;
+                    // In the shared values file, the entry of a green node stays valid as is.
+                    if !(inplace && on_disk_cache.is_inplace()) {
+                        tcx.dep_graph.exec_cache_promotions(tcx);
+                    }
+
+                    if inplace {
+                        // The mapping stays open: a compaction copies entries out of it.
+                        let values_path = query_values_path(incr_comp_session);
+                        file_format::save_in(sess, query_cache_path, "query cache", |encoder| {
+                            tcx.sess.time("incr_comp_serialize_result_cache", || {
+                                on_disk_cache.serialize_inplace(tcx, encoder, &values_path)
+                            })
+                        });
+                        on_disk_cache.close_serialized_data_mmap();
+                        return;
+                    }
 
                     // Drop the memory map so that we can remove the file and write to it.
                     on_disk_cache.close_serialized_data_mmap();

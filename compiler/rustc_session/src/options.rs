@@ -2585,6 +2585,9 @@ options! {
     incremental_info: bool = (false, parse_bool, [UNTRACKED],
         "print high-level information about incremental reuse (or the lack thereof) \
         (default: no)"),
+    incremental_inplace_cache: bool = (false, parse_bool, [UNTRACKED],
+        "keep query values in an append-only file beside the session directories, so a session \
+        writes only the values it recomputed (default: no)"),
     incremental_keep_configs: Option<usize> = (None, parse_opt_number, [UNTRACKED],
         "number of build configurations of a crate to keep in the incremental directory, \
         most recently used first (default: keep all)"),
