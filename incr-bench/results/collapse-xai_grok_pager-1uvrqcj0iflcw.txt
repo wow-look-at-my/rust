@@ -1,0 +1,7 @@
+
+=== collapse xai_grok_pager-1uvrqcj0iflcw/dep-graph.bin  608856394 bytes, 9293301 nodes, 85443364 edges, names mapped
+key crate half: 4149061 distinct values; top value 7a2b367ec2479be0 has 3840724 nodes; 67 other values have >= 1000 nodes
+  local (top value)        3840724 nodes  41.3% |   272733590 B  44.8% of node bytes | top kinds: [def_kind 4% def_span 3% visibility 3% hir_owner 3% lower_to_hir 3%]
+  upstream (67 values)      385628 nodes   4.1% |    17515894 B   2.9% of node bytes | top kinds: [type_of 9% def_kind 8% generics_of 7% def_span 5% associated_item 5%]
+  tail (rare values)       5066949 nodes  54.5% |   318606233 B  52.3% of node bytes | top kinds: [layout_of 21% implementations_of_trait 9% fn_abi_of_instance_no_deduced_attrs 8% symbol_name 8% resolve_instance_raw 7%]
+  most common upstream values: 49b6f044c3c5f9d3=66563 819ee25cdd7f6719=37784 6aaa253c96ed8471=22441 6ee2287fca6b1018=21364 39ba53cfc80f8fec=19799 1b63011abee2bcbc=17758 43a9e3d9207f4d4f=14121 878850e2ad76ffc2=10957

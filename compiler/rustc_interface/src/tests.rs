@@ -729,6 +729,8 @@ fn test_unstable_options_tracking_hash() {
     untracked!(future_incompat_test, true);
     untracked!(identify_regions, true);
     untracked!(incremental_info, true);
+    untracked!(incremental_keep_configs, Some(1));
+    untracked!(incremental_size_cap, Some(1));
     untracked!(incremental_verify_ich, true);
     untracked!(input_stats, true);
     untracked!(link_native_libraries, false);

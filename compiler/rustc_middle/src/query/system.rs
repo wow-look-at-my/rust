@@ -29,10 +29,14 @@ pub struct QueryVTable<'tcx, C: QueryCache> {
 
     /// True if this query has the `eval_always` modifier.
     pub eval_always: bool,
+    /// True if this query has the `anon` modifier.
+    pub anon: bool,
     /// True if this query has the `depth_limit` modifier.
     pub depth_limit: bool,
     /// True if this query has the `feedable` modifier.
     pub feedable: bool,
+    /// True if this query has the `global_input` modifier. A read of it records no edge.
+    pub global_input: bool,
 
     pub cache_on_disk_local: bool,
     pub separate_provide_extern: bool,

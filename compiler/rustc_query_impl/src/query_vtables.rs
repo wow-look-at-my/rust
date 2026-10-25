@@ -28,12 +28,14 @@ macro_rules! define_queries {
                 fn $name:ident($K:ty) -> $V:ty
                 {
                     // Search for (QMODLIST) to find all occurrences of this query modifier list.
+                    anon: $anon:literal,
                     arena_cache: $arena_cache:literal,
                     cache_on_disk: $cache_on_disk:literal,
                     depth_limit: $depth_limit:literal,
                     desc: $desc:expr,
                     eval_always: $eval_always:literal,
                     feedable: $feedable:literal,
+                    global_input: $global_input:literal,
                     handle_cycle_error: $handle_cycle_error:literal,
                     no_force: $no_force:literal,
                     no_hash: $no_hash:literal,
@@ -145,9 +147,11 @@ macro_rules! define_queries {
                     use rustc_middle::queries::$name::Value;
                     QueryVTable {
                         name: stringify!($name),
+                        anon: $anon,
                         eval_always: $eval_always,
                         depth_limit: $depth_limit,
                         feedable: $feedable,
+                        global_input: $global_input,
                         dep_kind: rustc_middle::dep_graph::DepKind::$name,
                         state: Default::default(),
                         cache: if track_present {

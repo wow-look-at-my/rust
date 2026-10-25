@@ -1,0 +1,10 @@
+github.com/davecgh/go-spew v1.1.1 git:8991bc29aa16c548c550c7ff78260e27b9ab7c73
+github.com/davecgh/go-spew v1.1.1/go.mod git:8991bc29aa16c548c550c7ff78260e27b9ab7c73
+github.com/pmezard/go-difflib v1.0.0 git:792786c7400a136282c1664665ae0a8db921c6c2
+github.com/pmezard/go-difflib v1.0.0/go.mod git:792786c7400a136282c1664665ae0a8db921c6c2
+github.com/stretchr/testify v1.11.1 git:2a57335dc9cd6833daa820bc94d9b40c26a7917d
+github.com/stretchr/testify v1.11.1/go.mod git:2a57335dc9cd6833daa820bc94d9b40c26a7917d
+gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 git:20d25e2804050c1cd24a7eea1e7a6447dd0e74ec
+gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod git:20d25e2804050c1cd24a7eea1e7a6447dd0e74ec
+gopkg.in/yaml.v3 v3.0.1 git:f6f7691b1fdeb513f56608cd2c32c51f8194bf51
+gopkg.in/yaml.v3 v3.0.1/go.mod git:f6f7691b1fdeb513f56608cd2c32c51f8194bf51

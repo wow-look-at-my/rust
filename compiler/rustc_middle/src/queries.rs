@@ -784,6 +784,7 @@ rustc_queries! {
     /// Normally you would just use `tcx.erase_and_anonymize_regions(value)`,
     /// however, which uses this query as a kind of cache.
     query erase_and_anonymize_regions_ty(ty: Ty<'tcx>) -> Ty<'tcx> {
+        anon
         desc { "erasing regions from `{}`", ty }
         // Not hashing the return value appears to give marginally better perf for this query,
         // which should always be marked green for having no dependencies anyway.
@@ -1457,7 +1458,6 @@ rustc_queries! {
     /// look up the correct symbol name of instances from upstream crates.
     query symbol_name(key: ty::Instance<'tcx>) -> ty::SymbolName<'tcx> {
         desc { "computing the symbol for `{}`", key }
-        cache_on_disk
     }
 
     query def_kind(def_id: DefId) -> DefKind {
@@ -1681,6 +1681,7 @@ rustc_queries! {
     /// Trait selection queries. These are best used by invoking `ty.is_copy_modulo_regions()`,
     /// `ty.is_copy()`, etc, since that will prune the environment where possible.
     query is_copy_raw(env: ty::PseudoCanonicalInput<'tcx, Ty<'tcx>>) -> bool {
+        anon
         desc { "computing whether `{}` is `Copy`", env.value }
     }
     /// Trait selection queries. These are best used by invoking `ty.is_use_cloned_modulo_regions()`,
@@ -1710,6 +1711,7 @@ rustc_queries! {
     }
     /// Query backing `Ty::needs_drop`.
     query needs_drop_raw(env: ty::PseudoCanonicalInput<'tcx, Ty<'tcx>>) -> bool {
+        anon
         desc { "computing whether `{}` needs drop", env.value }
     }
     /// Query backing `Ty::needs_async_drop`.
@@ -1784,6 +1786,7 @@ rustc_queries! {
     query layout_of(
         key: ty::PseudoCanonicalInput<'tcx, Ty<'tcx>>
     ) -> Result<ty::layout::TyAndLayout<'tcx>, &'tcx ty::layout::LayoutError<'tcx>> {
+        anon
         depth_limit
         desc { "computing layout of `{}`", key.value }
         handle_cycle_error
@@ -1813,6 +1816,7 @@ rustc_queries! {
     query fn_abi_of_instance_no_deduced_attrs(
         key: ty::PseudoCanonicalInput<'tcx, (ty::Instance<'tcx>, &'tcx ty::List<Ty<'tcx>>)>
     ) -> Result<&'tcx rustc_target::callconv::FnAbi<'tcx, Ty<'tcx>>, &'tcx ty::layout::FnAbiError<'tcx>> {
+        anon
         desc { "computing unadjusted call ABI of `{}`", key.value.0 }
     }
 
@@ -2088,6 +2092,7 @@ rustc_queries! {
     /// Given a crate and a trait, look up all impls of that trait in the crate.
     /// Return `(impl_id, self_ty)`.
     query implementations_of_trait(_: (CrateNum, DefId)) -> &'tcx [(DefId, Option<SimplifiedType>)] {
+        anon
         desc { "looking up implementations of a trait in a crate" }
         separate_provide_extern
     }
@@ -2547,6 +2552,7 @@ rustc_queries! {
     query try_normalize_generic_arg_after_erasing_regions(
         goal: PseudoCanonicalInput<'tcx, GenericArg<'tcx>>
     ) -> Result<GenericArg<'tcx>, NoSolution> {
+        anon
         desc { "normalizing `{}`", goal.value }
     }
 
@@ -2604,6 +2610,7 @@ rustc_queries! {
         &'tcx Canonical<'tcx, canonical::QueryResponse<'tcx, ()>>,
         NoSolution,
     > {
+        anon
         desc { "evaluating `type_op_prove_predicate` `{:?}`", goal.canonical.value.value }
     }
 
@@ -2672,6 +2679,7 @@ rustc_queries! {
     query evaluate_root_goal_for_proof_tree_raw(
         key: (solve::CanonicalInput<'tcx>, usize)
     ) -> (solve::QueryResult<'tcx>, &'tcx solve::inspect::Probe<TyCtxt<'tcx>>, RequiredDepth) {
+        anon
         no_hash
         desc { "computing proof tree for `{}` with depth `{}`", key.0.canonical.value.goal.predicate, key.1 }
     }
@@ -2692,6 +2700,7 @@ rustc_queries! {
 
     query features_query(_: ()) -> &'tcx rustc_feature::Features {
         feedable
+        global_input
         desc { "looking up enabled feature gates" }
     }
 
@@ -2713,6 +2722,7 @@ rustc_queries! {
     query resolve_instance_raw(
         key: ty::PseudoCanonicalInput<'tcx, (DefId, GenericArgsRef<'tcx>)>
     ) -> Result<Option<ty::Instance<'tcx>>, ErrorGuaranteed> {
+        anon
         desc { "resolving instance `{}`", ty::Instance::new_raw(key.value.0, key.value.1) }
     }
 
@@ -2722,6 +2732,7 @@ rustc_queries! {
 
     query limits(key: ()) -> Limits {
         feedable
+        global_input
         desc { "looking up limits" }
     }
 
