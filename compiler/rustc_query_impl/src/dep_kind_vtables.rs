@@ -1,5 +1,5 @@
 use rustc_middle::arena::Arena;
-use rustc_middle::dep_graph::{DepKindVTable, DepNodeKey, KeyFingerprintStyle};
+use rustc_middle::dep_graph::{DepKind, DepKindVTable, DepNodeKey, KeyFingerprintStyle};
 use rustc_middle::query::QueryCache;
 use rustc_span::bug;
 
@@ -18,6 +18,7 @@ mod non_query {
 
     pub(crate) fn Null<'tcx>() -> DepKindVTable<'tcx> {
         DepKindVTable {
+            is_anon: false,
             is_eval_always: false,
             key_fingerprint_style: KeyFingerprintStyle::Unit,
             force_from_dep_node_fn: Some(|_, dep_node, _| {
@@ -29,6 +30,7 @@ mod non_query {
 
     pub(crate) fn Red<'tcx>() -> DepKindVTable<'tcx> {
         DepKindVTable {
+            is_anon: false,
             is_eval_always: false,
             key_fingerprint_style: KeyFingerprintStyle::Unit,
             force_from_dep_node_fn: Some(|_, dep_node, _| {
@@ -40,6 +42,7 @@ mod non_query {
 
     pub(crate) fn SideEffect<'tcx>() -> DepKindVTable<'tcx> {
         DepKindVTable {
+            is_anon: false,
             is_eval_always: false,
             key_fingerprint_style: KeyFingerprintStyle::Unit,
             force_from_dep_node_fn: Some(|tcx, _, prev_index| {
@@ -52,6 +55,7 @@ mod non_query {
 
     pub(crate) fn AnonZeroDeps<'tcx>() -> DepKindVTable<'tcx> {
         DepKindVTable {
+            is_anon: true,
             is_eval_always: false,
             key_fingerprint_style: KeyFingerprintStyle::Opaque,
             force_from_dep_node_fn: Some(|_, _, _| bug!("cannot force an anon node")),
@@ -61,6 +65,7 @@ mod non_query {
 
     pub(crate) fn TraitSelect<'tcx>() -> DepKindVTable<'tcx> {
         DepKindVTable {
+            is_anon: true,
             is_eval_always: false,
             key_fingerprint_style: KeyFingerprintStyle::Unit,
             force_from_dep_node_fn: None,
@@ -70,6 +75,7 @@ mod non_query {
 
     pub(crate) fn CompileCodegenUnit<'tcx>() -> DepKindVTable<'tcx> {
         DepKindVTable {
+            is_anon: false,
             is_eval_always: false,
             key_fingerprint_style: KeyFingerprintStyle::Opaque,
             force_from_dep_node_fn: None,
@@ -79,6 +85,7 @@ mod non_query {
 
     pub(crate) fn CompileMonoItem<'tcx>() -> DepKindVTable<'tcx> {
         DepKindVTable {
+            is_anon: false,
             is_eval_always: false,
             key_fingerprint_style: KeyFingerprintStyle::Opaque,
             force_from_dep_node_fn: None,
@@ -88,6 +95,7 @@ mod non_query {
 
     pub(crate) fn Metadata<'tcx>() -> DepKindVTable<'tcx> {
         DepKindVTable {
+            is_anon: false,
             is_eval_always: false,
             key_fingerprint_style: KeyFingerprintStyle::Unit,
             force_from_dep_node_fn: None,
@@ -117,6 +125,7 @@ where
     let can_recover = key_fingerprint_style.is_maybe_recoverable();
 
     DepKindVTable {
+        is_anon,
         is_eval_always,
         key_fingerprint_style,
         force_from_dep_node_fn: (can_recover && !is_no_force).then_some(
@@ -196,5 +205,10 @@ pub(crate) fn make_dep_kind_vtables<'tcx>(arena: &'tcx Arena<'tcx>) -> &'tcx [De
         rustc_middle::queries::rustc_with_all_queries! { define_dep_kind_vtables! };
 
     // Non-query vtables must come before query vtables, to match the order of `DepKind`.
-    arena.alloc_from_iter(nq_vtables.into_iter().chain(q_vtables.into_iter()))
+    let vtables = arena.alloc_from_iter(nq_vtables.into_iter().chain(q_vtables.into_iter()));
+    // The dep graph encoder has no vtables and reads `DepKind::is_anon` instead.
+    for (i, vtable) in vtables.iter().enumerate() {
+        assert_eq!(vtable.is_anon, DepKind::from_u16(i as u16).is_anon());
+    }
+    vtables
 }
