@@ -22,6 +22,7 @@ grok)
 	body_from='    let t = tier.trim().to_ascii_lowercase();'
 	body_to='    let t = tier.trim().to_lowercase();'
 	comment_after=''
+	profile_crates='xai_grok_shell:lib xai_grok_pager:lib xai_grok_pager:test'
 	;;
 syn)
 	cmd=(cargo build -q --locked --workspace)
@@ -30,6 +31,7 @@ syn)
 	body_from='    file.shebang = shebang;'
 	body_to='    file.shebang = shebang.filter(|s| !s.is_empty());'
 	comment_after='    // Strip the BOM if it is present'
+	profile_crates='syn:lib'
 	;;
 *)
 	echo "ci-bench: unknown workload $workload" >&2
@@ -137,6 +139,26 @@ edit() {
 	fi
 }
 
+# One more comment edit, outside the measured steps, that self-profiles the slowest crates.
+profile_comment_edit() {
+	local tdir=$1 dir=$target_root/profile prof
+	rm -rf "$dir"
+	edit comment
+	if ! BENCH_PROFILE_DIR="$dir" BENCH_PROFILE_CRATES="$profile_crates" CARGO_TARGET_DIR="$tdir" CARGO_INCREMENTAL=1 "${cmd[@]}" > "$target_root/profile.log" 2>&1; then
+		tail -n 80 "$target_root/profile.log" >&2
+		echo "ci-bench: the profiled comment edit failed" >&2
+		exit 1
+	fi
+	git checkout -q -- .
+	for prof in "$dir"/*/*.mm_profdata; do
+		[[ -e $prof ]] || { echo "ci-bench: the profiled edit wrote no profile for $profile_crates" >&2; exit 1; }
+		echo "self-profile of the comment edit, $(basename "$(dirname "$prof")"):"
+		summarize summarize "$prof" > "$dir/summary.txt"
+		sed -n 1,40p "$dir/summary.txt" | cut -c1-200
+	done
+	rm -rf "$dir"
+}
+
 run_mode() {
 	local mode=$1 tdir=$target_root/$1
 	rm -rf "$tdir"
@@ -147,6 +169,9 @@ run_mode() {
 	done
 	git checkout -q -- .
 	build "$tdir" "$mode" revert
+	if [[ $mode == incr ]] && command -v summarize > /dev/null; then
+		profile_comment_edit "$tdir"
+	fi
 	# A changed profile or feature set is a new build configuration, and cargo gives it new crate dirs.
 	CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false build "$tdir" "$mode" config-change
 	rm -rf "$tdir"

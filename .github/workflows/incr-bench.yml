@@ -157,6 +157,10 @@ jobs:
         working-directory: src
         run: rustup show
 
+      # The bench self-profiles one extra comment edit and prints the summary.
+      - name: Install summarize
+        run: cargo install --locked --git https://github.com/rust-lang/measureme --rev e22edccd0364a3058e8e618f51988d64db0b3e10 summarize
+
       - name: Benchmark
         run: bench/incr-bench/scripts/ci-bench.sh "${{ matrix.workload }}" src toolchain/bin/rustc "${{ runner.temp }}/targets" "results/${{ matrix.leg }}.tsv"
         env:
