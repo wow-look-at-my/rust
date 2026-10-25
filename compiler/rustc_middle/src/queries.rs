@@ -1784,6 +1784,7 @@ rustc_queries! {
     query layout_of(
         key: ty::PseudoCanonicalInput<'tcx, Ty<'tcx>>
     ) -> Result<ty::layout::TyAndLayout<'tcx>, &'tcx ty::layout::LayoutError<'tcx>> {
+        anon
         depth_limit
         desc { "computing layout of `{}`", key.value }
         handle_cycle_error
