@@ -2691,6 +2691,7 @@ rustc_queries! {
 
     query features_query(_: ()) -> &'tcx rustc_feature::Features {
         feedable
+        global_input
         desc { "looking up enabled feature gates" }
     }
 
@@ -2721,6 +2722,7 @@ rustc_queries! {
 
     query limits(key: ()) -> Limits {
         feedable
+        global_input
         desc { "looking up limits" }
     }
 

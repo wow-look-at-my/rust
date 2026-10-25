@@ -613,7 +613,9 @@ fn ensure_can_skip_execution<'tcx, C: QueryCache>(
             false
         }
         Some((_, dep_node_index)) => {
-            tcx.dep_graph.read_index(dep_node_index);
+            if !query.global_input {
+                tcx.dep_graph.read_index(dep_node_index);
+            }
             tcx.prof.query_cache_hit(dep_node_index.into());
 
             // We can skip execution for this key if the
@@ -658,7 +660,9 @@ pub(super) fn execute_query_incr_inner<'tcx, C: QueryCache>(
 
     let (result, dep_node_index) =
         try_execute_query::<C, true>(query, tcx, span, key, Some(dep_node));
-    if let Some(dep_node_index) = dep_node_index {
+    if let Some(dep_node_index) = dep_node_index
+        && !query.global_input
+    {
         tcx.dep_graph.read_index(dep_node_index)
     }
     Some(result)

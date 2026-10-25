@@ -61,6 +61,9 @@ pub(crate) struct eval_always;
 /// Generate a `feed` method to set the query's value from another query.
 pub(crate) struct feedable;
 
+/// # `global_input` query modifier A read of this query records no dep graph edge.
+pub(crate) struct global_input;
+
 /// # `handle_cycle_error` query modifier
 ///
 /// The default behaviour for a query cycle is to emit a cycle error and halt
