@@ -62,6 +62,9 @@ use super::graph::{CurrentDepGraph, DepNodeColorMap, DesiredColor, TrySetColorRe
 use super::retained::RetainedDepGraph;
 use super::{DepKind, DepNode, DepNodeIndex};
 
+#[cfg(test)]
+mod tests;
+
 // The maximum value of `SerializedDepNodeIndex` leaves the upper two bits
 // unused so that we can store multiple index types in `CompressedHybridIndex`,
 // and use those bits to encode which index type it contains.
@@ -347,33 +350,32 @@ impl SerializedDepGraph {
         // least (34 byte header + 1 byte len + 64 bytes edge data), which is ~1%. A 2-byte leb128
         // length is about the same fractional overhead and it amortizes for yet greater lengths.
         let mut edge_list_data =
-            Vec::with_capacity(graph_bytes - node_count * size_of::<SerializedNodeHeader>());
+            Vec::with_capacity(graph_bytes.saturating_sub(node_count * NodeRecord::MIN_SIZE));
 
+        let mut prev_index = None;
         for _ in 0..node_count {
-            // Decode the header for this edge; the header packs together as many of the fixed-size
-            // fields as possible to limit the number of times we update decoder state.
-            let node_header = SerializedNodeHeader { bytes: d.read_array() };
-
-            let index = node_header.index();
+            let record = NodeRecord::decode(d, prev_index, &nodes, &value_fingerprints);
+            let index = record.index;
+            prev_index = Some(index);
 
             let node = &mut nodes[index];
             // Make sure there's no duplicate indices in the dep graph.
-            assert!(node_header.node().kind != DepKind::Null && node.kind == DepKind::Null);
-            *node = node_header.node();
+            assert!(record.node.kind != DepKind::Null && node.kind == DepKind::Null);
+            *node = record.node;
 
-            value_fingerprints[index] = node_header.value_fingerprint();
-
-            // If the length of this node's edge list is small, the length is stored in the header.
-            // If it is not, we fall back to another decoder call.
-            let num_edges = node_header.len().unwrap_or_else(|| d.read_u32());
+            value_fingerprints[index] = record.value_fingerprint;
 
             // The edges index list uses the same varint strategy as rmeta tables; we select the
             // number of byte elements per-array not per-element. This lets us read the whole edge
             // list for a node with one decoder call and also use the on-disk format in memory.
-            let edges_len_bytes = node_header.bytes_per_index() * (num_edges as usize);
+            let edges_len_bytes = record.head.bytes_per_index() * (record.num_edges as usize);
             // The in-memory structure for the edges list stores the byte width of the edges on
             // this node with the offset into the global edge data array.
-            let edges_header = node_header.edges_header(&edge_list_data, num_edges);
+            let edges_header = EdgeHeader {
+                repr: (edge_list_data.len() << DEP_NODE_WIDTH_BITS)
+                    | (record.head.bytes_per_index() - 1),
+                num_edges: record.num_edges,
+            };
 
             edge_list_data.extend(d.read_raw_bytes(edges_len_bytes));
 
@@ -431,32 +433,9 @@ impl SerializedDepGraph {
     }
 }
 
-/// A packed representation of all the fixed-size fields in a `NodeInfo`.
-///
-/// This stores in one byte array:
-/// * The value `Fingerprint` in the `NodeInfo`
-/// * The key `Fingerprint` in `DepNode` that is in this `NodeInfo`
-/// * The `DepKind`'s discriminant (a u16, but not all bits are used...)
-/// * The byte width of the encoded edges for this node
-/// * In whatever bits remain, the length of the edge list for this node, if it fits
-struct SerializedNodeHeader {
-    // 2 bytes for the DepNode
-    // 4 bytes for the index
-    // 16 for Fingerprint in DepNode
-    // 16 for Fingerprint in NodeInfo
-    bytes: [u8; 38],
-}
-
-// The fields of a `SerializedNodeHeader`, this struct is an implementation detail and exists only
-// to make the implementation of `SerializedNodeHeader` simpler.
-struct Unpacked {
-    len: Option<u32>,
-    bytes_per_index: usize,
-    kind: DepKind,
-    index: SerializedDepNodeIndex,
-    key_fingerprint: PackedFingerprint,
-    value_fingerprint: Fingerprint,
-}
+/// The first a couple of bytes of a node record.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct NodeHead(u16);
 
 // Bit fields, where
 // M: bits used to store the length of a node's edge list
@@ -465,7 +444,7 @@ struct Unpacked {
 // 0..M    length of the edge
 // M..M+N  bytes per index
 // M+N..16 kind
-impl SerializedNodeHeader {
+impl NodeHead {
     const TOTAL_BITS: usize = size_of::<DepKind>() * 8;
     const LEN_BITS: usize = Self::TOTAL_BITS - Self::KIND_BITS - Self::WIDTH_BITS;
     const WIDTH_BITS: usize = DEP_NODE_WIDTH_BITS;
@@ -473,16 +452,10 @@ impl SerializedNodeHeader {
     const MAX_INLINE_LEN: usize = (u16::MAX as usize >> (Self::TOTAL_BITS - Self::LEN_BITS)) - 1;
 
     #[inline]
-    fn new(
-        node: &DepNode,
-        index: DepNodeIndex,
-        value_fingerprint: Fingerprint,
-        edge_max_index: u32,
-        edge_count: usize,
-    ) -> Self {
+    fn new(kind: DepKind, edge_max_index: u32, edge_count: usize) -> Self {
         debug_assert_eq!(Self::TOTAL_BITS, Self::LEN_BITS + Self::WIDTH_BITS + Self::KIND_BITS);
 
-        let mut head = node.kind.as_u16();
+        let mut head = kind.as_u16();
 
         let free_bytes = edge_max_index.leading_zeros() as usize / 8;
         let bytes_per_index = (DEP_NODE_SIZE - free_bytes).saturating_sub(1);
@@ -494,79 +467,141 @@ impl SerializedNodeHeader {
             head |= (edge_count as u16 + 1) << (Self::KIND_BITS + Self::WIDTH_BITS);
         }
 
-        let hash: Fingerprint = node.key_fingerprint.into();
-
-        // Using half-open ranges ensures an unconditional panic if we get the magic numbers wrong.
-        let mut bytes = [0u8; 38];
-        bytes[..2].copy_from_slice(&head.to_le_bytes());
-        bytes[2..6].copy_from_slice(&index.as_u32().to_le_bytes());
-        bytes[6..22].copy_from_slice(&hash.to_le_bytes());
-        bytes[22..].copy_from_slice(&value_fingerprint.to_le_bytes());
-
-        #[cfg(debug_assertions)]
-        {
-            let res = Self { bytes };
-            assert_eq!(value_fingerprint, res.value_fingerprint());
-            assert_eq!(*node, res.node());
-            if let Some(len) = res.len() {
-                assert_eq!(edge_count, len as usize);
-            }
-        }
-        Self { bytes }
+        let head = Self(head);
+        debug_assert_eq!(head.kind(), kind);
+        debug_assert!(head.len().is_none_or(|len| len as usize == edge_count));
+        head
     }
 
     #[inline]
-    fn unpack(&self) -> Unpacked {
-        let head = u16::from_le_bytes(self.bytes[..2].try_into().unwrap());
-        let index = u32::from_le_bytes(self.bytes[2..6].try_into().unwrap());
-        let key_fingerprint = self.bytes[6..22].try_into().unwrap();
-        let value_fingerprint = self.bytes[22..].try_into().unwrap();
-
-        let kind = head & mask(Self::KIND_BITS) as u16;
-        let bytes_per_index = (head >> Self::KIND_BITS) & mask(Self::WIDTH_BITS) as u16;
-        let len = (head as u32) >> (Self::WIDTH_BITS + Self::KIND_BITS);
-
-        Unpacked {
-            len: len.checked_sub(1),
-            bytes_per_index: bytes_per_index as usize + 1,
-            kind: DepKind::from_u16(kind),
-            index: SerializedDepNodeIndex::from_u32(index),
-            key_fingerprint: Fingerprint::from_le_bytes(key_fingerprint).into(),
-            value_fingerprint: Fingerprint::from_le_bytes(value_fingerprint),
-        }
+    fn kind(self) -> DepKind {
+        DepKind::from_u16(self.0 & mask(Self::KIND_BITS) as u16)
     }
 
     #[inline]
-    fn len(&self) -> Option<u32> {
-        self.unpack().len
+    fn bytes_per_index(self) -> usize {
+        ((self.0 >> Self::KIND_BITS) & mask(Self::WIDTH_BITS) as u16) as usize + 1
     }
 
     #[inline]
-    fn bytes_per_index(&self) -> usize {
-        self.unpack().bytes_per_index
+    fn len(self) -> Option<u32> {
+        ((self.0 as u32) >> (Self::WIDTH_BITS + Self::KIND_BITS)).checked_sub(1)
+    }
+}
+
+/// The index is the node's index plus one. Otherwise it follows as a fixed `u32`.
+const FLAG_INDEX_IS_NEXT: u8 = 1 << 0;
+/// The key fingerprint is the key of an earlier node. A leb128 distance back to it follows.
+const FLAG_KEY_IS_REF: u8 = 1 << 1;
+/// The value fingerprint is the value of an earlier node. A leb128 distance back to it follows.
+const FLAG_VALUE_IS_REF: u8 = 1 << 2;
+/// The value fingerprint is `Fingerprint::ZERO` and is not stored.
+const FLAG_VALUE_IS_ZERO: u8 = 1 << 3;
+
+/// One node of the serialized stream, without its edge targets.
+struct NodeRecord {
+    head: NodeHead,
+    index: SerializedDepNodeIndex,
+    node: DepNode,
+    value_fingerprint: Fingerprint,
+    num_edges: u32,
+}
+
+impl NodeRecord {
+    /// The head, the flags, and nothing else.
+    const MIN_SIZE: usize = 3;
+
+    fn decode(
+        d: &mut MemDecoder<'_>,
+        prev_index: Option<SerializedDepNodeIndex>,
+        nodes: &IndexSlice<SerializedDepNodeIndex, DepNode>,
+        value_fingerprints: &IndexSlice<SerializedDepNodeIndex, Fingerprint>,
+    ) -> Self {
+        let head = NodeHead(u16::from_le_bytes(d.read_array()));
+        let flags = d.read_u8();
+
+        let index = if flags & FLAG_INDEX_IS_NEXT != 0 {
+            let prev = prev_index.expect("dep graph node refers to a missing previous node");
+            SerializedDepNodeIndex::from_u32(prev.as_u32() + 1)
+        } else {
+            SerializedDepNodeIndex::from_u32(u32::from_le_bytes(d.read_array()))
+        };
+
+        let key_fingerprint = if flags & FLAG_KEY_IS_REF != 0 {
+            nodes[Self::decode_ref(d, index, nodes)].key_fingerprint
+        } else {
+            Fingerprint::from_le_bytes(d.read_array()).into()
+        };
+
+        let value_fingerprint = if flags & FLAG_VALUE_IS_ZERO != 0 {
+            Fingerprint::ZERO
+        } else if flags & FLAG_VALUE_IS_REF != 0 {
+            value_fingerprints[Self::decode_ref(d, index, nodes)]
+        } else {
+            Fingerprint::from_le_bytes(d.read_array())
+        };
+
+        let num_edges = head.len().unwrap_or_else(|| d.read_u32());
+        let node = DepNode { kind: head.kind(), key_fingerprint };
+        NodeRecord { head, index, node, value_fingerprint, num_edges }
     }
 
-    #[inline]
-    fn index(&self) -> SerializedDepNodeIndex {
-        self.unpack().index
+    fn decode_ref(
+        d: &mut MemDecoder<'_>,
+        index: SerializedDepNodeIndex,
+        nodes: &IndexSlice<SerializedDepNodeIndex, DepNode>,
+    ) -> SerializedDepNodeIndex {
+        let distance = d.read_u32();
+        let target = index
+            .as_u32()
+            .checked_sub(distance)
+            .filter(|_| distance != 0)
+            .map(SerializedDepNodeIndex::from_u32)
+            .expect("dep graph back-reference does not point at an earlier node");
+        assert!(nodes[target].kind != DepKind::Null, "dep graph back-reference to a missing node");
+        target
+    }
+}
+
+/// A direct-mapped table from a fingerprint to the last node this thread
+/// wrote with it.
+struct FingerprintRefs {
+    slots: Box<[(Fingerprint, u32)]>,
+}
+
+impl FingerprintRefs {
+    const SLOTS: usize = 1 << 17;
+
+    fn new() -> Self {
+        FingerprintRefs { slots: vec![(Fingerprint::ZERO, u32::MAX); Self::SLOTS].into() }
     }
 
+    /// Returns the last earlier node with `fingerprint`, and records `index` in its place.
     #[inline]
-    fn value_fingerprint(&self) -> Fingerprint {
-        self.unpack().value_fingerprint
+    fn replace(&mut self, fingerprint: Fingerprint, index: u32) -> Option<u32> {
+        // Both halves feed the slot, because a `DefPathHash` key has the crate id as one half.
+        let (a, b) = fingerprint.split();
+        let slot = (a.as_u64() ^ b.as_u64()) as usize & (Self::SLOTS - 1);
+        let (old_fingerprint, old_index) =
+            mem::replace(&mut self.slots[slot], (fingerprint, index));
+        (old_fingerprint == fingerprint && old_index < index).then_some(old_index)
     }
+}
 
-    #[inline]
-    fn node(&self) -> DepNode {
-        let Unpacked { kind, key_fingerprint, .. } = self.unpack();
-        DepNode { kind, key_fingerprint }
-    }
+/// What a thread's encoder remembers about the nodes it already wrote.
+struct EncoderRefs {
+    /// The index of the last node in the unflushed buffer.
+    prev_index: Option<u32>,
+    keys: FingerprintRefs,
+    values: FingerprintRefs,
+}
 
-    #[inline]
-    fn edges_header(&self, edge_list_data: &[u8], num_edges: u32) -> EdgeHeader {
-        EdgeHeader {
-            repr: (edge_list_data.len() << DEP_NODE_WIDTH_BITS) | (self.bytes_per_index() - 1),
-            num_edges,
+impl EncoderRefs {
+    fn new() -> Self {
+        EncoderRefs {
+            prev_index: None,
+            keys: FingerprintRefs::new(),
+            values: FingerprintRefs::new(),
         }
     }
 }
@@ -579,20 +614,56 @@ struct NodeInfo<'a> {
 }
 
 impl NodeInfo<'_> {
-    fn encode(&self, e: &mut MemEncoder, index: DepNodeIndex) {
+    fn encode(&self, e: &mut MemEncoder, index: DepNodeIndex, refs: &mut EncoderRefs) {
         let NodeInfo { ref node, value_fingerprint, edges } = *self;
         // The largest index picks the byte width of the edge list.
         let edge_max = edges.iter().map(|e| e.as_u32()).max().unwrap_or(0);
-        let header =
-            SerializedNodeHeader::new(node, index, value_fingerprint, edge_max, edges.len());
-        e.write_array(header.bytes);
+        let head = NodeHead::new(node.kind, edge_max, edges.len());
 
-        if header.len().is_none() {
+        let index = index.as_u32();
+        let key_fingerprint: Fingerprint = node.key_fingerprint.into();
+        let key_ref = refs.keys.replace(key_fingerprint, index);
+        let value_is_zero = value_fingerprint == Fingerprint::ZERO;
+        let value_ref =
+            if value_is_zero { None } else { refs.values.replace(value_fingerprint, index) };
+        let index_is_next = refs.prev_index.is_some_and(|prev| prev + 1 == index);
+        refs.prev_index = Some(index);
+
+        let mut flags = 0;
+        if index_is_next {
+            flags |= FLAG_INDEX_IS_NEXT;
+        }
+        if key_ref.is_some() {
+            flags |= FLAG_KEY_IS_REF;
+        }
+        if value_is_zero {
+            flags |= FLAG_VALUE_IS_ZERO;
+        } else if value_ref.is_some() {
+            flags |= FLAG_VALUE_IS_REF;
+        }
+
+        e.write_array(head.0.to_le_bytes());
+        e.emit_u8(flags);
+        if !index_is_next {
+            e.write_array(index.to_le_bytes());
+        }
+        match key_ref {
+            Some(target) => e.emit_u32(index - target),
+            None => e.write_array(key_fingerprint.to_le_bytes()),
+        }
+        if !value_is_zero {
+            match value_ref {
+                Some(target) => e.emit_u32(index - target),
+                None => e.write_array(value_fingerprint.to_le_bytes()),
+            }
+        }
+
+        if head.len().is_none() {
             // The edges are all unique and the number of unique indices is less than u32::MAX.
             e.emit_u32(edges.len().try_into().unwrap());
         }
 
-        let bytes_per_index = header.bytes_per_index();
+        let bytes_per_index = head.bytes_per_index();
         for node_index in edges.iter() {
             e.write_with(|dest| {
                 *dest = node_index.as_u32().to_le_bytes();
@@ -612,6 +683,7 @@ struct LocalEncoderState {
     next_node_index: u32,
     remaining_node_index: u32,
     encoder: MemEncoder,
+    refs: EncoderRefs,
     node_count: usize,
     edge_count: usize,
 
@@ -654,6 +726,7 @@ impl EncoderState {
                     edge_count: 0,
                     node_count: 0,
                     encoder: MemEncoder::new(),
+                    refs: EncoderRefs::new(),
                     kind_stats: iter::repeat_n(0, DepKind::NUM_VARIANTS).collect(),
                 })
             }),
@@ -733,6 +806,7 @@ impl EncoderState {
         if data.len() > 64 * 1024 {
             self.file.lock().as_mut().unwrap().emit_raw_bytes(&data[..]);
             data.clear();
+            local.refs.prev_index = None;
         }
     }
 
@@ -744,7 +818,7 @@ impl EncoderState {
         retained_graph: &Option<Lock<RetainedDepGraph>>,
         local: &mut LocalEncoderState,
     ) {
-        node.encode(&mut local.encoder, index);
+        node.encode(&mut local.encoder, index, &mut local.refs);
         self.flush_mem_encoder(&mut *local);
         self.record(&node.node, index, node.edges.len(), node.edges, retained_graph, &mut *local);
     }
