@@ -1,31 +1,31 @@
 #!/usr/bin/env bash
-# Prints the grok-bench TSV files as markdown tables: every row, then baseline against patched per step.
+# Prints the ci-bench.sh TSV files as markdown: the configs, then one table across them.
 # Usage: ci-report.sh TSV...
 set -euo pipefail
 awk -F'\t' '
 FNR == 1 { next }
 {
+	k = $1 SUBSEP $2 SUBSEP $7
+	if ($6 == "noincr") { full[k] = $8; next }
 	n++
-	label[n] = $1; tc[n] = $2; step[n] = $3; wall[n] = $4
-	g[n] = $5; q[n] = $6; o[n] = $7; x[n] = $8; t[n] = $9; d[n] = $10; s[n] = $11
-	if (!($3 in seen)) { seen[$3] = 1; order[++steps] = $3 }
-	w[$1, $3] = $4; tot[$1, $3] = $9; gr[$1, $3] = $5; qc[$1, $3] = $6
+	row[n] = k; w[n] = $1; c[n] = $2; st[n] = $7; wall[n] = $8
+	g[n] = $9; q[n] = $10; o[n] = $11; x[n] = $12; t[n] = $13; d[n] = $14; s[n] = $15
+	if (!($2 in cfg)) { cfg[$2] = sprintf("| %s | %s | `%s` | %s |", $2, $3, substr($4, 1, 12), $5 == "" ? "none" : "`" $5 "`"); order[++ncfg] = $2 }
 }
-function gb(v) { return sprintf("%.3f", v / 1e9) }
+function mb(v) { return sprintf("%.1f", v / 1e6) }
 function ratio(a, b) { return b > 0 ? sprintf("%.2fx", a / b) : "n/a" }
 END {
-	if (n == 0) { print "ci-report: no rows in the input" > "/dev/stderr"; exit 1 }
-	print "| toolchain | commit | step | wall s | dep-graph.bin GB | query-cache.bin GB | *.o GB | other GB | total GB | crate dirs | sessions |"
-	print "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"
-	for (i = 1; i <= n; i++)
-		printf "| %s | `%s` | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", label[i], substr(tc[i], 1, 12), step[i], wall[i], gb(g[i]), gb(q[i]), gb(o[i]), gb(x[i]), gb(t[i]), d[i], s[i]
-	if (!(("baseline", order[1]) in w) || !(("patched", order[1]) in w)) exit 0
+	if (n == 0) { print "ci-report: no incremental rows in the input" > "/dev/stderr"; exit 1 }
+	print "| config | compiler | commit | rustc flags |"
+	print "|---|---|---|---|"
+	for (i = 1; i <= ncfg; i++) print cfg[order[i]]
 	print ""
-	print "| step | wall baseline s | wall patched s | wall patched/baseline | total baseline GB | total patched GB | total patched/baseline | dep-graph patched/baseline | query-cache patched/baseline |"
-	print "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
-	for (i = 1; i <= steps; i++) {
-		k = order[i]
-		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", k, w["baseline", k], w["patched", k], ratio(w["patched", k], w["baseline", k]), gb(tot["baseline", k]), gb(tot["patched", k]), ratio(tot["patched", k], tot["baseline", k]), ratio(gr["patched", k], gr["baseline", k]), ratio(qc["patched", k], qc["baseline", k])
+	print "| workload | config | step | incr wall s | non-incr wall s | incr / non-incr | dep-graph.bin MB | query-cache.bin MB | *.o MB | graph+cache % of *.o | other MB | total MB | crate dirs | sessions |"
+	print "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+	for (i = 1; i <= n; i++) {
+		f = (row[i] in full) ? full[row[i]] : ""
+		pct = o[i] > 0 ? sprintf("%.0f%%", 100 * (g[i] + q[i]) / o[i]) : "n/a"
+		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", w[i], c[i], st[i], wall[i], f, ratio(wall[i], f), mb(g[i]), mb(q[i]), mb(o[i]), pct, mb(x[i]), mb(t[i]), d[i], s[i]
 	}
 }
 ' "$@"

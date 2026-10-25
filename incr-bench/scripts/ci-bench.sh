@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# Steps: cold, edit:comment, edit:body, edit:new-item (the edits add up),
+# revert. Usage: ci-bench.sh WORKLOAD SRC RUSTC TARGET_ROOT RESULTS WORKLOAD
+# is grok or syn. SRC is a git checkout of it.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+workload=$1
+src=$(realpath "$2")
+rustc_bin=$(realpath "$3")
+target_root=$(realpath -m "$4")
+results=$(realpath -m "$5")
+config=${BENCH_CONFIG:?}
+compiler=${BENCH_COMPILER:?}
+toolchain=${BENCH_TOOLCHAIN:?}
+flags=${BENCH_RUSTC_FLAGS:-}
+
+case $workload in
+grok)
+	cmd=(cargo test -q --locked -p xai-grok-pager --no-run)
+	item_file=crates/codegen/xai-grok-shell/src/lib.rs
+	body_file=crates/codegen/xai-grok-shell/src/tier.rs
+	body_from='    let t = tier.trim().to_ascii_lowercase();'
+	body_to='    let t = tier.trim().to_lowercase();'
+	comment_after=''
+	;;
+syn)
+	cmd=(cargo build -q --locked --workspace)
+	item_file=syn/src/lib.rs
+	body_file=syn/src/lib.rs
+	body_from='    file.shebang = shebang;'
+	body_to='    file.shebang = shebang.filter(|s| !s.is_empty());'
+	comment_after='    // Strip the BOM if it is present'
+	;;
+*)
+	echo "ci-bench: unknown workload $workload" >&2
+	exit 2
+	;;
+esac
+
+export RUSTC="$rustc_bin" RUSTC_WRAPPER="$here/ci-rustc-flags.sh" RUSTC_BOOTSTRAP=1 BENCH_RUSTC_FLAGS="$flags"
+cd "$src"
+git diff --quiet || { echo "ci-bench: $src has uncommitted changes" >&2; exit 1; }
+trap 'git -C "$src" checkout -q -- .' EXIT
+mkdir -p "$target_root" "$(dirname "$results")"
+printf 'workload\tconfig\tcompiler\ttoolchain\tflags\tmode\tstep\twall_s\tdep_graph_bytes\tquery_cache_bytes\tobj_bytes\tother_bytes\ttotal_bytes\tcrate_dirs\tsessions\n' > "$results"
+
+sum_sizes() {
+	find "$@" -type f -printf '%s\n' | awk '{s+=$1} END{printf "%d", s}'
+}
+
+# Appends one row for the incremental dir of target dir $1.
+measure() {
+	local mode=$2 step=$3 secs=$4 inc=$1/debug/incremental
+	local graph=0 qc=0 objs=0 total=0 crate_dirs=0 sessions=0
+	if [[ -d $inc ]]; then
+		graph=$(sum_sizes "$inc" -name dep-graph.bin)
+		qc=$(sum_sizes "$inc" -name query-cache.bin)
+		objs=$(sum_sizes "$inc" -name '*.o')
+		total=$(sum_sizes "$inc")
+		crate_dirs=$(find "$inc" -mindepth 1 -maxdepth 1 -type d | wc -l)
+		sessions=$(find "$inc" -mindepth 2 -maxdepth 2 -type d -name 's-*' | wc -l)
+	fi
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.1f\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n' \
+		"$workload" "$config" "$compiler" "$toolchain" "$flags" "$mode" "$step" "$secs" \
+		"$graph" "$qc" "$objs" "$((total - graph - qc - objs))" "$total" "$crate_dirs" "$sessions" >> "$results"
+	printf '%-5s %-22s %-7s %-14s %8.1fs graph=%d qcache=%d objs=%d total=%d crate_dirs=%d sessions=%d\n' \
+		"$workload" "$config" "$mode" "$step" "$secs" "$graph" "$qc" "$objs" "$total" "$crate_dirs" "$sessions"
+}
+
+build() {
+	local tdir=$1 mode=$2 step=$3 incr=1 start end log
+	[[ $mode == noincr ]] && incr=0
+	log=$target_root/$mode.${step//:/-}.log
+	start=$(date +%s.%N)
+	if ! CARGO_TARGET_DIR="$tdir" CARGO_INCREMENTAL=$incr "${cmd[@]}" > "$log" 2>&1; then
+		tail -n 80 "$log" >&2
+		echo "ci-bench: the $mode $step build failed, full log in $log" >&2
+		exit 1
+	fi
+	end=$(date +%s.%N)
+	measure "$tdir" "$mode" "$step" "$(echo "$end - $start" | bc)"
+}
+
+# Each edit must change the tree, or the step would measure a no-op.
+edit() {
+	local before
+	before=$(git diff | sha256sum)
+	case $1 in
+	comment)
+		if [[ -n $comment_after ]]; then
+			sed -i "s|^${comment_after}\$|&\n    // incr-bench comment edit|" "$item_file"
+		else
+			printf '\n// incr-bench comment edit\n' >> "$item_file"
+		fi
+		;;
+	body)
+		sed -i "s|^$(printf '%s' "$body_from" | sed 's/[][\.*^$|]/\\&/g')\$|$(printf '%s' "$body_to" | sed 's/[\&|]/\\&/g')|" "$body_file"
+		;;
+	new-item)
+		printf '\n#[allow(dead_code)]\nfn incr_bench_extra_item() -> u32 {\n    7\n}\n' >> "$item_file"
+		;;
+	esac
+	if [[ $(git diff | sha256sum) == "$before" ]]; then
+		echo "ci-bench: the $1 edit changed nothing in $src" >&2
+		exit 1
+	fi
+}
+
+run_mode() {
+	local mode=$1 tdir=$target_root/$1
+	rm -rf "$tdir"
+	build "$tdir" "$mode" cold
+	for e in comment body new-item; do
+		edit "$e"
+		build "$tdir" "$mode" "edit:$e"
+	done
+	git checkout -q -- .
+	build "$tdir" "$mode" revert
+	rm -rf "$tdir"
+}
+
+"$rustc_bin" -vV
+run_mode incr
+run_mode noincr
