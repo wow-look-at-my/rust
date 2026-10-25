@@ -50,7 +50,8 @@
 //! any more and will delete those. It will also delete any finalized session
 //! directories for a given crate except for the most recent one.
 //!
-//! Each build configuration of a crate gets its own crate directory, and the steps above never look outside the current one. At finalization the compiler therefore also deletes any crate directory whose newest session another compiler version wrote, since this compiler cannot read it. `-Zincremental-keep-configs=N` keeps only the `N` most recently used crate directories of the current crate. `-Zincremental-size-cap=BYTES` (or `RUSTC_INCREMENTAL_SIZE_CAP`) deletes the least recently used crate directories of any crate until the incremental directory fits. Both delete a crate directory only if they can lock every session in it exclusively.
+//! Each build configuration of a crate gets its own crate directory, and the steps above never
+//! look outside the current one. `-Zincremental-keep-configs=N` keeps only the `N` most recently used crate directories of the current crate. `-Zincremental-size-cap=BYTES` (or `RUSTC_INCREMENTAL_SIZE_CAP`) deletes the least recently used crate directories of any crate until the incremental directory fits. Both delete a crate directory only if they can lock every session in it exclusively.
 //!
 //! ## Synchronization
 //!
@@ -98,7 +99,7 @@
 //! implemented.
 
 use std::fs as std_fs;
-use std::io::{self, ErrorKind, Read};
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -115,7 +116,6 @@ use rustc_session::{IncrCompSession, Session, StableCrateId};
 use rustc_span::{Symbol, bug};
 use tracing::debug;
 
-use super::file_format;
 use crate::diagnostics;
 
 #[cfg(test)]

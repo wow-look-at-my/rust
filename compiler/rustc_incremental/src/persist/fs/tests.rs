@@ -60,23 +60,13 @@ fn time(secs: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(secs)
 }
 
-fn file_header(version: &str) -> Vec<u8> {
-    let mut bytes = b"RSIC\0\0".to_vec();
-    bytes.push(version.len() as u8);
-    bytes.extend_from_slice(version.as_bytes());
-    bytes.extend_from_slice(b"payload");
-    bytes
-}
-
 /// Creates `{incr_dir}/{name}` with one old finalized session and its lock file.
 /// Returns the crate dir and the lock file.
-fn make_crate_dir(incr_dir: &Path, name: &str, version: Option<&str>) -> (PathBuf, PathBuf) {
+fn make_crate_dir(incr_dir: &Path, name: &str) -> (PathBuf, PathBuf) {
     let crate_dir = incr_dir.join(name);
     let session_dir = crate_dir.join(format!("s-{}-0000-svh", timestamp_to_string(time(1_000))));
     std_fs::create_dir_all(&session_dir).unwrap();
-    if let Some(version) = version {
-        std_fs::write(session_dir.join(DEP_GRAPH_FILENAME), file_header(version)).unwrap();
-    }
+    std_fs::write(session_dir.join(DEP_GRAPH_FILENAME), b"graph").unwrap();
     let lock_file = lock_file_path(&session_dir);
     std_fs::write(&lock_file, b"").unwrap();
     (crate_dir, lock_file)
@@ -181,7 +171,7 @@ fn test_list_crate_dirs() {
 #[test]
 fn test_try_delete_crate_dir_skips_locked() {
     let dir = rustc_fs_util::TempDirBuilder::new().tempdir_in(std::env::temp_dir()).unwrap();
-    let (crate_dir, lock_file) = make_crate_dir(dir.path(), &format!("foo-{TEST_ID}"), None);
+    let (crate_dir, lock_file) = make_crate_dir(dir.path(), &format!("foo-{TEST_ID}"));
 
     let lock = flock::Lock::try_lock(&lock_file, false, true).unwrap();
     assert_eq!(try_delete_crate_dir(&crate_dir).unwrap(), false);
@@ -203,37 +193,6 @@ fn test_try_delete_crate_dir_skips_recent() {
 
     assert_eq!(try_delete_crate_dir(&crate_dir).unwrap(), false);
     assert!(session_dir.exists());
-}
-
-#[test]
-fn test_header_rustc_version() {
-    assert_eq!(file_format::header_rustc_version(&file_header("1.2.3 (abc)")), Some("1.2.3 (abc)"));
-    assert_eq!(file_format::header_rustc_version(&file_header("")), Some(""));
-    assert_eq!(file_format::header_rustc_version(b"RSIC\0\0\x05abc"), None);
-    assert_eq!(file_format::header_rustc_version(b"RSIC\x01\0\x01a"), None);
-    assert_eq!(file_format::header_rustc_version(b"XXXX\0\0\x01a"), None);
-    assert_eq!(file_format::header_rustc_version(b""), None);
-}
-
-#[test]
-fn test_remove_incompatible_crate_dirs() {
-    let dir = rustc_fs_util::TempDirBuilder::new().tempdir_in(std::env::temp_dir()).unwrap();
-    let incr_dir = dir.path();
-    let (old, _) = make_crate_dir(incr_dir, &format!("old-{TEST_ID}"), Some("old-rustc"));
-    let (same, _) = make_crate_dir(incr_dir, &format!("same-{TEST_ID}"), Some("new-rustc"));
-    let (no_header, _) = make_crate_dir(incr_dir, &format!("noheader-{TEST_ID}"), None);
-    let (current, _) = make_crate_dir(incr_dir, &format!("current-{TEST_ID}"), Some("old-rustc"));
-
-    let dirs = list_crate_dirs(incr_dir, None).unwrap();
-    let remaining = remove_incompatible_crate_dirs(dirs, &current, "new-rustc", |dir| {
-        try_delete_crate_dir(dir).unwrap()
-    });
-
-    assert!(!old.exists());
-    assert!(same.exists());
-    assert!(no_header.exists());
-    assert!(current.exists());
-    assert_eq!(remaining, vec![current, no_header, same]);
 }
 
 #[test]

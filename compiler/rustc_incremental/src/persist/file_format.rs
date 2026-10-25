@@ -39,14 +39,6 @@ pub(crate) fn write_file_header(stream: &mut FileEncoder<'_>, sess: &Session) {
     stream.emit_raw_bytes(rustc_version.as_bytes());
 }
 
-/// Returns the compiler version recorded in a file header, if `bytes` starts with a valid one.
-pub(crate) fn header_rustc_version(bytes: &[u8]) -> Option<&str> {
-    let rest = bytes.strip_prefix(FILE_MAGIC)?;
-    let rest = rest.strip_prefix(&u16::to_le_bytes(HEADER_FORMAT_VERSION)[..])?;
-    let (&len, rest) = rest.split_first()?;
-    std::str::from_utf8(rest.get(..usize::from(len))?).ok()
-}
-
 pub(crate) fn save_in<F>(sess: &Session, path_buf: PathBuf, name: &str, encode: F)
 where
     F: FnOnce(FileEncoder<'static>) -> FileEncodeResult,
@@ -195,7 +187,7 @@ fn report_format_mismatch(sess: &Session, file: &Path, message: &str) {
 /// A version string that hopefully is always different for compiler versions
 /// with different encodings of incremental compilation artifacts. Contains
 /// the Git commit hash.
-pub(crate) fn rustc_version(sess: &Session) -> Cow<'static, str> {
+fn rustc_version(sess: &Session) -> Cow<'static, str> {
     // Allow version string overrides so that tests can produce a header-mismatch on demand.
     if sess.is_nightly_build()
         && let Ok(env_version) = env::var("RUSTC_FORCE_RUSTC_VERSION")
