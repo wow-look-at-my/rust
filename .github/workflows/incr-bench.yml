@@ -29,9 +29,9 @@ on:
         default: ''
 
 # One group per run: a new request never cancels a benchmark in progress.
+concurrency:
   group: gha_${{ github.repository }}_${{ github.workflow }}_${{ github.sha }}
   cancel-in-progress: false
-  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 permissions:
   contents: read
