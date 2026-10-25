@@ -74,7 +74,8 @@ build() {
 	[[ $mode == noincr ]] && incr=0
 	log=$target_root/$mode.${step//:/-}.log
 	start=$(date +%s.%N)
-	if ! CARGO_TARGET_DIR="$tdir" CARGO_INCREMENTAL=$incr "${cmd[@]}" > "$log" 2>&1; then
+	rm -f "$log.crates"
+	if ! BENCH_CRATE_TIMES="$log.crates" CARGO_TARGET_DIR="$tdir" CARGO_INCREMENTAL=$incr "${cmd[@]}" > "$log" 2>&1; then
 		tail -n 80 "$log" >&2
 		echo "ci-bench: the $mode $step build failed, full log in $log" >&2
 		exit 1
@@ -100,6 +101,11 @@ build() {
 		} END { for (k in b) printf "%s\t%d\t%d\n", k, n[k], b[k] }' "$log" | sort -t$'\t' -k3,3nr > "${results%.tsv}.kinds.tsv"
 		echo "top dep kinds by graph bytes (kind, nodes, bytes):"
 		head -n 25 "${results%.tsv}.kinds.tsv"
+	fi
+	if [[ -s $log.crates ]]; then
+		echo "slowest crate compiles $mode $step (crate:kind, seconds):"
+		sort -t$'\t' -k2,2nr "$log.crates" | head -n 8
+		sort -t$'\t' -k2,2nr "$log.crates" | head -n 20 | sed "s|^|$config\t$mode\t$step\t|" >> "${results%.tsv}.crates.tsv"
 	fi
 	measure "$tdir" "$mode" "$step" "$(echo "$end - $start" | bc)"
 }
