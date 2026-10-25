@@ -1457,7 +1457,6 @@ rustc_queries! {
     /// look up the correct symbol name of instances from upstream crates.
     query symbol_name(key: ty::Instance<'tcx>) -> ty::SymbolName<'tcx> {
         desc { "computing the symbol for `{}`", key }
-        cache_on_disk
     }
 
     query def_kind(def_id: DefId) -> DefKind {
