@@ -22,6 +22,7 @@ TARGET_ROOT=${TARGET_ROOT:-/home/user/bench-corpus/targets}
 EXTRA_RUSTFLAGS=${EXTRA_RUSTFLAGS:-}
 REPS=${REPS:-2}
 SCENARIOS=${SCENARIOS:-"edits churn-cmd churn-feat"}
+EDITS=${EDITS:-"comment body sig"}
 CMD_ROUNDS=${CMD_ROUNDS:-3}
 FEAT_ROUNDS=${FEAT_ROUNDS:-1}
 NICE=${NICE:-19}
@@ -81,6 +82,9 @@ apply_edit() {
 		;;
 	sig)
 		sed -i 's|^pub fn parse_file(mut content: &str) -> Result<File> {$|pub fn parse_file(mut content: \&str, _bench_extra: u32) -> Result<File> {|' "$LIB_SRC"
+		;;
+	newitem)
+		echo 'pub fn bench_new_item() -> u32 { 1 }' >>"$LIB_SRC"
 		;;
 	round*)
 		echo "// bench: churn $1" >>"$LIB_SRC"
@@ -180,7 +184,7 @@ scenario_edits() {
 	for ((rep = 1; rep <= REPS; rep++)); do
 		fresh_target "edits-r$rep"
 		run_step "$rep" edits cold "${BUILD[@]}"
-		for edit in comment body sig; do
+		for edit in $EDITS; do
 			apply_edit "$edit"
 			run_step "$rep" edits "edit:$edit" "${BUILD[@]}"
 			run_step "$rep" edits "nochange:$edit" "${BUILD[@]}"
