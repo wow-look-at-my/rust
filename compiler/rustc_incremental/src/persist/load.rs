@@ -4,6 +4,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::unord::UnordMap;
 use rustc_hashes::Hash64;
 use rustc_middle::dep_graph::{DepGraph, SerializedDepGraph, WorkProductMap};
@@ -32,7 +33,11 @@ enum LoadResult {
     IoError { path: PathBuf, err: io::Error },
 }
 
-fn load_dep_graph(sess: &Session, incr_comp_session: &IncrCompSession) -> LoadResult {
+fn load_dep_graph(
+    sess: &Session,
+    incr_comp_session: &IncrCompSession,
+    global_inputs_hash: Fingerprint,
+) -> LoadResult {
     assert!(sess.opts.incremental.is_some());
 
     let _timer = sess.prof.generic_activity("incr_comp_prepare_load_dep_graph");
@@ -103,6 +108,18 @@ fn load_dep_graph(sess: &Session, incr_comp_session: &IncrCompSession) -> LoadRe
                 debug!("load_dep_graph_new: differing commandline arg hashes");
 
                 // No need to do any further work
+                return LoadResult::DataOutOfDate;
+            }
+
+            // Reads of `global_input` queries record no edges, so no node of
+            // the graph is safe to reuse once one of their values changes.
+            if Fingerprint::decode(&mut decoder) != global_inputs_hash {
+                if sess.opts.unstable_opts.incremental_info {
+                    eprintln!(
+                        "[incremental] completely ignoring cache because of \
+                                    differing crate features or limits"
+                    );
+                }
                 return LoadResult::DataOutOfDate;
             }
 
@@ -183,6 +200,7 @@ pub fn setup_dep_graph(
     sess: &Session,
     crate_name: Symbol,
     stable_crate_id: StableCrateId,
+    global_inputs_hash: Fingerprint,
 ) -> (DepGraph, Option<IncrCompSession>) {
     if sess.opts.incremental.is_none() {
         return (DepGraph::new_disabled(), None);
@@ -191,7 +209,7 @@ pub fn setup_dep_graph(
     // `load_dep_graph` can only be called after `prepare_session_directory`.
     let mut incr_comp_session = prepare_session_directory(sess, crate_name, stable_crate_id);
     // Try to load the previous session's dep graph and work products.
-    let load_result = load_dep_graph(sess, &incr_comp_session);
+    let load_result = load_dep_graph(sess, &incr_comp_session, global_inputs_hash);
 
     sess.time("incr_comp_garbage_collect_session_directories", || {
         if let Err(e) = garbage_collect_session_directories(sess, &incr_comp_session) {
@@ -231,6 +249,7 @@ pub fn setup_dep_graph(
 
     // First encode the commandline arguments hash
     sess.opts.dep_tracking_hash(false).encode(&mut encoder);
+    global_inputs_hash.encode(&mut encoder);
 
     (DepGraph::new(sess, prev_graph, prev_work_products, encoder), Some(incr_comp_session))
 }

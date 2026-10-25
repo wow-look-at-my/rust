@@ -34,6 +34,7 @@ macro_rules! define_queries {
                     desc: $desc:expr,
                     eval_always: $eval_always:literal,
                     feedable: $feedable:literal,
+                    global_input: $global_input:literal,
                     handle_cycle_error: $handle_cycle_error:literal,
                     no_force: $no_force:literal,
                     no_hash: $no_hash:literal,
@@ -151,6 +152,7 @@ macro_rules! define_queries {
                         eval_always: $eval_always,
                         depth_limit: $depth_limit,
                         feedable: $feedable,
+                        global_input: $global_input,
                         dep_kind: rustc_middle::dep_graph::DepKind::$name,
                         state: Default::default(),
                         cache: if track_present {

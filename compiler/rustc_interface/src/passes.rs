@@ -11,6 +11,7 @@ use rustc_attr_parsing::{AttributeParser, ShouldEmit};
 use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_codegen_ssa::{CompiledModules, CrateInfo};
 use rustc_crate_store::Untracked;
+use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::indexmap::IndexMap;
 use rustc_data_structures::steal::Steal;
 use rustc_data_structures::sync::{
@@ -29,6 +30,7 @@ use rustc_lint::{BufferedEarlyLint, EarlyCheckNode, LintStore, unerased_lint_sto
 use rustc_metadata::EncodedMetadata;
 use rustc_metadata::creader::CStore;
 use rustc_middle::arena::Arena;
+use rustc_middle::ich::StableHashState;
 use rustc_middle::middle::resolve::{ResolverAstLowering, ResolverGlobalCtxt};
 use rustc_middle::ty::{self, RegisteredTools, TyCtxt};
 use rustc_middle::util::Providers;
@@ -958,8 +960,6 @@ pub fn create_and_enter_global_ctxt<T, F: for<'tcx> FnOnce(TyCtxt<'tcx>) -> T>(
 
     let outputs = util::build_output_filenames(&pre_configured_attrs, sess);
 
-    let (dep_graph, incr_comp_session) = setup_dep_graph(sess, crate_name, stable_crate_id);
-
     let cstore =
         FreezeLock::new(Box::new(CStore::new(compiler.codegen_backend.metadata_loader())) as _);
     let definitions = FreezeLock::new(Definitions::new(stable_crate_id));
@@ -972,6 +972,19 @@ pub fn create_and_enter_global_ctxt<T, F: for<'tcx> FnOnce(TyCtxt<'tcx>) -> T>(
         stable_crate_ids,
         local_crate_hash: OnceLock::new(),
     };
+
+    // The `global_input` queries. The loader needs their hash before any query runs.
+    let features = rustc_expand::config::features(sess, &pre_configured_attrs, crate_name);
+    let limits = limits::get_limits(&pre_configured_attrs, sess, &features);
+    let global_inputs_hash = if sess.opts.incremental.is_some() {
+        let mut hcx = StableHashState::new(sess, &untracked);
+        rustc_middle::dep_graph::hash_result(&mut hcx, &(&features, limits))
+    } else {
+        Fingerprint::ZERO
+    };
+
+    let (dep_graph, incr_comp_session) =
+        setup_dep_graph(sess, crate_name, stable_crate_id, global_inputs_hash);
 
     // We're constructing the HIR here; we don't care what we will
     // read, since we haven't even constructed the *input* to
@@ -1054,13 +1067,8 @@ pub fn create_and_enter_global_ctxt<T, F: for<'tcx> FnOnce(TyCtxt<'tcx>) -> T>(
             feed.crate_name(crate_name);
 
             let feed = tcx.feed_unit_query();
-            let features = tcx.arena.alloc(rustc_expand::config::features(
-                tcx.sess,
-                &pre_configured_attrs,
-                crate_name,
-            ));
-            feed.features_query(features);
-            feed.limits(limits::get_limits(&pre_configured_attrs, tcx.sess, features));
+            feed.features_query(tcx.arena.alloc(features));
+            feed.limits(limits);
             feed.crate_for_resolver(tcx.arena.alloc(Steal::new((krate, pre_configured_attrs))));
             feed.output_filenames(Arc::new(outputs));
 
