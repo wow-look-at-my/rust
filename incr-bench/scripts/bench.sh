@@ -191,6 +191,7 @@ scenario_edits() {
 			revert_corpus
 			run_step "$rep" edits "revert:$edit" "${BUILD[@]}"
 		done
+		[[ -n ${KEEP_TARGETS:-} ]] || rm -rf "$TDIR"
 	done
 }
 
