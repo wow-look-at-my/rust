@@ -708,6 +708,13 @@ rustc_queries! {
         separate_provide_extern
     }
 
+    /// The final layout of a coroutine, as `optimized_mir` stores it.
+    query coroutine_layout_from_mir(key: DefId) -> Option<&'tcx mir::CoroutineLayout<'tcx>> {
+        arena_cache
+        desc { "finding the coroutine layout of `{}`", tcx.def_path_str(key) }
+        cache_on_disk
+    }
+
     query check_coroutine_obligations(key: LocalDefId) -> Result<(), ErrorGuaranteed> {
         desc { "verify auto trait bounds for coroutine interior type `{}`", tcx.def_path_str(key) }
     }
