@@ -3,7 +3,7 @@
 # Usage: ci-build-stage1.sh SRC OUT
 set -euo pipefail
 src=$(realpath "$1")
-out=$2
+out=$(realpath -m "$2")
 cd "$src"
 cat > bootstrap.toml <<EOF
 profile = "compiler"
