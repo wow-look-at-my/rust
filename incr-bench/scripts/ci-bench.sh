@@ -79,7 +79,7 @@ build() {
 	fi
 	end=$(date +%s.%N)
 	# Only an -Zincremental-info run prints these counts: bodies decoded from the old .rmeta, bodies the encoder asked for, and bodies the dep graph marked green.
-	reuse=$(grep -oE 'decoded [0-9]+ of [0-9]+ MIR bodies from the previous session \([0-9]+ marked green' "$log" | tr -d '(' | awk '{d += $2; r += $4; g += $11} END {printf "%d\t%d\t%d", d, r, g}')
+	reuse=$({ grep -oE 'decoded [0-9]+ of [0-9]+ MIR bodies from the previous session \([0-9]+ marked green' "$log" || true; } | tr -d '(' | awk '{d += $2; r += $4; g += $11} END {printf "%d\t%d\t%d", d, r, g}')
 	if [[ $reuse != $'0\t0\t0' ]]; then
 		printf '%s\t%s\t%s\t%s\n' "$config" "$mode" "$step" "$reuse" >> "${results%.tsv}.reuse.tsv"
 		echo "rmeta reuse $mode $step: $reuse (decoded, requested, green)"
