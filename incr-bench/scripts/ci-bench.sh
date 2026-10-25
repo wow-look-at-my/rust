@@ -139,6 +139,8 @@ run_mode() {
 	done
 	git checkout -q -- .
 	build "$tdir" "$mode" revert
+	# A changed profile or feature set is a new build configuration, and cargo gives it new crate dirs.
+	CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false build "$tdir" "$mode" config-change
 	rm -rf "$tdir"
 }
 
