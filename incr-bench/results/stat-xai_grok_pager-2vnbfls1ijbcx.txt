@@ -100,3 +100,4 @@ top 20 query kinds by cached bytes:
   adt_def                                           1676 values |      424700 B   0.2% |   253.4 B/value
   associated_item                                   8801 values |      365698 B   0.2% |    41.6 B/value
   reachable_set                                        1 values |      353690 B   0.1% | 353690.0 B/value
+resources xai_grok_pager-2vnbfls1ijbcx/dep-graph.bin: wall 7.1s, cpu 17.0s, peak RssAnon 319 MB
