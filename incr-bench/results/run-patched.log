@@ -1,0 +1,21 @@
+patched    r1 edits      cold                     13.187s  incr=93319932 B  dirs=2  wp=0/240 reused
+patched    r1 edits      edit:comment              2.208s  incr=93087789 B  dirs=2  wp=239/240 reused
+patched    r1 edits      nochange:comment          0.023s  incr=93087789 B  dirs=2  wp=0/0 reused
+patched    r1 edits      revert:comment            2.182s  incr=93089448 B  dirs=2  wp=239/240 reused
+patched    r1 edits      edit:body                 2.327s  incr=93139643 B  dirs=2  wp=237/240 reused
+patched    r1 edits      nochange:body             0.024s  incr=93139643 B  dirs=2  wp=0/0 reused
+patched    r1 edits      revert:body               2.203s  incr=93124270 B  dirs=2  wp=237/240 reused
+patched    r1 edits      edit:sig                  2.159s  incr=93089701 B  dirs=2  wp=239/240 reused
+patched    r1 edits      nochange:sig              0.028s  incr=93089701 B  dirs=2  wp=0/0 reused
+patched    r1 edits      revert:sig                2.163s  incr=93089436 B  dirs=2  wp=239/240 reused
+patched    r2 edits      cold                     13.313s  incr=93319942 B  dirs=2  wp=0/240 reused
+patched    r2 edits      edit:comment              2.088s  incr=93087809 B  dirs=2  wp=239/240 reused
+patched    r2 edits      nochange:comment          0.025s  incr=93087809 B  dirs=2  wp=0/0 reused
+patched    r2 edits      revert:comment            2.043s  incr=93089449 B  dirs=2  wp=239/240 reused
+patched    r2 edits      edit:body                 2.235s  incr=93139638 B  dirs=2  wp=237/240 reused
+patched    r2 edits      nochange:body             0.022s  incr=93139638 B  dirs=2  wp=0/0 reused
+patched    r2 edits      revert:body               2.230s  incr=93124265 B  dirs=2  wp=237/240 reused
+patched    r2 edits      edit:sig                  2.041s  incr=93089698 B  dirs=2  wp=239/240 reused
+patched    r2 edits      nochange:sig              0.022s  incr=93089698 B  dirs=2  wp=0/0 reused
+patched    r2 edits      revert:sig                2.296s  incr=93089423 B  dirs=2  wp=239/240 reused
+done: rows appended to /home/user/bench-corpus/results.csv; logs in /home/user/bench-corpus/targets/patched/logs

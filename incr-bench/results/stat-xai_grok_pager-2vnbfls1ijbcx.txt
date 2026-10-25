@@ -1,0 +1,102 @@
+
+=== xai_grok_pager-2vnbfls1ijbcx/dep-graph.bin  347519026 bytes, kind bits 9, 337 kinds, names mapped
+nodes 5621192 (index space 5621192), edges 44855140; edges/node avg 7.98 median 3 p90 16 p99 60 max 852544; nodes with 0 edges 8.0%
+bytes: file header 26 | node headers 213605296 (61.5%: head 2B 3.2%, index 4B 6.5%, key fp 25.9%, value fp 25.9%) | edge lists 133728127 (38.5%) | spilled lengths 184946 (0.05%) | trailer 631
+key fp: distinct 2935533 = 52.2% of nodes (repeats 2685659, 12.4% of file); zero key 0.0%
+value fp: distinct 1996242 = 35.5% of nodes (repeats 16.7% of file); ZERO 7.4%; most common value 11.1%
+edge lists with >1 edge that exactly repeat an earlier node's list: 751649 nodes, 15546691 B (4.5% of file)
+index: 100.00% of nodes have index = previous+1 in stream order; 100.00% of the index space holds a node
+top 20 kinds by node count:
+  layout_of                                       687287 nodes  12.2% |    29674523 B   8.5% |     1.7 edges/node | value ZERO   0.0%
+  implementations_of_trait                        401229 nodes   7.1% |    16421350 B   4.7% |     1.0 edges/node | value ZERO   0.0%
+  fn_abi_of_instance_no_deduced_attrs             264120 nodes   4.7% |    17974865 B   5.2% |    10.0 edges/node | value ZERO   0.0%
+  symbol_name                                     250793 nodes   4.5% |    26055956 B   7.5% |    21.9 edges/node | value ZERO   0.0%
+  resolve_instance_raw                            246250 nodes   4.4% |    14362736 B   4.1% |     6.8 edges/node | value ZERO   0.0%
+  erase_and_anonymize_regions_ty                  174373 nodes   3.1% |     6798779 B   2.0% |     0.3 edges/node | value ZERO 100.0%
+  items_of_instance                               165064 nodes   2.9% |    19843630 B   5.7% |    27.3 edges/node | value ZERO   0.0%
+  check_mono_item                                 164134 nodes   2.9% |    11296792 B   3.3% |    10.3 edges/node | value ZERO   0.0%
+  size_estimate                                   162672 nodes   2.9% |     7468683 B   2.1% |     2.6 edges/node | value ZERO   0.0%
+  def_kind                                        106127 nodes   1.9% |     4179592 B   1.2% |     1.0 edges/node | value ZERO   0.0%
+  def_span                                         95147 nodes   1.7% |     4021577 B   1.2% |     1.6 edges/node | value ZERO   0.0%
+  evaluate_root_goal_for_proof_tree_raw            87739 nodes   1.6% |     5901390 B   1.7% |     9.8 edges/node | value ZERO 100.0%
+  TraitSelect                                      84758 nodes   1.5% |     6165861 B   1.8% |    11.6 edges/node | value ZERO 100.0%
+  is_copy_raw                                      83344 nodes   1.5% |     4418876 B   1.3% |     5.0 edges/node | value ZERO   0.0%
+  needs_drop_raw                                   82396 nodes   1.5% |     4227403 B   1.2% |     4.4 edges/node | value ZERO   0.0%
+  def_ident_span                                   82280 nodes   1.5% |     3517805 B   1.0% |     1.6 edges/node | value ZERO   0.0%
+  try_normalize_generic_arg_after_erasing_regions     80528 nodes   1.4% |     3670437 B   1.1% |     2.7 edges/node | value ZERO   0.0%
+  hir_owner                                        77523 nodes   1.4% |     3178473 B   0.9% |     1.0 edges/node | value ZERO   0.0%
+  lower_to_hir                                     77521 nodes   1.4% |     2945798 B   0.8% |     0.0 edges/node | value ZERO   0.0%
+  generics_of                                      75304 nodes   1.3% |     3464868 B   1.0% |     2.8 edges/node | value ZERO   0.0%
+top 20 kinds by bytes:
+  layout_of                                       687287 nodes  12.2% |    29674523 B   8.5% |     1.7 edges/node | value ZERO   0.0%
+  symbol_name                                     250793 nodes   4.5% |    26055956 B   7.5% |    21.9 edges/node | value ZERO   0.0%
+  items_of_instance                               165064 nodes   2.9% |    19843630 B   5.7% |    27.3 edges/node | value ZERO   0.0%
+  fn_abi_of_instance_no_deduced_attrs             264120 nodes   4.7% |    17974865 B   5.2% |    10.0 edges/node | value ZERO   0.0%
+  implementations_of_trait                        401229 nodes   7.1% |    16421350 B   4.7% |     1.0 edges/node | value ZERO   0.0%
+  resolve_instance_raw                            246250 nodes   4.4% |    14362736 B   4.1% |     6.8 edges/node | value ZERO   0.0%
+  check_mono_item                                 164134 nodes   2.9% |    11296792 B   3.3% |    10.3 edges/node | value ZERO   0.0%
+  typeck_root                                      16222 nodes   0.3% |     8901060 B   2.6% |   169.8 edges/node | value ZERO   0.0%
+  size_estimate                                   162672 nodes   2.9% |     7468683 B   2.1% |     2.6 edges/node | value ZERO   0.0%
+  CompileCodegenUnit                                 128 nodes   0.0% |     7077088 B   2.0% | 18416.5 edges/node | value ZERO   0.0%
+  erase_and_anonymize_regions_ty                  174373 nodes   3.1% |     6798779 B   2.0% |     0.3 edges/node | value ZERO 100.0%
+  TraitSelect                                      84758 nodes   1.5% |     6165861 B   1.8% |    11.6 edges/node | value ZERO 100.0%
+  evaluate_root_goal_for_proof_tree_raw            87739 nodes   1.6% |     5901390 B   1.7% |     9.8 edges/node | value ZERO 100.0%
+  mir_drops_elaborated_and_const_checked           22255 nodes   0.4% |     5001735 B   1.4% |    62.0 edges/node | value ZERO 100.0%
+  eval_to_allocation_raw                           34266 nodes   0.6% |     4870195 B   1.4% |    34.6 edges/node | value ZERO   0.0%
+  mir_borrowck                                     15313 nodes   0.3% |     4436061 B   1.3% |    83.6 edges/node | value ZERO   0.0%
+  is_copy_raw                                      83344 nodes   1.5% |     4418876 B   1.3% |     5.0 edges/node | value ZERO   0.0%
+  needs_drop_raw                                   82396 nodes   1.5% |     4227403 B   1.2% |     4.4 edges/node | value ZERO   0.0%
+  def_kind                                        106127 nodes   1.9% |     4179592 B   1.2% |     1.0 edges/node | value ZERO   0.0%
+  def_span                                         95147 nodes   1.7% |     4021577 B   1.2% |     1.6 edges/node | value ZERO   0.0%
+edge |delta| log2 buckets, % of edges (vs source | vs previous edge, first edge vs source):
+  [1,1]   4.0 |  13.7
+  [2,3]   1.9 |   5.1
+  [4,7]   1.5 |   3.8
+  [8,15]   1.1 |   2.1
+  [16,31]   0.9 |   1.3
+  [32,63]   0.8 |   1.0
+  [64,127]   0.6 |   0.8
+  [128,255]   0.6 |   0.8
+  [256,511]   0.8 |   0.6
+  [512,1023]   1.0 |   0.9
+  [1024,2047]   0.5 |   0.8
+  [2048,4095]   0.5 |   0.5
+  [4096,8191]   0.5 |   1.0
+  [8192,16383]   0.7 |   0.7
+  [16384,32767]   1.0 |   1.5
+  [32768,65535]   1.2 |   1.9
+  [65536,131071]   2.6 |   5.0
+  [131072,262143]   4.2 |   5.7
+  [262144,524287]   6.3 |   7.9
+  [524288,1048575]  15.3 |  11.8
+  [1048576,2097151]  24.8 |  16.9
+  [2097152,4194303]  21.1 |  12.1
+  [4194304,8388607]   8.0 |   3.9
+edge bytes: now 133728127 (2.98 B/edge); zigzag-varint delta-vs-previous 122565061 (2.73 B/edge, 1.09x)
+layout A (key/value tables + u32 refs, index implied by order, delta edges): est 258573633 B = 1.34x smaller
+layout B (built: flag byte, fp inline on first use else leb back-ref, index implied, delta edges): 233415090 B = 1.49x; +zstd1 1.88x; +zstd3 2.04x
+plain file: zstd1 1.76x; zstd3 1.85x
+
+=== xai_grok_pager-2vnbfls1ijbcx/query-cache.bin  237429618 bytes
+regions: header 18 | gap before first entry 0 | query values 220241267 (92.8%, 1155615 entries) | side effects 497 (0.0%) | const allocs 1143451 (0.5%, 14365) | hygiene 5684500 (2.4%, 104716) | footer 10359885 (4.4%)
+top 20 query kinds by cached bytes:
+  optimized_mir                                    18817 values |    77213910 B  32.5% |  4103.4 B/value
+  typeck_root                                      16222 values |    56625047 B  23.8% |  3490.6 B/value
+  symbol_name                                     163914 values |    44811452 B  18.9% |   273.4 B/value
+  items_of_instance                               165064 values |    14990217 B   6.3% |    90.8 B/value
+  mir_for_ctfe                                      3936 values |     4297776 B   1.8% |  1091.9 B/value
+  promoted_mir                                      9396 values |     3195740 B   1.3% |   340.1 B/value
+  exported_generic_symbols                             1 values |     2873005 B   1.2% | 2873005.0 B/value
+  type_of                                          43249 values |     2124025 B   0.9% |    49.1 B/value
+  generics_of                                      51866 values |     1956916 B   0.8% |    37.7 B/value
+  def_span                                         77718 values |     1840116 B   0.8% |    23.7 B/value
+  def_ident_span                                   77718 values |     1478438 B   0.6% |    19.0 B/value
+  fn_sig                                           12392 values |     1263813 B   0.5% |   102.0 B/value
+  hir_module_items                                   494 values |      979678 B   0.4% |  1983.2 B/value
+  size_estimate                                   162672 values |      977713 B   0.4% |     6.0 B/value
+  explicit_clauses_of                              51866 values |      849856 B   0.4% |    16.4 B/value
+  codegen_fn_attrs                                 22461 values |      541423 B   0.2% |    24.1 B/value
+  used_trait_imports                               23164 values |      519364 B   0.2% |    22.4 B/value
+  adt_def                                           1676 values |      424700 B   0.2% |   253.4 B/value
+  associated_item                                   8801 values |      365698 B   0.2% |    41.6 B/value
+  reachable_set                                        1 values |      353690 B   0.1% | 353690.0 B/value
