@@ -1710,6 +1710,7 @@ rustc_queries! {
     }
     /// Query backing `Ty::needs_drop`.
     query needs_drop_raw(env: ty::PseudoCanonicalInput<'tcx, Ty<'tcx>>) -> bool {
+        anon
         desc { "computing whether `{}` needs drop", env.value }
     }
     /// Query backing `Ty::needs_async_drop`.
