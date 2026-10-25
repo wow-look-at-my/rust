@@ -98,6 +98,13 @@ jobs:
           path: toolchain
           key: ${{ matrix.key }}
 
+      # The cache carries the toolchain across runs. A run file carries it to the legs of this run, and buildhost never evicts the files of a live run.
+      - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
+        with:
+          mode: send
+          name: toolchain-${{ matrix.compiler }}
+          path: toolchain
+
   bench:
     needs: [config, toolchain]
     name: bench ${{ matrix.leg }}
@@ -117,12 +124,11 @@ jobs:
       - name: Free disk
         run: bench/incr-bench/scripts/ci-free-disk.sh
 
-      - name: Restore the stage1 toolchain
-        uses: wow-look-at-my/buildhost/.github/actions/buildhost-cache-restore@lkgb
+      - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
         with:
+          mode: receive
+          name: toolchain-${{ matrix.compiler }}
           path: toolchain
-          key: ${{ matrix.key }}
-          fail-on-cache-miss: 'true'
 
       - name: Check out grok-build
         if: matrix.workload == 'grok'
