@@ -129,8 +129,7 @@ impl<'tcx> PrevSession<'tcx> {
 
     /// The index the session gave to `def_id`.
     fn old_index(&self, def_id: LocalDefId) -> Option<DefIndex> {
-        self.def_path_hash_map
-            .def_path_hash_to_def_index(&self.tcx.def_path_hash(def_id.into()))
+        self.def_path_hash_map.def_path_hash_to_def_index(&self.tcx.def_path_hash(def_id.into()))
     }
 
     fn map_local_index(&self, old: DefIndex) -> DefIndex {
@@ -189,12 +188,7 @@ impl<'tcx> PrevSession<'tcx> {
         let lazy = self.root.tables.def_span.get(&self.blob, old)?;
         let mut dcx = self.decoder(lazy.position.get());
         dcx.lazy_state = LazyState::NodeStart(lazy.position);
-        let RawSpan::Local {
-            file,
-            lo: old_lo,
-            hi: old_hi,
-        } = dcx.decode_raw_span()
-        else {
+        let RawSpan::Local { file, lo: old_lo, hi: old_hi } = dcx.decode_raw_span() else {
             return None;
         };
         let file = self.matched_file(file)?;
@@ -236,12 +230,7 @@ impl<'tcx> PrevSession<'tcx> {
                 .files()
                 .iter()
                 .filter(|file| !file.is_imported())
-                .map(|file| {
-                    (
-                        exported_stable_id(file, self.stable_crate_id),
-                        Arc::clone(file),
-                    )
-                })
+                .map(|file| (exported_stable_id(file, self.stable_crate_id), Arc::clone(file)))
                 .collect()
         });
         let current = Arc::clone(current_files.get(&old.stable_id)?);
@@ -333,28 +322,15 @@ impl<'a, 'tcx> PrevDecoder<'a, 'tcx> {
         let len = tag.length().unwrap_or_else(|| BytePos::decode(self));
         let metadata_index = u32::decode(self);
         if tag.kind() == SpanKind::Local {
-            return (
-                RawSpan::Local {
-                    file: metadata_index,
-                    lo: lo.0,
-                    hi: (lo + len).0,
-                },
-                ctxt,
-            );
+            return (RawSpan::Local { file: metadata_index, lo: lo.0, hi: (lo + len).0 }, ctxt);
         }
         let cnum = CrateNum::decode(self);
         let tcx = self.prev.tcx;
-        let file = CStore::from_tcx(tcx)
-            .get_crate_data(cnum)
-            .imported_source_file(tcx, metadata_index);
+        let file =
+            CStore::from_tcx(tcx).get_crate_data(cnum).imported_source_file(tcx, metadata_index);
         let start = file.translated_source_file.start_pos;
         (
-            RawSpan::Foreign(SpanData {
-                lo: lo + start,
-                hi: lo + len + start,
-                ctxt,
-                parent: None,
-            }),
+            RawSpan::Foreign(SpanData { lo: lo + start, hi: lo + len + start, ctxt, parent: None }),
             ctxt,
         )
     }
@@ -376,8 +352,7 @@ impl<'a, 'tcx> LazyDecoder for PrevDecoder<'a, 'tcx> {
 
 impl<'a, 'tcx> BlobDecoder for PrevDecoder<'a, 'tcx> {
     fn decode_def_index(&mut self) -> DefIndex {
-        self.prev
-            .map_local_index(DefIndex::from_u32(self.read_u32()))
+        self.prev.map_local_index(DefIndex::from_u32(self.read_u32()))
     }
 
     fn decode_symbol(&mut self) -> Symbol {
@@ -385,8 +360,7 @@ impl<'a, 'tcx> BlobDecoder for PrevDecoder<'a, 'tcx> {
             SYMBOL_STR => Symbol::intern(self.read_str()),
             SYMBOL_OFFSET => {
                 let pos = self.read_usize();
-                self.opaque
-                    .with_position(pos, |d| Symbol::intern(d.read_str()))
+                self.opaque.with_position(pos, |d| Symbol::intern(d.read_str()))
             }
             SYMBOL_PREDEFINED => Symbol::new(self.read_u32()),
             _ => unreachable!(),
@@ -398,8 +372,7 @@ impl<'a, 'tcx> BlobDecoder for PrevDecoder<'a, 'tcx> {
             SYMBOL_STR => ByteSymbol::intern(self.read_byte_str()),
             SYMBOL_OFFSET => {
                 let pos = self.read_usize();
-                self.opaque
-                    .with_position(pos, |d| ByteSymbol::intern(d.read_byte_str()))
+                self.opaque.with_position(pos, |d| ByteSymbol::intern(d.read_byte_str()))
             }
             SYMBOL_PREDEFINED => ByteSymbol::new(self.read_u32()),
             _ => unreachable!(),
@@ -407,9 +380,7 @@ impl<'a, 'tcx> BlobDecoder for PrevDecoder<'a, 'tcx> {
     }
 
     fn decode_local_def_id(&mut self) -> LocalDefId {
-        LocalDefId {
-            local_def_index: self.decode_def_index(),
-        }
+        LocalDefId { local_def_index: self.decode_def_index() }
     }
 }
 
@@ -427,11 +398,7 @@ impl<'a, 'tcx> SpanDecoder for PrevDecoder<'a, 'tcx> {
     fn decode_def_id(&mut self) -> DefId {
         let krate = CrateNum::decode(self);
         let raw = DefIndex::from_u32(self.read_u32());
-        let index = if krate == LOCAL_CRATE {
-            self.prev.map_local_index(raw)
-        } else {
-            raw
-        };
+        let index = if krate == LOCAL_CRATE { self.prev.map_local_index(raw) } else { raw };
         DefId { krate, index }
     }
 
@@ -475,18 +442,9 @@ impl<'a, 'tcx> SpanDecoder for PrevDecoder<'a, 'tcx> {
             let ExpnId { krate, local_id } = expn_id;
             let cstore = CStore::from_tcx(tcx);
             let cdata = cstore.get_crate_data(krate);
-            let expn_data = cdata
-                .root
-                .expn_data
-                .get(cdata, local_id)
-                .unwrap()
-                .decode((cdata, tcx));
-            let expn_hash = cdata
-                .root
-                .expn_hashes
-                .get(cdata, local_id)
-                .unwrap()
-                .decode((cdata, tcx));
+            let expn_data = cdata.root.expn_data.get(cdata, local_id).unwrap().decode((cdata, tcx));
+            let expn_hash =
+                cdata.root.expn_hashes.get(cdata, local_id).unwrap().decode((cdata, tcx));
             (expn_data, expn_hash)
         })
     }
@@ -498,13 +456,7 @@ impl<'a, 'tcx> SpanDecoder for PrevDecoder<'a, 'tcx> {
             RawSpan::Foreign(data) => data.span(),
             RawSpan::Local { file, lo, hi } => {
                 let (lo, hi) = self.prev.place_local_span(file, lo, hi);
-                SpanData {
-                    lo,
-                    hi,
-                    ctxt,
-                    parent: None,
-                }
-                .span()
+                SpanData { lo, hi, ctxt, parent: None }.span()
             }
         }
     }
