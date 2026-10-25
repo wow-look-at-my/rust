@@ -2610,6 +2610,7 @@ rustc_queries! {
         &'tcx Canonical<'tcx, canonical::QueryResponse<'tcx, ()>>,
         NoSolution,
     > {
+        anon
         desc { "evaluating `type_op_prove_predicate` `{:?}`", goal.canonical.value.value }
     }
 
