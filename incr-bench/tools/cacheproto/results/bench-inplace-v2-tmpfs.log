@@ -1,0 +1,23 @@
+sizes: file 448263559; value spans 408202611; inner values 399253258; framing removed 8949353; footer value index 15733433; other tables 24327515; irregular spans 0; leb lengths 2027101
+layout sizes vs today 448263559: in-file index 8 B words at 85% + 8 B check 458249930; + 4 B check 450752022; + 2 B check 447003068; graph-held offsets: cache 425611970, graph grows 8812544
+query-cache.bin /dev/shm/qcsess/query-cache.bin (448263559 B), dep-graph.bin /dev/shm/qcsess/dep-graph.bin
+query values N = 1874477 (408202611 B, median 8 B, p99 2343 B, max 11793978 B); side effects 23; allocs 27781; hygiene 339729; values with no dep node 0; kind bits 9
+
+| step | min ms | median ms | bytes written | note |
+|---|---:|---:|---:|---|
+| today: load footer index (HashMap of N) | 191.7 | 203.4 | 0 | N = 1874477 |
+| today: read all values + write new file | 258.7 | 289.7 | 448263559 | byte copy, no decode/encode CPU |
+| proposed: initial build (values + index) | 433.2 | 484.6 | 458249930 | file 458249930 B |
+| proposed: no-op session (open+mmap+N lookups) | 223.4 | 263.7 | 0 |  |
+| proposed: session rewriting 1% (k = 18744), with N lookups | 271.0 | 314.1 | 4177294 | values 3557177 B; merged 0 words, 0 index pages dirtied; lookup part median 264.7 ms |
+| proposed: save part only, 1% | 36.0 | 42.5 | 4177294 | lock, k appends, delta block, head store, merge if due |
+| proposed: session rewriting 5% (k = 93723), with N lookups | 275.7 | 290.9 | 26886190 | values 23785641 B; merged 0 words, 0 index pages dirtied; lookup part median 218.2 ms |
+| proposed: save part only, 5% | 69.0 | 73.0 | 26886190 | lock, k appends, delta block, head store, merge if due |
+| proposed: session rewriting 20% (k = 374895), with N lookups | 636.5 | 663.1 | 103718206 | values 88316995 B; merged 374895 words, 4308 index pages dirtied; lookup part median 212.5 ms |
+| proposed: save part only, 20% | 430.3 | 450.6 | 103718206 | lock, k appends, delta block, head store, merge if due |
+| proposed: consecutive 1% sessions, whole session each | 248.9 | 338.0 | 74690526 | 14 sessions; 8616 index pages dirtied in all; session 7 merged 127289 words in 80.1 ms, 4308 pages; session 14 merged 127414 words in 65.8 ms, 4308 pages |
+| proposed: consecutive 1% sessions, save part each | 25.7 | 30.9 | 74690526 | bytes: sum over all sessions |
+| lookup: today footer HashMap, 100000 random reads | 55.9 | 57.8 | 0 | index by prev dep-node index |
+| lookup: proposed in-file index, 100000 random reads | 60.2 | 60.6 | 0 | index by (kind, key fingerprint) |
+| proposed: compaction at >=25% dead | 991.9 | 1112.7 | 458249930 | dead 195601230 / live 422840143 B, file 675411040 -> 458249930 B |
+EXIT 0
