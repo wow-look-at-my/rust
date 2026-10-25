@@ -2550,6 +2550,7 @@ rustc_queries! {
     query try_normalize_generic_arg_after_erasing_regions(
         goal: PseudoCanonicalInput<'tcx, GenericArg<'tcx>>
     ) -> Result<GenericArg<'tcx>, NoSolution> {
+        anon
         desc { "normalizing `{}`", goal.value }
     }
 
