@@ -2595,6 +2595,9 @@ options! {
         "evict the least recently used crate directories once the incremental directory \
         exceeds this many bytes; falls back to the `RUSTC_INCREMENTAL_SIZE_CAP` environment \
         variable (default: no cap)"),
+    incremental_uncache: Option<Vec<String>> = (None, parse_opt_comma_list, [UNTRACKED],
+        "comma-separated query names to treat as not cache_on_disk: the query cache does not \
+        write or load their values, so they recompute when needed (default: none)"),
     incremental_verify_ich: bool = (false, parse_bool, [UNTRACKED],
         "verify extended properties for incr. comp. (default: no):
         - hashes of green query instances

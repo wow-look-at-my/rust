@@ -222,8 +222,64 @@ scenario_churn_feat() {
 	revert_corpus
 }
 
+# Switches -Zincremental-uncache between rounds in ONE target dir. Each step is "<config>:<step>". The flag is untracked, so the first build after a switch loads what the config wrote. A warm-up edit and its revert run first, and the
+# timed edits follow.
+UNCACHE_CONFIGS=${UNCACHE_CONFIGS:-"base= mir=optimized_mir typeck=typeck_root ioi=items_of_instance all=optimized_mir,typeck_root,items_of_instance"}
+UNCACHE_EDITS=${UNCACHE_EDITS:-"comment body newitem"}
+UNCACHE_ROUNDS=${UNCACHE_ROUNDS:-3}
+
+uncache_step() {
+	echo "$1 $2 $3 $(cat /proc/loadavg)" >>"$LOG_DIR/loadavg"
+	run_step "$1" uncache "$2:$3" "${BUILD[@]}"
+}
+
+uncache_config() {
+	local rep=$1 cfg=$2 profile=${3:-} edit
+	uncache_step "$rep" "$cfg" "warm:$rep"
+	apply_edit "round-warm-$cfg-$rep"
+	uncache_step "$rep" "$cfg" "warm-edit"
+	revert_corpus
+	uncache_step "$rep" "$cfg" "warm-revert"
+	for edit in $UNCACHE_EDITS; do
+		apply_edit "$edit"
+		if [[ -n $profile ]]; then
+			mkdir -p "$profile/$cfg/$edit"
+			SELF_PROFILE_DIR=$profile/$cfg/$edit uncache_step "$rep" "$cfg" "edit:$edit"
+		else
+			uncache_step "$rep" "$cfg" "edit:$edit"
+		fi
+		revert_corpus
+		uncache_step "$rep" "$cfg" "revert:$edit"
+	done
+}
+
+scenario_uncache() {
+	local configs rep i n entry
+	read -r -a configs <<<"$UNCACHE_CONFIGS"
+	n=${#configs[@]}
+	fresh_target uncache
+	export UNCACHE_KINDS=""
+	run_step 0 uncache "base:cold" "${BUILD[@]}"
+	for ((rep = 1; rep <= UNCACHE_ROUNDS; rep++)); do
+		for ((i = 0; i < n; i++)); do
+			# The order rotates, so no config always follows the same one.
+			entry=${configs[$(((i + rep - 1) % n))]}
+			export UNCACHE_KINDS=${entry#*=}
+			uncache_config "$rep" "${entry%%=*}"
+		done
+	done
+	if [[ -n ${UNCACHE_PROFILE_ROOT:-} ]]; then
+		for entry in "${configs[@]}"; do
+			export UNCACHE_KINDS=${entry#*=}
+			uncache_config prof "${entry%%=*}" "$UNCACHE_PROFILE_ROOT"
+		done
+	fi
+	unset UNCACHE_KINDS
+}
+
 for s in $SCENARIOS; do
 	case $s in
+	uncache) scenario_uncache ;;
 	edits) scenario_edits ;;
 	churn-cmd) scenario_churn_cmd ;;
 	churn-feat) scenario_churn_feat ;;

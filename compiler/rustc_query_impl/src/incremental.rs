@@ -139,6 +139,11 @@ pub(crate) fn promote_from_disk_inner<'tcx, C: QueryCache>(
     prof_timer.finish_with_query_invocation_id(dep_node_index.into());
 
     let Some(value) = value else {
+        // A previous session under `-Z incremental-uncache` did not write
+        // this kind.
+        if tcx.sess.opts.unstable_opts.incremental_uncache.is_some() {
+            return;
+        }
         // The key is cache-on-disk and its node is green, so a value must be on disk.
         bug!("failed to load disk-cached value for green node {dep_node:?}");
     };

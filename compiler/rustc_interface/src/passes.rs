@@ -989,6 +989,23 @@ pub fn create_and_enter_global_ctxt<T, F: for<'tcx> FnOnce(TyCtxt<'tcx>) -> T>(
         callback(sess, &mut providers);
     }
 
+    let uncache: Vec<String> = sess
+        .opts
+        .unstable_opts
+        .incremental_uncache
+        .iter()
+        .flatten()
+        .filter(|n| !n.is_empty())
+        .cloned()
+        .collect();
+    let unknown = rustc_query_impl::unknown_uncache_names(&uncache);
+    if !unknown.is_empty() {
+        sess.dcx().fatal(format!(
+            "-Z incremental-uncache: not a cache_on_disk query: {}",
+            unknown.join(", ")
+        ));
+    }
+
     let incremental = dep_graph.is_fully_enabled();
     let track_present = incremental
         || sess.opts.unstable_opts.incremental_verify_ich
@@ -1027,6 +1044,7 @@ pub fn create_and_enter_global_ctxt<T, F: for<'tcx> FnOnce(TyCtxt<'tcx>) -> T>(
             query_result_on_disk_cache,
             incremental,
             track_present,
+            &uncache,
         ),
         providers.hooks,
         compiler.current_gcx.clone(),
