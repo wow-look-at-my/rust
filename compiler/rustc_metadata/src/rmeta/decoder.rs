@@ -46,6 +46,7 @@ use crate::rmeta::table::IsDefault;
 use crate::rmeta::*;
 
 mod cstore_impl;
+pub(super) mod prev_session;
 
 /// A reference to the raw binary version of crate metadata.
 /// This struct applies [`MemDecoder`]'s validation when constructed

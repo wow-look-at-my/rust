@@ -2,14 +2,13 @@
 
 mod inplace;
 mod real;
-use inplace as store;
-
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use inplace as store;
 use real::Real;
 
 const RUNS: usize = 5;

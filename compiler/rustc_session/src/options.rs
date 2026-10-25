@@ -2592,6 +2592,9 @@ options! {
         "evict the least recently used crate directories once the incremental directory \
         exceeds this many bytes; falls back to the `RUSTC_INCREMENTAL_SIZE_CAP` environment \
         variable (default: no cap)"),
+    incremental_rmeta_reuse: bool = (false, parse_bool, [UNTRACKED],
+        "decode the MIR of unchanged items from the previous session's crate metadata \
+        instead of recomputing it (default: no)"),
     incremental_verify_ich: bool = (false, parse_bool, [UNTRACKED],
         "verify extended properties for incr. comp. (default: no):
         - hashes of green query instances
