@@ -2585,6 +2585,13 @@ options! {
     incremental_info: bool = (false, parse_bool, [UNTRACKED],
         "print high-level information about incremental reuse (or the lack thereof) \
         (default: no)"),
+    incremental_keep_configs: Option<usize> = (None, parse_opt_number, [UNTRACKED],
+        "number of build configurations of a crate to keep in the incremental directory, \
+        most recently used first (default: keep all)"),
+    incremental_size_cap: Option<u64> = (None, parse_opt_number, [UNTRACKED],
+        "evict the least recently used crate directories once the incremental directory \
+        exceeds this many bytes; falls back to the `RUSTC_INCREMENTAL_SIZE_CAP` environment \
+        variable (default: no cap)"),
     incremental_verify_ich: bool = (false, parse_bool, [UNTRACKED],
         "verify extended properties for incr. comp. (default: no):
         - hashes of green query instances

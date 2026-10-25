@@ -50,6 +50,8 @@
 //! any more and will delete those. It will also delete any finalized session
 //! directories for a given crate except for the most recent one.
 //!
+//! Each build configuration of a crate gets its own crate directory, and the steps above never look outside the current one. At finalization the compiler therefore also deletes any crate directory whose newest session another compiler version wrote, since this compiler cannot read it. `-Zincremental-keep-configs=N` keeps only the `N` most recently used crate directories of the current crate. `-Zincremental-size-cap=BYTES` (or `RUSTC_INCREMENTAL_SIZE_CAP`) deletes the least recently used crate directories of any crate until the incremental directory fits. Both delete a crate directory only if they can lock every session in it exclusively.
+//!
 //! ## Synchronization
 //!
 //! There is some synchronization needed in order for the compiler to be able to
@@ -96,7 +98,7 @@
 //! implemented.
 
 use std::fs as std_fs;
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -113,6 +115,7 @@ use rustc_session::{IncrCompSession, Session, StableCrateId};
 use rustc_span::{Symbol, bug};
 use tracing::debug;
 
+use super::file_format;
 use crate::diagnostics;
 
 #[cfg(test)]
@@ -256,6 +259,10 @@ pub(crate) fn prepare_session_directory(
     let new_session_directory = lock_directory(sess, &new_session_dir, true /* new_session */)
         .expect("should emit fatal error on lock fail");
 
+    if let Some(keep) = sess.opts.unstable_opts.incremental_keep_configs {
+        prune_crate_configs(sess, &crate_dir, crate_name, keep);
+    }
+
     // Find a suitable source directory to copy from. Ignore those that we
     // have already tried before.
     let old_source_directory = find_source_directory(sess, &crate_dir);
@@ -354,6 +361,8 @@ pub fn finalize_session_directory(
     incr_comp_session.old_session_directory = None;
 
     let _ = garbage_collect_session_directories(sess, &incr_comp_session);
+
+    collect_crate_dirs(sess, incr_comp_session.new_session_directory.parent().unwrap());
 }
 
 pub(crate) fn invalidate_old_session_dir(sess: &Session, incr_comp_session: &mut IncrCompSession) {
@@ -413,12 +422,22 @@ fn lock_directory(
     let lock_file_path = lock_file_path(session_dir);
     debug!("lock_directory() - lock_file: {}", lock_file_path.display());
 
-    match flock::LockedDir::try_lock(
-        session_dir.to_owned(),
-        &lock_file_path,
-        new_session, // create
-        new_session, // exclusive
-    ) {
+    let try_lock = || {
+        flock::LockedDir::try_lock(
+            session_dir.to_owned(),
+            &lock_file_path,
+            new_session, // create
+            new_session, // exclusive
+        )
+    };
+    let mut result = try_lock();
+    if new_session && matches!(&result, Err(err) if err.kind() == ErrorKind::NotFound) {
+        // Another process can prune the crate dir after we create it. Create it again.
+        create_dir(sess, session_dir.parent().unwrap(), "crate");
+        result = try_lock();
+    }
+
+    match result {
         Ok(lock) => {
             // Now that we have the lock, we can actually create the session
             // directory
@@ -768,6 +787,296 @@ pub(crate) fn garbage_collect_session_directories(
     });
 
     Ok(())
+}
+
+/// The number of bytes that holds the longest possible file header.
+const HEADER_READ_LEN: u64 = 300;
+
+/// Returns the crate name if `name` has the form `{crate_name}-{stable_crate_id}` of `crate_path`.
+fn crate_dir_crate_name(name: &str) -> Option<&str> {
+    let (crate_name, id) = name.rsplit_once('-')?;
+    let valid_id = id.len() == <u64 as ToBaseN>::encoded_len(CASE_INSENSITIVE)
+        && id.bytes().all(|b| b.is_ascii_digit() || b.is_ascii_lowercase());
+    (!crate_name.is_empty() && valid_id).then_some(crate_name)
+}
+
+/// Returns the timestamp of a session directory or a session lock file.
+fn session_entry_timestamp(name: &str) -> Option<SystemTime> {
+    let Some(stem) = name.strip_suffix(LOCK_FILE_EXT) else {
+        return extract_timestamp_from_session_dir(name).ok();
+    };
+    let mut parts = stem.split('-');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("s"), Some(timestamp), Some(_), None) => string_to_timestamp(timestamp).ok(),
+        _ => None,
+    }
+}
+
+/// Lists the crate directories in `incr_dir`, optionally only those of one crate name.
+fn list_crate_dirs(incr_dir: &Path, crate_name: Option<&str>) -> io::Result<Vec<PathBuf>> {
+    let mut dirs = Vec::new();
+    for entry in incr_dir.read_dir()? {
+        let Ok(entry) = entry else { continue };
+        // `file_type` does not follow symlinks, so a symlink is never a crate dir.
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str().and_then(crate_dir_crate_name) else { continue };
+        if crate_name.is_none_or(|c| c == name) {
+            dirs.push(entry.path());
+        }
+    }
+    dirs.sort();
+    Ok(dirs)
+}
+
+/// The newest session timestamp in a crate dir, or `UNIX_EPOCH` if it has no sessions.
+fn crate_dir_last_use(crate_dir: &Path) -> io::Result<SystemTime> {
+    let mut last_use = UNIX_EPOCH;
+    for entry in crate_dir.read_dir()? {
+        let Ok(entry) = entry else { continue };
+        if let Some(timestamp) = entry.file_name().to_str().and_then(session_entry_timestamp) {
+            last_use = last_use.max(timestamp);
+        }
+    }
+    Ok(last_use)
+}
+
+#[cfg(unix)]
+fn allocated_size(metadata: &std_fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.blocks() * 512
+}
+
+#[cfg(not(unix))]
+fn allocated_size(metadata: &std_fs::Metadata) -> u64 {
+    metadata.len()
+}
+
+/// The disk space a directory tree uses. A hard link counts once per link.
+fn dir_allocated_size(dir: &Path) -> u64 {
+    let Ok(entries) = dir.read_dir() else { return 0 };
+    let mut total = 0;
+    for entry in entries.flatten() {
+        // `DirEntry::metadata` does not follow symlinks.
+        let Ok(metadata) = entry.metadata() else { continue };
+        total += if metadata.is_dir() {
+            dir_allocated_size(&entry.path())
+        } else {
+            allocated_size(&metadata)
+        };
+    }
+    total
+}
+
+/// Returns the configurations to prune, oldest first. `current` always counts toward `keep`.
+fn select_configs_to_prune(
+    mut entries: Vec<(PathBuf, SystemTime)>,
+    current: &Path,
+    keep: usize,
+) -> Vec<PathBuf> {
+    entries.retain(|(path, _)| path.file_name() != current.file_name());
+    entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let prune_count = entries.len().saturating_sub(keep.saturating_sub(1));
+    entries.truncate(prune_count);
+    entries.into_iter().map(|(path, _)| path).collect()
+}
+
+/// Calls `try_delete` on crate dirs oldest first until the total size is at most `cap`.
+/// Never selects `current`. Returns the dirs that `try_delete` removed.
+fn evict_for_size_cap(
+    mut entries: Vec<(PathBuf, SystemTime, u64)>,
+    current: &Path,
+    cap: u64,
+    mut try_delete: impl FnMut(&Path) -> bool,
+) -> Vec<PathBuf> {
+    let mut total: u64 = entries.iter().map(|(_, _, size)| size).sum();
+    entries.retain(|(path, ..)| path.file_name() != current.file_name());
+    entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let mut evicted = Vec::new();
+    for (path, _, size) in entries {
+        if total <= cap {
+            break;
+        }
+        if try_delete(&path) {
+            total = total.saturating_sub(size);
+            evicted.push(path);
+        }
+    }
+    evicted
+}
+
+/// Returns the compiler version in the header of the newest finalized session of a crate dir.
+fn crate_dir_rustc_version(crate_dir: &Path) -> Option<String> {
+    let entries = crate_dir.read_dir().ok()?.filter_map(|e| e.ok().map(|e| e.path()));
+    let session_dir = find_source_directory_in_iter(entries)?;
+    for file_name in [DEP_GRAPH_FILENAME, WORK_PRODUCTS_FILENAME] {
+        let Ok(file) = std_fs::File::open(session_dir.join(file_name)) else { continue };
+        let mut header = Vec::new();
+        if file.take(HEADER_READ_LEN).read_to_end(&mut header).is_err() {
+            continue;
+        }
+        if let Some(version) = file_format::header_rustc_version(&header) {
+            return Some(version.to_owned());
+        }
+    }
+    None
+}
+
+/// Deletes the crate dirs whose cache another compiler version wrote, because this compiler
+/// cannot read them. Returns the dirs that remain.
+fn remove_incompatible_crate_dirs(
+    dirs: Vec<PathBuf>,
+    current: &Path,
+    current_version: &str,
+    mut try_delete: impl FnMut(&Path) -> bool,
+) -> Vec<PathBuf> {
+    dirs.into_iter()
+        .filter(|dir| {
+            let incompatible = dir.file_name() != current.file_name()
+                && crate_dir_rustc_version(dir).is_some_and(|v| v != current_version);
+            !(incompatible && try_delete(dir))
+        })
+        .collect()
+}
+
+fn remove_if_exists(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+/// Deletes a whole crate dir. Returns `Ok(false)` and changes nothing if a session in it is
+/// in use or was used in the last few seconds.
+fn try_delete_crate_dir(crate_dir: &Path) -> io::Result<bool> {
+    let mut lock_files = Vec::new();
+    let mut session_dirs = Vec::new();
+    let mut last_use = UNIX_EPOCH;
+    for entry in crate_dir.read_dir()? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else { continue };
+        if let Some(timestamp) = session_entry_timestamp(name) {
+            last_use = last_use.max(timestamp);
+        }
+        if is_session_directory_lock_file(name) {
+            lock_files.push(entry.path());
+        } else if is_session_directory(name) {
+            session_dirs.push(entry.path());
+        }
+    }
+
+    // A new session creates its lock file before it locks it.
+    if !is_old_enough_to_be_collected(last_use) {
+        return Ok(false);
+    }
+
+    let mut locks = Vec::with_capacity(lock_files.len());
+    for lock_file in &lock_files {
+        match flock::Lock::try_lock(lock_file, false, true) {
+            Ok(lock) => locks.push(lock),
+            Err(err) => {
+                debug!("try_delete_crate_dir() - `{}` in use: {err}", lock_file.display());
+                return Ok(false);
+            }
+        }
+    }
+
+    for session_dir in &session_dirs {
+        remove_if_exists(std_fs::remove_dir_all(session_dir))?;
+    }
+    // Windows cannot delete a file that is open, so release the locks first.
+    drop(locks);
+    for lock_file in &lock_files {
+        remove_if_exists(std_fs::remove_file(lock_file))?;
+    }
+
+    // `remove_dir` fails if a new session started here in the meantime. That session wins.
+    match std_fs::remove_dir(crate_dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => debug!("try_delete_crate_dir() - kept `{}`: {err}", crate_dir.display()),
+    }
+    Ok(true)
+}
+
+fn delete_crate_dir(sess: &Session, crate_dir: &Path) -> bool {
+    debug!("delete_crate_dir() - `{}`", crate_dir.display());
+    match try_delete_crate_dir(crate_dir) {
+        Ok(deleted) => deleted,
+        Err(err) => {
+            sess.dcx().emit_warn(diagnostics::SessionGcFailed { path: crate_dir, err });
+            false
+        }
+    }
+}
+
+/// Deletes the least recently used configurations of `crate_name` beyond `keep`.
+fn prune_crate_configs(sess: &Session, crate_dir: &Path, crate_name: Symbol, keep: usize) {
+    let Some(incr_dir) = crate_dir.parent() else { return };
+    let dirs = match list_crate_dirs(incr_dir, Some(crate_name.as_str())) {
+        Ok(dirs) => dirs,
+        Err(err) => {
+            debug!("prune_crate_configs() - cannot list `{}`: {err}", incr_dir.display());
+            return;
+        }
+    };
+    let entries = dirs
+        .into_iter()
+        .filter_map(|dir| {
+            let last_use = crate_dir_last_use(&dir).ok()?;
+            Some((dir, last_use))
+        })
+        .collect();
+    for dir in select_configs_to_prune(entries, crate_dir, keep) {
+        delete_crate_dir(sess, &dir);
+    }
+}
+
+fn incremental_size_cap(sess: &Session) -> Option<u64> {
+    if let Some(cap) = sess.opts.unstable_opts.incremental_size_cap {
+        return Some(cap);
+    }
+    let value = std::env::var("RUSTC_INCREMENTAL_SIZE_CAP").ok()?;
+    match value.trim().parse() {
+        Ok(cap) => Some(cap),
+        Err(err) => {
+            sess.dcx().warn(format!(
+                "ignoring `RUSTC_INCREMENTAL_SIZE_CAP={value}`: expected a number of bytes: {err}"
+            ));
+            None
+        }
+    }
+}
+
+/// Deletes the crate dirs of other compiler versions, then enforces the size cap if one is set.
+fn collect_crate_dirs(sess: &Session, crate_dir: &Path) {
+    let _timer = sess.timer("incr_comp_collect_crate_dirs");
+    let Some(incr_dir) = crate_dir.parent() else { return };
+    let dirs = match list_crate_dirs(incr_dir, None) {
+        Ok(dirs) => dirs,
+        Err(err) => {
+            debug!("collect_crate_dirs() - cannot list `{}`: {err}", incr_dir.display());
+            return;
+        }
+    };
+    let current_version = file_format::rustc_version(sess);
+    let dirs = remove_incompatible_crate_dirs(dirs, crate_dir, &current_version, |dir| {
+        delete_crate_dir(sess, dir)
+    });
+
+    let Some(cap) = incremental_size_cap(sess) else { return };
+    let entries = dirs
+        .into_iter()
+        .filter_map(|dir| {
+            let last_use = crate_dir_last_use(&dir).ok()?;
+            let size = dir_allocated_size(&dir);
+            Some((dir, last_use, size))
+        })
+        .collect();
+    evict_for_size_cap(entries, crate_dir, cap, |dir| delete_crate_dir(sess, dir));
 }
 
 fn delete_old(sess: &Session, path: &Path) {
