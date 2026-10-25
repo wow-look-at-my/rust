@@ -789,9 +789,6 @@ pub(crate) fn garbage_collect_session_directories(
     Ok(())
 }
 
-/// The number of bytes that holds the longest possible file header.
-const HEADER_READ_LEN: u64 = 300;
-
 /// Returns the crate name if `name` has the form `{crate_name}-{stable_crate_id}` of `crate_path`.
 fn crate_dir_crate_name(name: &str) -> Option<&str> {
     let (crate_name, id) = name.rsplit_once('-')?;
@@ -907,40 +904,6 @@ fn evict_for_size_cap(
     evicted
 }
 
-/// Returns the compiler version in the header of the newest finalized session of a crate dir.
-fn crate_dir_rustc_version(crate_dir: &Path) -> Option<String> {
-    let entries = crate_dir.read_dir().ok()?.filter_map(|e| e.ok().map(|e| e.path()));
-    let session_dir = find_source_directory_in_iter(entries)?;
-    for file_name in [DEP_GRAPH_FILENAME, WORK_PRODUCTS_FILENAME] {
-        let Ok(file) = std_fs::File::open(session_dir.join(file_name)) else { continue };
-        let mut header = Vec::new();
-        if file.take(HEADER_READ_LEN).read_to_end(&mut header).is_err() {
-            continue;
-        }
-        if let Some(version) = file_format::header_rustc_version(&header) {
-            return Some(version.to_owned());
-        }
-    }
-    None
-}
-
-/// Deletes the crate dirs whose cache another compiler version wrote, because this compiler
-/// cannot read them. Returns the dirs that remain.
-fn remove_incompatible_crate_dirs(
-    dirs: Vec<PathBuf>,
-    current: &Path,
-    current_version: &str,
-    mut try_delete: impl FnMut(&Path) -> bool,
-) -> Vec<PathBuf> {
-    dirs.into_iter()
-        .filter(|dir| {
-            let incompatible = dir.file_name() != current.file_name()
-                && crate_dir_rustc_version(dir).is_some_and(|v| v != current_version);
-            !(incompatible && try_delete(dir))
-        })
-        .collect()
-}
-
 fn remove_if_exists(result: io::Result<()>) -> io::Result<()> {
     match result {
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
@@ -1051,8 +1014,9 @@ fn incremental_size_cap(sess: &Session) -> Option<u64> {
     }
 }
 
-/// Deletes the crate dirs of other compiler versions, then enforces the size cap if one is set.
+/// Evicts the least recently used crate dirs until the incremental dir fits the size cap.
 fn collect_crate_dirs(sess: &Session, crate_dir: &Path) {
+    let Some(cap) = incremental_size_cap(sess) else { return };
     let _timer = sess.timer("incr_comp_collect_crate_dirs");
     let Some(incr_dir) = crate_dir.parent() else { return };
     let dirs = match list_crate_dirs(incr_dir, None) {
@@ -1062,12 +1026,6 @@ fn collect_crate_dirs(sess: &Session, crate_dir: &Path) {
             return;
         }
     };
-    let current_version = file_format::rustc_version(sess);
-    let dirs = remove_incompatible_crate_dirs(dirs, crate_dir, &current_version, |dir| {
-        delete_crate_dir(sess, dir)
-    });
-
-    let Some(cap) = incremental_size_cap(sess) else { return };
     let entries = dirs
         .into_iter()
         .filter_map(|dir| {
