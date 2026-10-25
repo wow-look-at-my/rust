@@ -1814,6 +1814,7 @@ rustc_queries! {
     query fn_abi_of_instance_no_deduced_attrs(
         key: ty::PseudoCanonicalInput<'tcx, (ty::Instance<'tcx>, &'tcx ty::List<Ty<'tcx>>)>
     ) -> Result<&'tcx rustc_target::callconv::FnAbi<'tcx, Ty<'tcx>>, &'tcx ty::layout::FnAbiError<'tcx>> {
+        anon
         desc { "computing unadjusted call ABI of `{}`", key.value.0 }
     }
 
