@@ -37,6 +37,18 @@ pub trait TyEncoder<'tcx>: SpanEncoder {
     fn predicate_shorthands(&mut self) -> &mut FxHashMap<ty::PredicateKind<'tcx>, usize>;
 
     fn encode_alloc_id(&mut self, alloc_id: &AllocId);
+
+    /// Starts the full encoding of a value that has no shorthand yet. An encoder that
+    /// writes full encodings to a separate stream returns true. The value is then
+    /// always referenced by the shorthand that `end_full_encoding` returns.
+    fn begin_full_encoding(&mut self) -> bool {
+        false
+    }
+
+    /// Ends a full encoding that `begin_full_encoding` started, and returns its position.
+    fn end_full_encoding(&mut self) -> usize {
+        unreachable!("`end_full_encoding` without `begin_full_encoding`")
+    }
 }
 
 pub trait TyDecoder<'tcx>:
@@ -99,6 +111,14 @@ where
     }
 
     let variant = value.variant();
+
+    if encoder.begin_full_encoding() {
+        variant.encode(encoder);
+        let shorthand = encoder.end_full_encoding() + SHORTHAND_OFFSET;
+        cache(encoder).insert(*value, shorthand);
+        encoder.emit_usize(shorthand);
+        return;
+    }
 
     let start = encoder.position();
     variant.encode(encoder);

@@ -75,7 +75,7 @@ pub(crate) fn save_dep_graph(tcx: TyCtxt<'_>) {
                     // Can we promote values without decoding them into the memory cache?
                     let inplace = sess.opts.unstable_opts.incremental_inplace_cache;
                     // In the shared values file, the entry of a green node stays valid as is.
-                    if !(inplace && on_disk_cache.is_inplace()) {
+                    if !(inplace && on_disk_cache.inplace_keeps_entries()) {
                         tcx.dep_graph.exec_cache_promotions(tcx);
                     }
 
