@@ -1,7 +1,15 @@
+<<<<<<< HEAD
 // `k` distinct indices below `n`.
 
 mod real;
 mod store;
+=======
+// ignore-tidy-linelength
+
+mod inplace;
+mod real;
+use inplace as store;
+>>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
 
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::os::fd::AsRawFd;
@@ -159,9 +167,16 @@ fn bench(real: &Real, work: &Path) {
     });
 
     // 2b. A session that rewrites k values; undone after each run.
+<<<<<<< HEAD
     let mut t = Vec::new();
     for _ in 0..RUNS {
         let e = store::edit(&file, real, &[], true, false).unwrap();
+=======
+    let merge_at = store::default_merge_at(real);
+    let mut t = Vec::new();
+    for _ in 0..RUNS {
+        let e = store::edit(&file, real, &[], true, false, merge_at).unwrap();
+>>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
         t.push(e.total_ns);
         store::undo(&file, e.undo.unwrap()).unwrap();
     }
@@ -176,6 +191,7 @@ fn bench(real: &Real, work: &Path) {
         let mut t = Vec::new();
         let mut lk = Vec::new();
         let mut sv = Vec::new();
+<<<<<<< HEAD
         let (mut bytes, mut pages, mut vb) = (0, 0, 0);
         for _ in 0..RUNS {
             let picks = rng.picks(n, k);
@@ -186,6 +202,19 @@ fn bench(real: &Real, work: &Path) {
             sv.push(e.save_ns);
             bytes = e.appended + 8 * e.slot_stores + 8 * 8;
             pages = e.dirty_index_pages;
+=======
+        let (mut bytes, mut pages, mut vb, mut mg) = (0, 0, 0, 0);
+        for _ in 0..RUNS {
+            let picks = rng.picks(n, k);
+            vb = picks.iter().map(|&i| real.values[i].inner as u64).sum::<u64>();
+            let e = store::edit(&file, real, &picks, true, false, merge_at).unwrap();
+            t.push(e.total_ns);
+            lk.push(e.lookup_ns);
+            sv.push(e.save_ns);
+            bytes = e.appended + 8 * e.merged_words;
+            pages = e.dirty_index_pages;
+            mg = e.merged_words;
+>>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
             store::undo(&file, e.undo.unwrap()).unwrap();
         }
         lk.sort_unstable();
@@ -194,7 +223,11 @@ fn bench(real: &Real, work: &Path) {
             times: t,
             bytes,
             note: format!(
+<<<<<<< HEAD
                 "values {vb} B; {pages} index pages dirtied; lookup part median {:.1} ms",
+=======
+                "values {vb} B; merged {mg} words, {pages} index pages dirtied; lookup part median {:.1} ms",
+>>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
                 ms(lk[lk.len() / 2])
             ),
         });
@@ -202,7 +235,60 @@ fn bench(real: &Real, work: &Path) {
             name: format!("proposed: save part only, {pct}%"),
             times: sv,
             bytes,
+<<<<<<< HEAD
             note: "lock, k appends, k slot stores, end store".into(),
+=======
+            note: "lock, k appends, delta block, head store, merge if due".into(),
+        });
+    }
+
+    // 2b'.
+    {
+        need(work, qc_len);
+        let k = n / 100;
+        let (mut t, mut sv, mut bytes, mut pages) = (Vec::new(), Vec::new(), 0, 0);
+        let mut merges = Vec::new();
+        let mut undos = Vec::new();
+        let sessions = 2 * (merge_at as usize / k + 1);
+        for s in 0..sessions {
+            let picks = rng.picks(n, k);
+            let e = store::edit(&file, real, &picks, true, false, merge_at).unwrap();
+            t.push(e.total_ns);
+            sv.push(e.save_ns);
+            bytes += e.appended + 8 * e.merged_words;
+            pages += e.dirty_index_pages;
+            if e.merged_words > 0 {
+                merges.push(format!(
+                    "session {} merged {} words in {:.1} ms, {} pages",
+                    s + 1,
+                    e.merged_words,
+                    ms(e.merge_ns),
+                    e.dirty_index_pages
+                ));
+            }
+            undos.push(e.undo.unwrap());
+        }
+        let v = store::verify(&file, real, false).unwrap();
+        assert_eq!((v.found, v.mismatched), (n, 0), "chain lost values");
+        let note = format!(
+            "{sessions} sessions; {pages} index pages dirtied in all; {}",
+            merges.join("; ")
+        );
+        for u in undos.into_iter().rev() {
+            store::undo(&file, u).unwrap();
+        }
+        rows.push(Row {
+            name: "proposed: consecutive 1% sessions, whole session each".into(),
+            times: t,
+            bytes,
+            note,
+        });
+        rows.push(Row {
+            name: "proposed: consecutive 1% sessions, save part each".into(),
+            times: sv,
+            bytes,
+            note: "bytes: sum over all sessions".into(),
+>>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
         });
     }
 
@@ -230,17 +316,26 @@ fn bench(real: &Real, work: &Path) {
     });
     {
         let f = std::fs::File::open(&file).unwrap();
+<<<<<<< HEAD
         let v = store::View { map: unsafe { memmap2::Mmap::map(&f) }.unwrap() };
         let anc = v.ancestors();
+=======
+        let v = store::View::open(unsafe { memmap2::Mmap::map(&f) }.unwrap()).unwrap();
+>>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
         let mut t = Vec::new();
         for _ in 0..RUNS {
             let s = Instant::now();
             let mut x = 0;
             for &i in &picks {
                 let e = &real.values[i];
+<<<<<<< HEAD
                 let (_, w) = v.lookup(e.kind, &e.key).unwrap();
                 let o = v.resolve(w, &anc).unwrap();
                 x ^= checksum(v.value(o).2);
+=======
+                let w = v.lookup(e.kind, &e.key).and_then(|w| v.resolve(w)).unwrap();
+                x ^= checksum(v.value(w));
+>>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
             }
             std::hint::black_box(x);
             t.push(s.elapsed().as_nanos());
@@ -267,12 +362,20 @@ fn bench(real: &Real, work: &Path) {
             d * 4 < live
         } {
             let picks = rng.picks(n, k);
+<<<<<<< HEAD
             store::edit(&file, real, &picks, false, false).unwrap();
+=======
+            store::edit(&file, real, &picks, false, false, merge_at).unwrap();
+>>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
         }
         let (live, _) = store::ratio(&file).unwrap();
         let before = std::fs::metadata(&file).unwrap().len();
         let s = Instant::now();
+<<<<<<< HEAD
         bytes = store::compact(&file).unwrap();
+=======
+        bytes = store::compact(&file, real).unwrap();
+>>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
         t.push(s.elapsed().as_nanos());
         note = format!("dead {dead} / live {live} B, file {before} -> {bytes} B");
     }
@@ -290,7 +393,12 @@ fn writer(real: &Real, file: &Path, seed: u64) {
     std::io::stdout().flush().unwrap();
     for _ in 0..200 {
         let picks = rng.picks(real.values.len(), 2000);
+<<<<<<< HEAD
         store::edit(file, real, &picks, false, true).unwrap();
+=======
+        // A merge every few sessions, so kills also land inside merges.
+        store::edit(file, real, &picks, false, true, 5000).unwrap();
+>>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
     }
     println!("done");
 }
@@ -324,13 +432,22 @@ fn killtest(real: &Real, work: &Path, trials: usize) {
             ok += 1;
         }
         println!(
+<<<<<<< HEAD
             "trial {t}: {}; found {} missing {} mismatched {}; {} slots name an uncommitted generation; end {} file {}",
             v.state, v.found, v.missing, v.mismatched, v.foreign_words, v.end, v.file_len
+=======
+            "trial {t}: {}; found {} missing {} mismatched {}; chain {} words; end {} file {}",
+            v.state, v.found, v.missing, v.mismatched, v.chain_n, v.end, v.file_len
+>>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
         );
     }
     // The next writer must append past the dead bytes and commit.
     let picks = Rng(99).picks(real.values.len(), 2000);
+<<<<<<< HEAD
     store::edit(&file, real, &picks, false, true).unwrap();
+=======
+    store::edit(&file, real, &picks, false, true, 5000).unwrap();
+>>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
     let v = store::verify(&file, real, true).unwrap();
     println!(
         "after one more committed writer: {}; found {} missing {} mismatched {}",
@@ -341,6 +458,43 @@ fn killtest(real: &Real, work: &Path, trials: usize) {
 
 fn describe(real: &Real) {
     let total: u64 = real.values.iter().map(|e| e.len as u64).sum();
+<<<<<<< HEAD
+=======
+    let inner: u64 = real.values.iter().map(|e| e.inner as u64).sum();
+    let lebs: u64 = real.values.iter().map(|e| store::leb_len(e.inner as u64) as u64).sum();
+    let qc = real.qc.len() as u64;
+    println!(
+        "sizes: file {qc}; value spans {total}; inner values {inner}; framing removed {}; footer value index {}; other tables {}; irregular spans {}; leb lengths {lebs}",
+        total - inner,
+        real.value_index_bytes,
+        real.tables_bytes(),
+        real.irregular
+    );
+    let n = real.values.len() as u64;
+    let cap = (n * 100).div_ceil(store::LOAD_PCT);
+    let tables = real.tables_bytes();
+    let with_check = |c: u64| store::HDR + cap * 8 + inner + lebs + c * n + tables;
+    // The graph holds each cached node's entry offset, so the cache needs no index and no check.
+    let graph_held = store::HDR + inner + lebs + tables;
+    let offs: u64 = {
+        let mut at = store::HDR;
+        real.values
+            .iter()
+            .map(|e| {
+                let w = store::leb_len(at) as u64;
+                at += store::leb_len(e.inner as u64) as u64 + e.inner as u64;
+                w
+            })
+            .sum()
+    };
+    println!(
+        "layout sizes vs today {qc}: in-file index 8 B words at {}% + 8 B check {}; + 4 B check {}; + 2 B check {}; graph-held offsets: cache {graph_held}, graph grows {offs}",
+        store::LOAD_PCT,
+        with_check(8),
+        with_check(4),
+        with_check(2)
+    );
+>>>>>>> incr-bench: in-place query cache prototype with 8-byte index words and delta chains
     let mut lens: Vec<u32> = real.values.iter().map(|e| e.len).collect();
     lens.sort_unstable();
     println!(
