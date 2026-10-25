@@ -1,0 +1,7 @@
+
+=== collapse xai_grok_shell-1yymvei0n623d/dep-graph.bin  678820342 bytes, 10606036 nodes, 92301047 edges, names mapped
+key crate half: 5517664 distinct values; top value 819ee25cdd7f6719 has 3445304 nodes; 83 other values have >= 1000 nodes
+  local (top value)        3445304 nodes  32.5% |   231014742 B  34.0% of node bytes | top kinds: [def_kind 4% def_span 4% def_ident_span 4% hir_owner 4% lower_to_hir 4%]
+  upstream (83 values)      494533 nodes   4.7% |    21765781 B   3.2% of node bytes | top kinds: [type_of 9% def_kind 8% generics_of 7% def_span 5% associated_item 4%]
+  tail (rare values)       6666199 nodes  62.9% |   426039131 B  62.8% of node bytes | top kinds: [layout_of 21% fn_abi_of_instance_no_deduced_attrs 7% resolve_instance_raw 7% symbol_name 7% implementations_of_trait 6%]
+  most common upstream values: 49b6f044c3c5f9d3=58578 43a9e3d9207f4d4f=46115 878850e2ad76ffc2=26713 1b63011abee2bcbc=23495 6714b69d9b717b79=19905 2d3f89b1c0192954=19607 39ba53cfc80f8fec=19032 6ee2287fca6b1018=18460
