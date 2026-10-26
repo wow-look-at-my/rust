@@ -1,4 +1,4 @@
-//! `-Zincremental-keep-configs=1` replaces an old configuration of a crate, but never the `--test` build of the same crate.
+//! `-Zincremental-keep-configs=1` replaces an old lib configuration but keeps its `--test` build.
 
 //@ ignore-cross-compile
 
