@@ -6,6 +6,11 @@ fn fp(n: u64) -> Fingerprint {
     Fingerprint::new(n.wrapping_mul(0x9E37_79B9_7F4A_7C15), n ^ 0xA5A5)
 }
 
+/// A result fingerprint as the graph records it.
+fn val(n: u64) -> Fingerprint {
+    short_value_fingerprint(fp(n))
+}
+
 fn node(kind: u16, key: u64) -> DepNode {
     DepNode { kind: DepKind::from_u16(kind), key_fingerprint: fp(key).into() }
 }
@@ -64,19 +69,19 @@ fn round_trip(entries: &[(u32, DepNode, Fingerprint, Vec<u32>)], flush_before: &
 
 #[test]
 fn round_trip_refs_gaps_and_flushes() {
-    let shared_value = fp(1000);
+    let shared_value = val(1000);
     let entries = vec![
-        (0, node(1, 1), fp(10), vec![]),
+        (0, node(1, 1), val(10), vec![]),
         // Same key under another kind, shared value, index is next.
         (1, node(2, 1), shared_value, vec![0]),
         (2, node(3, 1), shared_value, vec![0, 1]),
         // Zero value, new key.
         (3, node(1, 2), Fingerprint::ZERO, vec![2, 1, 0]),
         // A gap in the indices, as when a thread takes a new batch.
-        (300, node(2, 2), fp(11), vec![3, 0x1_0000]),
+        (300, node(2, 2), val(11), vec![3, 0x1_0000]),
         // A flush resets the implied index but references to earlier nodes stay valid.
         (301, node(3, 2), shared_value, vec![300]),
-        (302, node(4, 1), fp(10), vec![0x0100_0000]),
+        (302, node(4, 1), val(10), vec![0x0100_0000]),
     ];
     let len = round_trip(&entries, &[301]);
     // The fixed header alone was many bytes per node.
@@ -87,19 +92,19 @@ fn round_trip_refs_gaps_and_flushes() {
 fn edge_back_references_restart_at_a_flush() {
     let far = 0x0100_0000;
     let entries = vec![
-        (0, node(1, 1), fp(1), vec![]),
-        (1, node(1, 2), fp(2), vec![far, 0, far + 7]),
+        (0, node(1, 1), val(1), vec![]),
+        (1, node(1, 2), val(2), vec![far, 0, far + 7]),
         // Each far target repeats, so its edge is a short back-reference.
-        (2, node(1, 3), fp(3), vec![far + 7, far, 0, far]),
+        (2, node(1, 3), val(3), vec![far + 7, far, 0, far]),
         // After the flush a back-reference to the block before is not valid.
-        (3, node(1, 4), fp(4), vec![far, far + 7]),
-        (4, node(1, 5), fp(5), vec![far + 7, far]),
+        (3, node(1, 4), val(4), vec![far, far + 7]),
+        (4, node(1, 5), val(5), vec![far + 7, far]),
     ];
     round_trip(&entries, &[3]);
     let without_repeats = vec![
-        (0, node(1, 1), fp(1), vec![]),
-        (1, node(1, 2), fp(2), vec![far, 0, far + 7]),
-        (2, node(1, 3), fp(3), vec![far + 20, far + 30, 0, far + 40]),
+        (0, node(1, 1), val(1), vec![]),
+        (1, node(1, 2), val(2), vec![far, 0, far + 7]),
+        (2, node(1, 3), val(3), vec![far + 20, far + 30, 0, far + 40]),
     ];
     let repeats = round_trip(&entries[..3], &[]);
     assert!(repeats < round_trip(&without_repeats, &[]), "back-references saved nothing");
@@ -108,7 +113,7 @@ fn edge_back_references_restart_at_a_flush() {
 #[test]
 fn round_trip_long_edge_list() {
     let edges: Vec<u32> = (0..(NodeHead::MAX_INLINE_LEN as u32 + 10)).collect();
-    let entries = vec![(0, node(1, 1), fp(1), vec![]), (1, node(2, 2), fp(2), edges)];
+    let entries = vec![(0, node(1, 1), val(1), vec![]), (1, node(2, 2), val(2), edges)];
     round_trip(&entries, &[]);
 }
 
@@ -119,6 +124,22 @@ fn anon_key_is_not_stored() {
     let anon = round_trip(&[(0, node(trait_select, 7), Fingerprint::ZERO, vec![])], &[]);
     let keyed = round_trip(&[(0, node(red, 7), Fingerprint::ZERO, vec![])], &[]);
     assert_eq!(keyed - anon, size_of::<Fingerprint>(), "{anon} vs {keyed} bytes");
+}
+
+#[test]
+fn value_is_stored_in_eight_bytes() {
+    let red = DepKind::Red.as_u16();
+    let zero = round_trip(&[(0, node(red, 7), Fingerprint::ZERO, vec![])], &[]);
+    let stored = round_trip(&[(0, node(red, 7), val(9), vec![])], &[]);
+    assert_eq!(stored - zero, 8, "{zero} vs {stored} bytes");
+}
+
+#[test]
+fn short_value_fingerprint_keeps_the_low_half() {
+    let (low, high) = fp(3).split();
+    assert_ne!(high.as_u64(), 0);
+    assert_eq!(val(3), Fingerprint::new(low, 0u64));
+    assert_eq!(short_value_fingerprint(Fingerprint::ZERO), Fingerprint::ZERO);
 }
 
 #[test]

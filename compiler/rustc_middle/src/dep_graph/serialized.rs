@@ -498,6 +498,13 @@ const FLAG_KEY_IS_REF: u8 = 1 << 1;
 const FLAG_VALUE_IS_REF: u8 = 1 << 2;
 /// The value fingerprint is `Fingerprint::ZERO` and is not stored.
 const FLAG_VALUE_IS_ZERO: u8 = 1 << 3;
+
+/// Keeps the low 64 bits of a result fingerprint. The graph stores only those
+/// bits.
+#[inline]
+pub fn short_value_fingerprint(fingerprint: Fingerprint) -> Fingerprint {
+    Fingerprint::new(fingerprint.split().0, 0u64)
+}
 /// The node is anon. Its key is never looked up again, so it is not stored and decodes as zero.
 const FLAG_KEY_IS_ABSENT: u8 = 1 << 4;
 /// The node is the first of a block that one thread wrote. Edge back-references start again here.
@@ -550,7 +557,7 @@ impl NodeRecord {
         } else if flags & FLAG_VALUE_IS_REF != 0 {
             value_fingerprints[Self::decode_ref(d, index, nodes)]
         } else {
-            Fingerprint::from_le_bytes(d.read_array())
+            Fingerprint::new(u64::from_le_bytes(d.read_array()), 0u64)
         };
 
         let num_edges = head.len().unwrap_or_else(|| d.read_u32());
@@ -695,6 +702,7 @@ impl NodeInfo<'_> {
         let key_fingerprint: Fingerprint = node.key_fingerprint.into();
         let key_is_absent = node.kind.is_anon();
         let key_ref = if key_is_absent { None } else { refs.keys.replace(key_fingerprint, index) };
+        debug_assert_eq!(value_fingerprint, short_value_fingerprint(value_fingerprint));
         let value_is_zero = value_fingerprint == Fingerprint::ZERO;
         let value_ref =
             if value_is_zero { None } else { refs.values.replace(value_fingerprint, index) };
@@ -738,7 +746,7 @@ impl NodeInfo<'_> {
         if !value_is_zero {
             match value_ref {
                 Some(target) => e.emit_u32(index - target),
-                None => e.write_array(value_fingerprint.to_le_bytes()),
+                None => e.write_array(value_fingerprint.split().0.as_u64().to_le_bytes()),
             }
         }
         let edges_start = e.position();

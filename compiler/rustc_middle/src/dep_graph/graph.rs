@@ -25,7 +25,9 @@ use {super::debug::EdgeFilter, std::env};
 
 use super::edges::{ReadsRecorder, SMALL_READS_MAX, TaskReads};
 use super::retained::RetainedDepGraph;
-use super::serialized::{GraphEncoder, SerializedDepGraph, SerializedDepNodeIndex};
+use super::serialized::{
+    GraphEncoder, SerializedDepGraph, SerializedDepNodeIndex, short_value_fingerprint,
+};
 use super::{DepKind, DepNode, WorkProductId, read_deps, with_deps};
 use crate::ich::StableHashState;
 use crate::ty::TyCtxt;
@@ -808,6 +810,7 @@ impl DepGraphData {
         edges: &[DepNodeIndex],
         value_fingerprint: Option<Fingerprint>,
     ) -> DepNodeIndex {
+        let value_fingerprint = value_fingerprint.map(short_value_fingerprint);
         if let Some(prev_index) = self.previous.node_to_index_opt(&key) {
             // Determine the color and index of the new `DepNode`.
             let is_green = if let Some(value_fingerprint) = value_fingerprint {
