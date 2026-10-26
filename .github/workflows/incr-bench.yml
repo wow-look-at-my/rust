@@ -88,12 +88,9 @@ jobs:
 
       - name: Check out the compiler
         if: steps.toolchain.outputs.cache-hit != 'true'
-        uses: actions/checkout@v4
-        with:
-          path: rustc-src
-          ref: ${{ matrix.sha }}
-          fetch-depth: 0
-          filter: blob:none
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bench/incr-bench/scripts/ci-checkout-rustc.sh rustc-src "${{ matrix.sha }}"
 
       - name: Build the stage1 toolchain
         if: steps.toolchain.outputs.cache-hit != 'true'
@@ -159,12 +156,9 @@ jobs:
 
       - name: Check out the rustc source
         if: matrix.workload == 'rustc'
-        uses: actions/checkout@v4
-        with:
-          path: src
-          ref: ${{ needs.config.outputs.rustc_src }}
-          fetch-depth: 0
-          filter: blob:none
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bench/incr-bench/scripts/ci-checkout-rustc.sh src "${{ needs.config.outputs.rustc_src }}"
 
       - name: Build the syn corpus
         if: matrix.workload == 'syn'
