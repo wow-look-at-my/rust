@@ -29,6 +29,8 @@ A push that changes `ci-request.env` runs `.github/workflows/incr-bench.yml`. Th
 
 ## Results
 
+- `source-claims.md`: each claim of the original brief, checked against the unpatched source with file and line.
+
 - `results/results.csv`, `results2.csv`, `results-stage0.csv`: `bench.sh` rows per compiler.
 - `results/run-*.log`: `bench.sh` logs per compiler.
 - `results/syn-incr-vs-full.txt`: `incr-vs-full.sh` on syn.
