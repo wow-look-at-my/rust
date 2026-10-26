@@ -54,7 +54,7 @@ if [[ $workload == rustc ]]; then
 	export RUSTFLAGS_NOT_BOOTSTRAP="$flags"
 	printf '%s\n' 'profile = "compiler"' 'change-id = "ignore"' '[llvm]' 'download-ci-llvm = true' \
 		'[rust]' 'debuginfo-level = 0' 'debug-assertions = false' '[build]' \
-		"rustc = \"$rustc_bin\"" "cargo = \"$(command -v cargo)\"" 'local-rebuild = true' \
+		"rustc = \"$rustc_bin\"" 'local-rebuild = true' \
 		"jobs = ${CARGO_BUILD_JOBS:-$(nproc)}" > "$src/bootstrap.toml"
 else
 	export RUSTC="$rustc_bin" RUSTC_WRAPPER="$here/ci-rustc-flags.sh" RUSTC_BOOTSTRAP=1 BENCH_RUSTC_FLAGS="$flags"
