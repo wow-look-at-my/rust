@@ -698,6 +698,7 @@ rustc_queries! {
     query closure_saved_names_of_captured_variables(def_id: DefId) -> &'tcx IndexVec<abi::FieldIdx, Symbol> {
         arena_cache
         desc { "computing debuginfo for closure `{}`", tcx.def_path_str(def_id) }
+        cache_on_disk
         separate_provide_extern
     }
 
