@@ -31,3 +31,19 @@ END {
 	}
 }
 ' "$@"
+
+# An -Zincremental-info leg also writes a node fates file, whose header starts with "fates".
+awk -F'\t' '
+FNR == 1 { table = ($1 == "fates"); next }
+!table { next }
+{ rows[++n] = sprintf("| %s | %s | %s | %s | %s | %s | %s | %s | %s |", $1, $2, $3, $4, $5, $6, $7, $8, $9) }
+END {
+	if (n == 0) exit
+	print ""
+	print "Node fates from -Zincremental-info, summed over all crates. A red node ran again and its result changed."
+	print ""
+	print "| workload | config | step | previous nodes | promoted green | re-run green | re-run red | unreached | new |"
+	print "|---|---|---|---:|---:|---:|---:|---:|---:|"
+	for (i = 1; i <= n; i++) print rows[i]
+}
+' "$@"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Steps: cold, edit:comment, edit:body, edit:new-item (the edits add up),
+# Steps: cold, edit:comment, edit:body, edit:new-item, edit:signature (the edits add up),
 # revert. Usage: ci-bench.sh WORKLOAD SRC RUSTC TARGET_ROOT RESULTS WORKLOAD
 # is grok, syn or rustc. SRC is a git checkout of it.
 set -euo pipefail
@@ -129,6 +129,14 @@ build() {
 		printf '%s\t%s\t%s\t%s\n' "$config" "$mode" "$step" "$graph" >> "${results%.tsv}.graph.tsv"
 		echo "dep graph bytes $mode $step: $graph (total, heads, keys, values, edges)"
 	fi
+	# An -Zincremental-info run prints what happened to each node, summed here over all crates.
+	fates=$({ grep -oE 'node fates: previous [0-9]+ promoted [0-9]+ rerun-green [0-9]+ rerun-red [0-9]+ unreached [0-9]+ new [0-9]+' "$log" || true; } | awk '{p += $4; pr += $6; g += $8; r += $10; u += $12; n += $14} END {printf "%d\t%d\t%d\t%d\t%d\t%d", p, pr, g, r, u, n}')
+	if [[ $fates != $'0\t0\t0\t0\t0\t0' ]]; then
+		fates_file=${results%.tsv}.fates.tsv
+		[[ -s $fates_file ]] || printf 'fates\tconfig\tstep\tprevious\tpromoted\trerun_green\trerun_red\tunreached\tnew\n' > "$fates_file"
+		printf '%s\t%s\t%s\t%s\n' "$workload" "$config" "$step" "$fates" >> "$fates_file"
+		echo "node fates $mode $step: $fates (previous, promoted, rerun-green, rerun-red, unreached, new)"
+	fi
 	if [[ $step == cold && $graph != $'0\t0\t0\t0\t0' ]]; then
 		# The per-kind table rows end in the bytes column. Sum each kind over all crates.
 		awk -F'|' 'NF == 6 && $5 ~ /^ *[0-9]+ *$/ {
@@ -166,6 +174,10 @@ edit() {
 	new-item)
 		printf '\n#[allow(dead_code)]\nfn incr_bench_extra_item() -> u32 {\n    7\n}\n' >> "$item_file"
 		;;
+	signature)
+		# The item from the new-item step becomes part of the public API, with a new return type.
+		sed -i 's|^fn incr_bench_extra_item() -> u32 {$|pub fn incr_bench_extra_item() -> u64 {|' "$item_file"
+		;;
 	esac
 	if [[ $(git diff | sha256sum) == "$before" ]]; then
 		echo "ci-bench: the $1 edit changed nothing in $src" >&2
@@ -197,7 +209,7 @@ run_mode() {
 	local mode=$1 tdir=$target_root/$1
 	rm -rf "$tdir"
 	build "$tdir" "$mode" cold
-	for e in comment body new-item; do
+	for e in comment body new-item signature; do
 		edit "$e"
 		build "$tdir" "$mode" "edit:$e"
 	done
