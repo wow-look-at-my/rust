@@ -57,7 +57,7 @@ for entry in "${configs[@]}"; do
 	[[ $flags =~ ^[-A-Za-z0-9=,_.:+\ ]*$ ]] || die "config '$cname' has flags outside [-A-Za-z0-9=,_.:+ ]: $flags"
 	used[$compiler]=1
 	for w in $workloads; do
-		[[ $w == grok || $w == syn ]] || die "unknown workload '$w'"
+		[[ $w == grok || $w == syn || $w == rustc ]] || die "unknown workload '$w'"
 		legs=$(jq -c --arg leg "$w-$cname" --arg w "$w" --arg c "$cname" --arg comp "$compiler" \
 			--arg sha "${sha[$compiler]}" --arg key "${key[$compiler]}" --arg f "$flags" \
 			'. + [{leg: $leg, workload: $w, config: $c, compiler: $comp, sha: $sha, key: $key, flags: $f}]' <<< "$legs")
@@ -72,6 +72,8 @@ done
 jq . <<< "$legs" >&2
 {
 	echo "grok_ref=$grok_ref"
+	# The rustc workload compiles the baseline source with each config's compiler.
+	echo "rustc_src=${sha[baseline]}"
 	echo "compilers=$compilers"
 	echo "legs=$legs"
 	echo "names=$(jq -c 'map(.leg)' <<< "$legs")"

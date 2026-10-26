@@ -28,10 +28,10 @@ on:
         required: false
         default: ''
 
-# One group per run: a new request never cancels a benchmark in progress.
+# A new request on a branch cancels the benchmark in progress on that branch.
 concurrency:
-  group: gha_${{ github.repository }}_${{ github.workflow }}_${{ github.sha }}
-  cancel-in-progress: false
+  group: gha_${{ github.repository }}_${{ github.workflow }}_${{ github.ref != 'refs/heads/master' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 permissions:
   contents: read
@@ -39,9 +39,10 @@ permissions:
 
 jobs:
   config:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.repository.visibility == 'public' && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
     outputs:
       grok_ref: ${{ steps.cfg.outputs.grok_ref }}
+      rustc_src: ${{ steps.cfg.outputs.rustc_src }}
       compilers: ${{ steps.cfg.outputs.compilers }}
       legs: ${{ steps.cfg.outputs.legs }}
       names: ${{ steps.cfg.outputs.names }}
@@ -55,7 +56,7 @@ jobs:
   toolchain:
     needs: config
     name: toolchain ${{ matrix.compiler }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ github.event.repository.visibility == 'public' && 'ubuntu-22.04' || vars.CI_RUNNER || 'ubuntu-22.04' }}
     timeout-minutes: 300
     strategy:
       fail-fast: false
@@ -109,7 +110,7 @@ jobs:
     needs: [config, toolchain]
     name: bench ${{ matrix.leg }}
     # The same image as grok-build's own Linux CI.
-    runs-on: ubuntu-22.04
+    runs-on: ${{ github.event.repository.visibility == 'public' && 'ubuntu-22.04' || vars.CI_RUNNER || 'ubuntu-22.04' }}
     timeout-minutes: 345
     strategy:
       fail-fast: false
@@ -148,6 +149,15 @@ jobs:
         with:
           packages: mold
 
+      - name: Check out the rustc source
+        if: matrix.workload == 'rustc'
+        uses: actions/checkout@v4
+        with:
+          path: src
+          ref: ${{ needs.config.outputs.rustc_src }}
+          fetch-depth: 0
+          filter: blob:none
+
       - name: Build the syn corpus
         if: matrix.workload == 'syn'
         run: bench/incr-bench/scripts/ci-syn-corpus.sh src
@@ -182,7 +192,7 @@ jobs:
 
   report:
     needs: [config, bench]
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.repository.visibility == 'public' && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
     permissions:
       contents: write
       id-token: write

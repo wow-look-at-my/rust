@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steps: cold, edit:comment, edit:body, edit:new-item (the edits add up),
 # revert. Usage: ci-bench.sh WORKLOAD SRC RUSTC TARGET_ROOT RESULTS WORKLOAD
-# is grok or syn. SRC is a git checkout of it.
+# is grok, syn or rustc. SRC is a git checkout of it.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 workload=$1
@@ -33,13 +33,32 @@ syn)
 	comment_after='    // Strip the BOM if it is present'
 	profile_crates='syn:lib'
 	;;
+rustc)
+	# The compiler builds itself. RUSTC is the stage0 compiler under build.local-rebuild.
+	cmd=(env -u GITHUB_ACTIONS ./x build --stage 1 compiler)
+	item_file=compiler/rustc_passes/src/lib.rs
+	body_file=compiler/rustc_passes/src/lib.rs
+	body_from='    canonical_symbols::provide(providers);'
+	body_to='    canonical_symbols::provide(providers); let _ = 0u8;'
+	comment_after=''
+	profile_crates=''
+	;;
 *)
 	echo "ci-bench: unknown workload $workload" >&2
 	exit 2
 	;;
 esac
 
-export RUSTC="$rustc_bin" RUSTC_WRAPPER="$here/ci-rustc-flags.sh" RUSTC_BOOTSTRAP=1 BENCH_RUSTC_FLAGS="$flags"
+if [[ $workload == rustc ]]; then
+	# Bootstrap runs its own rustc shim and passes RUSTFLAGS_NOT_BOOTSTRAP to the compiles of a local rebuild.
+	export RUSTFLAGS_NOT_BOOTSTRAP="$flags"
+	printf '%s\n' 'profile = "compiler"' 'change-id = "ignore"' '[llvm]' 'download-ci-llvm = true' \
+		'[rust]' 'debuginfo-level = 0' 'debug-assertions = false' '[build]' \
+		"rustc = \"$rustc_bin\"" "cargo = \"$(command -v cargo)\"" 'local-rebuild = true' \
+		"jobs = ${CARGO_BUILD_JOBS:-$(nproc)}" > "$src/bootstrap.toml"
+else
+	export RUSTC="$rustc_bin" RUSTC_WRAPPER="$here/ci-rustc-flags.sh" RUSTC_BOOTSTRAP=1 BENCH_RUSTC_FLAGS="$flags"
+fi
 cd "$src"
 git diff --quiet || { echo "ci-bench: $src has uncommitted changes" >&2; exit 1; }
 trap 'git -C "$src" checkout -q -- .' EXIT
@@ -50,19 +69,20 @@ sum_sizes() {
 	find "$@" -type f -printf '%s\n' | awk '{s+=$1} END{printf "%d", s}'
 }
 
-# Appends one row for the incremental dir of target dir $1.
+# Appends one row for the incremental dirs under target dir $1. A cargo target dir has one. A bootstrap build dir has one per stage and mode.
 measure() {
-	local mode=$2 step=$3 secs=$4 inc=$1/debug/incremental
+	local mode=$2 step=$3 secs=$4 inc
 	local graph=0 qc=0 objs=0 total=0 linked=0 crate_dirs=0 sessions=0
-	if [[ -d $inc ]]; then
-		graph=$(sum_sizes "$inc" -name dep-graph.bin)
-		qc=$(sum_sizes "$inc" -name query-cache.bin)
-		objs=$(sum_sizes "$inc" -name '*.o')
+	mapfile -t inc < <(find "$1" -type d -name incremental -prune)
+	if [[ ${#inc[@]} -gt 0 ]]; then
+		graph=$(sum_sizes "${inc[@]}" -name dep-graph.bin)
+		qc=$(sum_sizes "${inc[@]}" -name query-cache.bin)
+		objs=$(sum_sizes "${inc[@]}" -name '*.o')
 		# A file with another link, like the metadata.rmeta of a session, shares its blocks with the target dir. It costs no disk here.
-		linked=$(sum_sizes "$inc" -links +1 ! -name dep-graph.bin ! -name query-cache.bin ! -name "*.o")
-		total=$(( $(sum_sizes "$inc") - linked ))
-		crate_dirs=$(find "$inc" -mindepth 1 -maxdepth 1 -type d | wc -l)
-		sessions=$(find "$inc" -mindepth 2 -maxdepth 2 -type d -name 's-*' | wc -l)
+		linked=$(sum_sizes "${inc[@]}" -links +1 ! -name dep-graph.bin ! -name query-cache.bin ! -name "*.o")
+		total=$(( $(sum_sizes "${inc[@]}") - linked ))
+		crate_dirs=$(find "${inc[@]}" -mindepth 1 -maxdepth 1 -type d | wc -l)
+		sessions=$(find "${inc[@]}" -mindepth 2 -maxdepth 2 -type d -name 's-*' | wc -l)
 	fi
 	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.1f\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n' \
 		"$workload" "$config" "$compiler" "$toolchain" "$flags" "$mode" "$step" "$secs" \
@@ -72,18 +92,21 @@ measure() {
 }
 
 build() {
-	local tdir=$1 mode=$2 step=$3 incr=1 start end log reuse graph
+	local tdir=$1 mode=$2 step=$3 incr=1 start end log reuse graph extra=()
 	[[ $mode == noincr ]] && incr=0
+	if [[ $workload == rustc ]]; then
+		extra=(--build-dir "$tdir" --set "rust.incremental=$([[ $incr == 1 ]] && echo true || echo false)")
+	fi
 	log=$target_root/$mode.${step//:/-}.log
 	start=$(date +%s.%N)
 	rm -f "$log.crates"
-	if ! BENCH_CRATE_TIMES="$log.crates" CARGO_TARGET_DIR="$tdir" CARGO_INCREMENTAL=$incr "${cmd[@]}" > "$log" 2>&1; then
+	if ! BENCH_CRATE_TIMES="$log.crates" CARGO_TARGET_DIR="$tdir" CARGO_INCREMENTAL=$incr "${cmd[@]}" "${extra[@]}" > "$log" 2>&1; then
 		tail -n 80 "$log" >&2
 		echo "ci-bench: the $mode $step build failed, full log in $log" >&2
 		exit 1
 	fi
 	end=$(date +%s.%N)
-	# Only an -Zincremental-info run prints these counts: bodies decoded from the old .rmeta, bodies the encoder asked for, and bodies the dep graph marked green.
+	# Only an -Zincremental-info run prints these counts: bodies decoded from the .rmeta, bodies the encoder asked for, and bodies the dep graph marked green.
 	reuse=$({ grep -oE 'decoded [0-9]+ of [0-9]+ MIR bodies from the previous session \([0-9]+ marked green' "$log" || true; } | tr -d '(' | awk '{d += $2; r += $4; g += $11} END {printf "%d\t%d\t%d", d, r, g}')
 	if [[ $reuse != $'0\t0\t0' ]]; then
 		printf '%s\t%s\t%s\t%s\n' "$config" "$mode" "$step" "$reuse" >> "${results%.tsv}.reuse.tsv"
@@ -169,12 +192,15 @@ run_mode() {
 	done
 	git checkout -q -- .
 	build "$tdir" "$mode" revert
-	if [[ $mode == incr ]] && command -v summarize > /dev/null; then
+	if [[ $mode == incr && -n $profile_crates ]] && command -v summarize > /dev/null; then
 		profile_edit "$tdir" body
 		profile_edit "$tdir" comment
 	fi
-	# A changed profile or feature set is a new build configuration, and cargo gives it new crate dirs.
-	CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false build "$tdir" "$mode" config-change
+	# A changed profile or feature set is a new build configuration, and cargo
+	# gives it new crate dirs.
+	if [[ $workload != rustc ]]; then
+		CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false build "$tdir" "$mode" config-change
+	fi
 	rm -rf "$tdir"
 }
 
