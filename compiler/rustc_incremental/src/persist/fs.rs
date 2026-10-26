@@ -265,8 +265,10 @@ pub(crate) fn prepare_session_directory(
     let new_session_directory = lock_directory(sess, &new_session_dir, true /* new_session */)
         .expect("should emit fatal error on lock fail");
 
+    let slot = config_slot(sess);
+    write_config_slot(&crate_dir, &slot);
     if let Some(keep) = sess.opts.unstable_opts.incremental_keep_configs {
-        prune_crate_configs(sess, &crate_dir, crate_name, keep);
+        prune_crate_configs(sess, &crate_dir, crate_name, &slot, keep);
     }
 
     // Find a suitable source directory to copy from. Ignore those that we
@@ -961,6 +963,7 @@ fn try_delete_crate_dir(crate_dir: &Path) -> io::Result<bool> {
     for lock_file in &lock_files {
         remove_if_exists(std_fs::remove_file(lock_file))?;
     }
+    remove_if_exists(std_fs::remove_file(crate_dir.join(CONFIG_SLOT_FILE)))?;
 
     // `remove_dir` fails if a new session started here in the meantime. That session wins.
     match std_fs::remove_dir(crate_dir) {
@@ -983,7 +986,13 @@ fn delete_crate_dir(sess: &Session, crate_dir: &Path) -> bool {
 }
 
 /// Deletes the least recently used configurations of `crate_name` beyond `keep`.
-fn prune_crate_configs(sess: &Session, crate_dir: &Path, crate_name: Symbol, keep: usize) {
+fn prune_crate_configs(
+    sess: &Session,
+    crate_dir: &Path,
+    crate_name: Symbol,
+    slot: &str,
+    keep: usize,
+) {
     let Some(incr_dir) = crate_dir.parent() else { return };
     let dirs = match list_crate_dirs(incr_dir, Some(crate_name.as_str())) {
         Ok(dirs) => dirs,
@@ -992,8 +1001,13 @@ fn prune_crate_configs(sess: &Session, crate_dir: &Path, crate_name: Symbol, kee
             return;
         }
     };
+    // A crate name alone does not identify a configuration. One build compiles a lib and its
+    // `--test` harness under the same name, and both stay in use.
     let entries = dirs
         .into_iter()
+        .filter(|dir| {
+            std_fs::read_to_string(dir.join(CONFIG_SLOT_FILE)).ok().as_deref() == Some(slot)
+        })
         .filter_map(|dir| {
             let last_use = crate_dir_last_use(&dir).ok()?;
             Some((dir, last_use))
@@ -1002,6 +1016,35 @@ fn prune_crate_configs(sess: &Session, crate_dir: &Path, crate_name: Symbol, kee
     for dir in select_configs_to_prune(entries, crate_dir, keep) {
         delete_crate_dir(sess, &dir);
     }
+}
+
+/// The file in a crate dir that names the kind of compile that owns it.
+const CONFIG_SLOT_FILE: &str = "config-slot";
+
+fn write_config_slot(crate_dir: &Path, slot: &str) {
+    let slot_file = crate_dir.join(CONFIG_SLOT_FILE);
+    if std_fs::read_to_string(&slot_file).ok().as_deref() == Some(slot) {
+        return;
+    }
+    if let Err(err) = std_fs::write(&slot_file, slot) {
+        debug!("write_config_slot() - cannot write `{}`: {err}", slot_file.display());
+    }
+}
+
+/// What crate dirs must share before one can replace the other: the crate types, the test
+/// harness switch and the target. A changed flag, profile or feature keeps the slot.
+// The session dir exists before `TyCtxt`, so only the command-line crate types are known here.
+#[allow(rustc::bad_opt_access)]
+fn config_slot(sess: &Session) -> String {
+    let mut crate_types: Vec<String> =
+        sess.opts.crate_types.iter().map(|ty| ty.to_string()).collect();
+    crate_types.sort();
+    format!(
+        "crate-types={} test={} target={}\n",
+        crate_types.join(","),
+        sess.opts.test,
+        sess.opts.target_triple.tuple()
+    )
 }
 
 fn incremental_size_cap(sess: &Session) -> Option<u64> {
