@@ -1075,13 +1075,15 @@ impl EncoderState {
             let reached = fates.promoted + fates.rerun_green + fates.rerun_red;
             eprintln!(
                 "[incremental] node fates: previous {} promoted {} rerun-green {} rerun-red {} \
-                 unreached {} new {}",
+                 unreached {} new {} pid {}",
                 self.previous.live_node_count,
                 fates.promoted,
                 fates.rerun_green,
                 fates.rerun_red,
                 (self.previous.live_node_count as u64).saturating_sub(reached),
                 fates.new,
+                // Cargo replays the stderr of a fresh crate.
+                std::process::id(),
             );
             let mut bytes = NodeBytes::default();
             for stat in &stats {
