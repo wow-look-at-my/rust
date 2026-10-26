@@ -778,6 +778,28 @@ struct Stat {
     bytes: NodeBytes,
 }
 
+/// What happened to each node this session, for `-Zincremental-info`.
+#[derive(Clone, Copy, Default)]
+struct NodeFates {
+    /// Previous nodes marked green without a re-run.
+    promoted: u64,
+    /// Previous nodes that ran again and gave the same result.
+    rerun_green: u64,
+    /// Previous nodes that ran again and gave a different result, or have no result hash.
+    rerun_red: u64,
+    /// Nodes with no previous node.
+    new: u64,
+}
+
+impl NodeFates {
+    fn add(&mut self, other: NodeFates) {
+        self.promoted += other.promoted;
+        self.rerun_green += other.rerun_green;
+        self.rerun_red += other.rerun_red;
+        self.new += other.new;
+    }
+}
+
 struct LocalEncoderState {
     next_node_index: u32,
     remaining_node_index: u32,
@@ -785,6 +807,7 @@ struct LocalEncoderState {
     refs: EncoderRefs,
     node_count: usize,
     edge_count: usize,
+    fates: NodeFates,
 
     /// Stores the number of times we've encoded each dep kind.
     kind_stats: Vec<u32>,
@@ -794,6 +817,7 @@ struct LocalEncoderResult {
     node_max: u32,
     node_count: usize,
     edge_count: usize,
+    fates: NodeFates,
 
     /// Stores the number of times we've encoded each dep kind.
     kind_stats: Vec<u32>,
@@ -824,6 +848,7 @@ impl EncoderState {
                     remaining_node_index: 0,
                     edge_count: 0,
                     node_count: 0,
+                    fates: NodeFates::default(),
                     encoder: MemEncoder::new(),
                     refs: EncoderRefs::new(),
                     kind_stats: iter::repeat_n(0, DepKind::NUM_VARIANTS).collect(),
@@ -974,6 +999,7 @@ impl EncoderState {
                 node_max: local.next_node_index,
                 node_count: local.node_count,
                 edge_count: local.edge_count,
+                fates: local.fates,
             }
         });
 
@@ -984,11 +1010,13 @@ impl EncoderState {
         let mut node_max = 0;
         let mut node_count = 0;
         let mut edge_count = 0;
+        let mut fates = NodeFates::default();
 
         for result in results {
             node_max = max(node_max, result.node_max);
             node_count += result.node_count;
             edge_count += result.edge_count;
+            fates.add(result.fates);
             for (i, stat) in result.kind_stats.iter().enumerate() {
                 kind_stats[i] += stat;
             }
@@ -1015,7 +1043,7 @@ impl EncoderState {
             profiler.artifact_size("dep_graph", "dep-graph.bin", position as u64);
         }
 
-        self.print_incremental_info(current, node_count, edge_count);
+        self.print_incremental_info(current, node_count, edge_count, fates);
 
         result
     }
@@ -1025,6 +1053,7 @@ impl EncoderState {
         current: &CurrentDepGraph,
         total_node_count: usize,
         total_edge_count: usize,
+        fates: NodeFates,
     ) {
         if let Some(record_stats) = &self.stats {
             let record_stats = record_stats.lock();
@@ -1043,6 +1072,17 @@ impl EncoderState {
             eprintln!("[incremental]");
             eprintln!("[incremental] Total Node Count: {}", total_node_count);
             eprintln!("[incremental] Total Edge Count: {}", total_edge_count);
+            let reached = fates.promoted + fates.rerun_green + fates.rerun_red;
+            eprintln!(
+                "[incremental] node fates: previous {} promoted {} rerun-green {} rerun-red {} \
+                 unreached {} new {}",
+                self.previous.live_node_count,
+                fates.promoted,
+                fates.rerun_green,
+                fates.rerun_red,
+                (self.previous.live_node_count as u64).saturating_sub(reached),
+                fates.new,
+            );
             let mut bytes = NodeBytes::default();
             for stat in &stats {
                 bytes.add(stat.bytes);
@@ -1132,6 +1172,7 @@ impl GraphEncoder {
         let index = self.status.next_index(&mut *local);
         self.status.bump_index(&mut *local);
         self.status.encode_node(index, &node, &self.retained_graph, &mut *local);
+        local.fates.new += 1;
         index
     }
 
@@ -1165,6 +1206,11 @@ impl GraphEncoder {
 
         self.status.bump_index(&mut *local);
         self.status.encode_node(index, &node, &self.retained_graph, &mut *local);
+        if is_green {
+            local.fates.rerun_green += 1;
+        } else {
+            local.fates.rerun_red += 1;
+        }
         index
     }
 
@@ -1198,6 +1244,7 @@ impl GraphEncoder {
                     &mut *local,
                     edges,
                 );
+                local.fates.promoted += 1;
                 Some(index)
             }
             TrySetColorResult::AlreadyRed => None,
