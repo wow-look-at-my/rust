@@ -222,6 +222,14 @@ run_mode() {
 	if [[ $mode == incr && -n $profile_crates ]] && command -v summarize > /dev/null; then
 		profile_edit "$tdir" body
 		profile_edit "$tdir" comment
+		# The signature edit changes the item that the new-item edit adds. Build that item unprofiled first.
+		edit new-item
+		if ! CARGO_TARGET_DIR="$tdir" CARGO_INCREMENTAL=1 "${cmd[@]}" > "$target_root/profile.log" 2>&1; then
+			tail -n 80 "$target_root/profile.log" >&2
+			echo "ci-bench: the build before the profiled signature edit failed" >&2
+			exit 1
+		fi
+		profile_edit "$tdir" signature
 	fi
 	# A changed profile or feature set is a new build configuration, and cargo
 	# gives it new crate dirs.
