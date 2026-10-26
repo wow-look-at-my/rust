@@ -139,20 +139,20 @@ edit() {
 	fi
 }
 
-# One more comment edit, outside the measured steps, that self-profiles the slowest crates.
-profile_comment_edit() {
-	local tdir=$1 dir=$target_root/profile prof
+# One more edit of a kind, outside the measured steps, that self-profiles the slowest crates.
+profile_edit() {
+	local tdir=$1 kind=$2 dir=$target_root/profile prof
 	rm -rf "$dir"
-	edit comment
+	edit "$kind"
 	if ! BENCH_PROFILE_DIR="$dir" BENCH_PROFILE_CRATES="$profile_crates" CARGO_TARGET_DIR="$tdir" CARGO_INCREMENTAL=1 "${cmd[@]}" > "$target_root/profile.log" 2>&1; then
 		tail -n 80 "$target_root/profile.log" >&2
-		echo "ci-bench: the profiled comment edit failed" >&2
+		echo "ci-bench: the profiled $kind edit failed" >&2
 		exit 1
 	fi
 	git checkout -q -- .
 	for prof in "$dir"/*/*.mm_profdata; do
 		[[ -e $prof ]] || { echo "ci-bench: the profiled edit wrote no profile for $profile_crates" >&2; exit 1; }
-		echo "self-profile of the comment edit, $(basename "$(dirname "$prof")"):"
+		echo "self-profile of the $kind edit, $(basename "$(dirname "$prof")"):"
 		summarize summarize "$prof" > "$dir/summary.txt"
 		sed -n 1,40p "$dir/summary.txt" | cut -c1-200
 	done
@@ -170,7 +170,8 @@ run_mode() {
 	git checkout -q -- .
 	build "$tdir" "$mode" revert
 	if [[ $mode == incr ]] && command -v summarize > /dev/null; then
-		profile_comment_edit "$tdir"
+		profile_edit "$tdir" body
+		profile_edit "$tdir" comment
 	fi
 	# A changed profile or feature set is a new build configuration, and cargo gives it new crate dirs.
 	CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false build "$tdir" "$mode" config-change
