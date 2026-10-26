@@ -35,6 +35,7 @@ A push that changes `ci-request.env` runs `.github/workflows/incr-bench.yml`. Th
 - `results/grok-base.txt`, `grok-patched.txt`: the earlier `grok-bench.sh` with the base and patched compiler.
 - `results/ci/`: one report per CI benchmark run.
 - `results/summary.md`: every config of every CI run at the body edit, from `scripts/ci-summary.sh results/ci`.
+- `results/cap-concurrent.txt`: `scripts/cap-bench.sh`, crates in one incremental dir, compiles at a time, with and without `-Zincremental-size-cap`.
 - `results/absl.txt`: abseil-cpp build split.
 - `results/stat-*.txt`: `dgstat` on the grok sample graphs.
 - `results/collapse-*.txt`: `dgstat collapse` on the grok sample graphs.

@@ -52,6 +52,12 @@ jobs:
           sparse-checkout: incr-bench
       - id: cfg
         run: incr-bench/scripts/ci-bench-inputs.sh "${{ github.event_name }}" "${{ inputs.baseline }}" "${{ inputs.patched }}" "${{ inputs.grok_ref }}" "${{ inputs.workloads }}" "${{ inputs.configs }}"
+      # The later jobs start together. A checkout in each of them sent a burst of git requests that GitHub answered with HTTP 429.
+      - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
+        with:
+          mode: send
+          name: bench-scripts
+          path: incr-bench
 
   toolchain:
     needs: config
@@ -63,10 +69,11 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.config.outputs.compilers) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
         with:
-          path: bench
-          sparse-checkout: incr-bench
+          mode: receive
+          name: bench-scripts
+          path: bench/incr-bench
 
       - name: Restore the stage1 toolchain
         id: toolchain
@@ -117,10 +124,11 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.config.outputs.legs) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
         with:
-          path: bench
-          sparse-checkout: incr-bench
+          mode: receive
+          name: bench-scripts
+          path: bench/incr-bench
 
       - name: Free disk
         run: bench/incr-bench/scripts/ci-free-disk.sh
