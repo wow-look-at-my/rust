@@ -52,9 +52,20 @@ esac
 if [[ $workload == rustc ]]; then
 	# Bootstrap runs its own rustc shim and passes RUSTFLAGS_NOT_BOOTSTRAP to the compiles of a local rebuild.
 	export RUSTFLAGS_NOT_BOOTSTRAP="$flags"
+	# The stage1 toolchain has no cargo, and bootstrap looks for one next to build.rustc. Use the cargo that src/stage0 pins.
+	host=$("$rustc_bin" -vV | sed -n 's/^host: //p')
+	date=$(sed -n 's/^compiler_date=//p' "$src/src/stage0")
+	tarball=cargo-beta-$host.tar.xz
+	sum=$(sed -n "s|^dist/$date/$tarball=||p" "$src/src/stage0")
+	[[ -n $sum ]] || { echo "ci-bench: src/stage0 pins no $tarball" >&2; exit 1; }
+	cargo_dir=$target_root/stage0-cargo
+	mkdir -p "$cargo_dir"
+	curl -fsSL --retry 5 -o "$cargo_dir/$tarball" "https://static.rust-lang.org/dist/$date/$tarball"
+	echo "$sum  $cargo_dir/$tarball" | sha256sum -c -
+	tar -xJf "$cargo_dir/$tarball" -C "$cargo_dir" --strip-components=1
 	printf '%s\n' 'profile = "compiler"' 'change-id = "ignore"' '[llvm]' 'download-ci-llvm = true' \
 		'[rust]' 'debuginfo-level = 0' 'debug-assertions = false' '[build]' \
-		"rustc = \"$rustc_bin\"" 'local-rebuild = true' \
+		"rustc = \"$rustc_bin\"" "cargo = \"$cargo_dir/cargo/bin/cargo\"" 'local-rebuild = true' \
 		"jobs = ${CARGO_BUILD_JOBS:-$(nproc)}" > "$src/bootstrap.toml"
 else
 	export RUSTC="$rustc_bin" RUSTC_WRAPPER="$here/ci-rustc-flags.sh" RUSTC_BOOTSTRAP=1 BENCH_RUSTC_FLAGS="$flags"
