@@ -2,8 +2,11 @@
 # Prints the ci-bench.sh TSV files as markdown: the configs, then one table across them.
 # Usage: ci-report.sh TSV...
 set -euo pipefail
+# A leg also writes side files (crate times, graph bytes) next to its TSV. Only a file whose
+# header starts with "workload" is a results table.
 awk -F'\t' '
-FNR == 1 { next }
+FNR == 1 { table = ($1 == "workload"); next }
+!table { next }
 {
 	k = $1 SUBSEP $2 SUBSEP $7
 	if ($6 == "noincr") { full[k] = $8; next }
