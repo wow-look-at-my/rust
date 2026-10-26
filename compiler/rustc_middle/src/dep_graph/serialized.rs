@@ -1,8 +1,7 @@
 //! The data that we will serialize and deserialize.
 //!
 //! Notionally, the dep-graph is a sequence of NodeInfo with the dependencies
-//! specified inline. The total number of nodes and edges are stored as the last
-//! 16 bytes of the file, so we can find them easily at decoding time.
+//! specified inline. After the nodes come the per-kind node counts and the session count as leb128, then the node index bound. The node count and the edge count as fixed 8-byte integers. Nothing is aligned or padded on disk.
 //!
 //! The serialisation is performed on-demand when each node is emitted. Using this
 //! scheme, we do not need to keep the current graph in memory.
@@ -12,28 +11,19 @@
 //! node and edge count are stored at the end of the file, all the arrays can be
 //! pre-allocated with the right length.
 //!
-//! The encoding of the dep-graph is generally designed around the fact that fixed-size
-//! reads of encoded data are generally faster than variable-sized reads. Ergo we adopt
-//! essentially the same varint encoding scheme used in the rmeta format; the edge lists
-//! for each node on the graph store a 2-bit integer which is the number of bytes per edge
-//! index in that node's edge list. We effectively ignore that an edge index of 0 could be
-//! encoded with 0 bytes in order to not require 3 bits to store the byte width of the edges.
-//! The overhead of calculating the correct byte width for each edge is mitigated by
-//! computing the max of the edge list once per node instead of per edge.
+//! Each node record starts with a [`NodeHead`] and a flags byte. The head bit-packs the
+//! [`DepKind`], the byte width of the largest edge index, and the edge count when it fits.
+//! The flags say which of the optional fields follow: the index, unless it is the previous
+//! index plus one. This also covers the 128-bit key fingerprint, or a leb128 distance back to
+//! an earlier node with the same key. This also covers the 64-bit result fingerprint, or a
+//! distance back, or nothing for zero. This also covers the edge count when the head has no
+//! room for it. Each edge is one leb128 code: a zigzag delta from the previous target, or a
+//! distance back into the edges of this block.
 //!
 //! When we decode this data, we do not immediately create [`SerializedDepNodeIndex`] and
-//! instead keep the data in its denser serialized form which lets us turn our on-disk size
-//! efficiency directly into a peak memory reduction. When we convert these encoded-in-memory
-//! values into their fully-deserialized type, we use a fixed-size read of the encoded array
-//! then mask off any errant bytes we read. The array of edge index bytes is padded to permit this.
-//!
-//! We also encode and decode the entire rest of each node using [`NodeHead`]
-//! to let this encoding and decoding be done in one fixed-size operation. These headers contain
-//! two [`Fingerprint`]s along with the serialized [`DepKind`], and the number of edge indices
-//! in the node and the number of bytes used to encode the edge indices for this node. The
-//! [`DepKind`], number of edges, and bytes per edge are all bit-packed together, if they fit.
-//! If the number of edges in this node does not fit in the bits available in the header, we
-//! store it directly after the header with leb128.
+//! instead keep the edges at the byte width that the head names. This turns the on-disk
+//! size into a peak memory reduction. A fixed-size read of that array masks off the extra
+//! bytes. The in-memory edge array ends in padding to permit this. The file has none.
 //!
 //! Dep-graph indices are bulk allocated to threads inside `LocalEncoderState`. Having threads
 //! own these indices helps avoid races when they are conditionally used when marking nodes green.
@@ -366,8 +356,8 @@ impl SerializedDepGraph {
 
             value_fingerprints[index] = record.value_fingerprint;
 
-            // In memory, the edges index list uses the same varint strategy as rmeta tables; we
-            // select the number of byte elements per-array not per-element.
+            // In memory, the edges index list uses the same varint strategy as rmeta tables. We
+            // select the number of byte elements per-array not per-element. Consider the
             // The in-memory structure for the edges list stores the byte width of the edges on
             // this node with the offset into the global edge data array.
             let edges_header = EdgeHeader {
