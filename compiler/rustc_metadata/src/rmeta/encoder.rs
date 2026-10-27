@@ -2753,8 +2753,10 @@ pub(crate) fn prev_metadata_optimized_mir<'tcx>(
     }
     let prev = tcx.prev_metadata.get_or_init(|| {
         let session = prev_metadata_path(tcx).and_then(|path| PrevSession::load(tcx, &path))?;
-        Some(Box::new(PrevMetadataMir { session: Lock::new(session) })
-            as Box<dyn PrevMetadata<'tcx>>)
+        // Leaked, because `GlobalCtxt` must not own a value whose drop can see `'tcx`.
+        let prev: &'tcx PrevMetadataMir<'tcx> =
+            Box::leak(Box::new(PrevMetadataMir { session: Lock::new(session) }));
+        Some(prev as &'tcx dyn PrevMetadata<'tcx>)
     });
     prev.as_ref()?.optimized_mir(tcx, def)
 }

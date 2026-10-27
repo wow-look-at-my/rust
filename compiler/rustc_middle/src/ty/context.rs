@@ -807,7 +807,7 @@ pub struct GlobalCtxt<'tcx> {
     pub optimized_mir_in_metadata: OnceLock<FxHashSet<LocalDefId>>,
 
     /// The metadata in `old_session_directory`. It gives green bodies their MIR.
-    pub prev_metadata: OnceLock<Option<Box<dyn PrevMetadata<'tcx> + 'tcx>>>,
+    pub prev_metadata: OnceLock<Option<&'tcx dyn PrevMetadata<'tcx>>>,
 
     current_gcx: CurrentGcx,
 }
