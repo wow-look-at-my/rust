@@ -115,6 +115,9 @@ declare_hooks! {
     /// Creates the MIR for a given `DefId`, including unreachable code.
     hook build_mir_inner_impl(def: LocalDefId) -> mir::Body<'tcx>;
 
+    /// Gives the optimized MIR of a green body from the metadata in `old_session_directory`, or `None`.
+    hook prev_metadata_optimized_mir(def: LocalDefId) -> Option<&'tcx mir::Body<'tcx>>;
+
     /// Serializes all eligible query return values into the on-disk cache.
     hook encode_query_values(encoder: &mut CacheEncoder<'tcx>) -> ();
 

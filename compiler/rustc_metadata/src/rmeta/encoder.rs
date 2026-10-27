@@ -10,11 +10,11 @@ use std::sync::{Arc, Mutex};
 
 use rustc_attr_ir::{AttributeKind, EncodeCrossCrate, find_attr};
 use rustc_data_structures::fingerprint::Fingerprint;
-use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
+use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_data_structures::memmap::{Mmap, MmapMut};
 use rustc_data_structures::owned_slice::slice_owned;
 use rustc_data_structures::stable_hash::{StableHash, StableHasher};
-use rustc_data_structures::sync::{par_for_each_in, par_join};
+use rustc_data_structures::sync::{Lock, par_for_each_in, par_join};
 use rustc_data_structures::temp_dir::MaybeTempDir;
 use rustc_data_structures::thousands::usize_with_underscores;
 use rustc_hir as hir;
@@ -28,9 +28,9 @@ use rustc_middle::middle::dependency_format::Linkage;
 use rustc_middle::mir::interpret;
 use rustc_middle::query::Providers;
 use rustc_middle::traits::specialization_graph;
-use rustc_middle::ty::AssocContainer;
 use rustc_middle::ty::codec::TyEncoder;
 use rustc_middle::ty::fast_reject::{self, TreatParams};
+use rustc_middle::ty::{AssocContainer, PrevMetadata};
 use rustc_serialize::opaque::FileEncoder;
 use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 use rustc_session::config::mitigation_coverage::DeniedPartialMitigation;
@@ -2034,11 +2034,13 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             let (encode_const, encode_opt) = should_encode_mir(tcx, reachable_set, def_id);
             if encode_const || encode_opt { Some((def_id, encode_const, encode_opt)) } else { None }
         });
+        let mut optimized_in_metadata = FxHashSet::default();
         for (def_id, encode_const, encode_opt) in keys_and_jobs {
             debug_assert!(encode_const || encode_opt);
 
             debug!("EntryBuilder::encode_mir({:?})", def_id);
             if encode_opt {
+                optimized_in_metadata.insert(def_id);
                 let body = self
                     .reused_body(PrevBody::OptimizedMir, def_id)
                     .unwrap_or_else(|| tcx.optimized_mir(def_id));
@@ -2098,6 +2100,11 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             {
                 self.table_writer().mir_coroutine_witnesses(def_id, witnesses);
             }
+        }
+
+        if tcx.sess.opts.unstable_opts.incremental_rmeta_reuse && tcx.dep_graph.is_fully_enabled() {
+            // This metadata goes into the session directory.
+            let _ = tcx.optimized_mir_in_metadata.set(optimized_in_metadata);
         }
 
         if tcx.sess.opts.unstable_opts.incremental_rmeta_reuse
@@ -2718,6 +2725,38 @@ impl<D: Decoder> Decodable<D> for EncodedMetadata {
 
         Self { full_metadata, stub_metadata: stub, path: None, _temp_dir: None }
     }
+}
+
+struct PrevMetadataMir<'tcx> {
+    session: Lock<PrevSession<'tcx>>,
+}
+
+impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
+    fn optimized_mir(&self, tcx: TyCtxt<'tcx>, def: LocalDefId) -> Option<&'tcx mir::Body<'tcx>> {
+        let body = self.session.lock().body(PrevBody::OptimizedMir, def)?;
+        Some(tcx.arena.alloc(body))
+    }
+}
+
+/// Provides the `prev_metadata_optimized_mir` hook.
+pub(crate) fn prev_metadata_optimized_mir<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+) -> Option<&'tcx mir::Body<'tcx>> {
+    if !tcx.sess.opts.unstable_opts.incremental_rmeta_reuse {
+        return None;
+    }
+    // A provider runs for a green node only to rebuild a value that the query cache does not hold.
+    let node = DepNode::construct(tcx, DepKind::optimized_mir, &def.to_def_id());
+    if !tcx.dep_graph.is_green(&node) {
+        return None;
+    }
+    let prev = tcx.prev_metadata.get_or_init(|| {
+        let session = prev_metadata_path(tcx).and_then(|path| PrevSession::load(tcx, &path))?;
+        Some(Box::new(PrevMetadataMir { session: Lock::new(session) })
+            as Box<dyn PrevMetadata<'tcx>>)
+    });
+    prev.as_ref()?.optimized_mir(tcx, def)
 }
 
 /// The metadata work product of the incremental session, if there is one.

@@ -21,7 +21,7 @@ use rustc_attr_ir::find_attr;
 use rustc_attr_ir::lang_items::LangItem;
 use rustc_crate_store::{CrateStoreDyn, Untracked};
 use rustc_data_structures::defer;
-use rustc_data_structures::fx::FxHashMap;
+use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::intern::Interned;
 use rustc_data_structures::profiling::SelfProfilerRef;
 use rustc_data_structures::sharded::{IntoPointer, ShardedHashMap};
@@ -803,7 +803,18 @@ pub struct GlobalCtxt<'tcx> {
     /// Stores memory for globals (statics/consts).
     pub(crate) alloc_map: interpret::AllocMap<'tcx>,
 
+    /// Under `-Z incremental-rmeta-reuse`, the bodies whose optimized MIR this session's metadata holds.
+    pub optimized_mir_in_metadata: OnceLock<FxHashSet<LocalDefId>>,
+
+    /// The metadata in `old_session_directory`. It gives green bodies their MIR.
+    pub prev_metadata: OnceLock<Option<Box<dyn PrevMetadata<'tcx> + 'tcx>>>,
+
     current_gcx: CurrentGcx,
+}
+
+/// Decodes MIR out of the metadata in `old_session_directory`.
+pub trait PrevMetadata<'tcx>: DynSend + DynSync {
+    fn optimized_mir(&self, tcx: TyCtxt<'tcx>, def: LocalDefId) -> Option<&'tcx Body<'tcx>>;
 }
 
 impl<'tcx> GlobalCtxt<'tcx> {
@@ -1004,6 +1015,8 @@ impl<'tcx> TyCtxt<'tcx> {
             caches: Default::default(),
             data_layout,
             alloc_map: interpret::AllocMap::new(),
+            optimized_mir_in_metadata: OnceLock::new(),
+            prev_metadata: OnceLock::new(),
             current_gcx,
         });
 

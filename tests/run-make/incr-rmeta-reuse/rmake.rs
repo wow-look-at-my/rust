@@ -9,7 +9,8 @@ fn build_lib(incr: &str, out: &str, reuse: bool) -> String {
     cmd.input("src/lib.rs").incremental(incr).out_dir(out).emit("metadata,link");
     cmd.arg("-Zincremental-info");
     if reuse {
-        cmd.arg("-Zincremental-rmeta-reuse");
+        // The query cache does not hold MIR that the metadata holds.
+        cmd.arg("-Zincremental-rmeta-reuse").arg("-Zincremental-verify-ich");
     }
     cmd.run().stderr_utf8()
 }

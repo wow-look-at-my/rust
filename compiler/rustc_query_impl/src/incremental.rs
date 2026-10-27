@@ -3,7 +3,7 @@ use rustc_data_structures::unord::UnordMap;
 #[expect(unused_imports, reason = "used by doc comments")]
 use rustc_middle::dep_graph::DepKindVTable;
 use rustc_middle::dep_graph::{
-    DepGraphData, DepNode, DepNodeIndex, DepNodeKey, SerializedDepNodeIndex,
+    DepGraphData, DepKind, DepNode, DepNodeIndex, DepNodeKey, SerializedDepNodeIndex,
 };
 use rustc_middle::query::erase::{Erasable, Erased};
 use rustc_middle::query::on_disk_cache::{CacheDecoder, CacheEncoder};
@@ -36,7 +36,17 @@ fn encode_query_values_inner<'tcx, C, V>(
     let _timer = tcx.prof.generic_activity_with_arg("encode_query_results_for", query.name);
 
     assert!(all_inactive(&query.state));
+    let in_metadata = (query.dep_kind == DepKind::optimized_mir)
+        .then(|| tcx.optimized_mir_in_metadata.get())
+        .flatten();
     query.cache.for_each(&mut |key, value, dep_node| {
+        if let Some(in_metadata) = in_metadata
+            && let Some(def_id) = DepNode::construct(tcx, query.dep_kind, key).extract_def_id(tcx)
+            && let Some(def_id) = def_id.as_local()
+            && in_metadata.contains(&def_id)
+        {
+            return;
+        }
         if query.will_cache_on_disk_for_key(*key) {
             encoder.encode_query_value::<V>(dep_node, &erase::restore_val::<V>(*value));
         }

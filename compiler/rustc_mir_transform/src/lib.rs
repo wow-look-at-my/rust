@@ -794,6 +794,10 @@ fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
         return tcx.mir_for_ctfe(did);
     }
 
+    if let Some(body) = tcx.prev_metadata_optimized_mir(did) {
+        return body;
+    }
+
     tcx.arena.alloc(inner_optimized_mir(tcx, did))
 }
 
