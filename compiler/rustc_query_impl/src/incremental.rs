@@ -154,6 +154,13 @@ pub(crate) fn promote_from_disk_inner<'tcx, C: QueryCache>(
         if tcx.sess.opts.unstable_opts.incremental_uncache.is_some() {
             return;
         }
+        // Under `-Z incremental-rmeta-reuse` the metadata holds some optimized MIR in place of
+        // the query cache.
+        if tcx.sess.opts.unstable_opts.incremental_rmeta_reuse
+            && query.dep_kind == DepKind::optimized_mir
+        {
+            return;
+        }
         // The key is cache-on-disk and its node is green, so a value must be on disk.
         bug!("failed to load disk-cached value for green node {dep_node:?}");
     };
