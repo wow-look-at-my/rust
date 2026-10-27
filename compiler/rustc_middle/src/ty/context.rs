@@ -21,6 +21,7 @@ use rustc_attr_ir::find_attr;
 use rustc_attr_ir::lang_items::LangItem;
 use rustc_crate_store::{CrateStoreDyn, Untracked};
 use rustc_data_structures::defer;
+use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::intern::Interned;
 use rustc_data_structures::profiling::SelfProfilerRef;
@@ -814,7 +815,16 @@ pub struct GlobalCtxt<'tcx> {
 
 /// Decodes MIR out of the metadata in `old_session_directory`.
 pub trait PrevMetadata<'tcx>: DynSend + DynSync {
-    fn optimized_mir(&self, tcx: TyCtxt<'tcx>, def: LocalDefId) -> Option<&'tcx Body<'tcx>>;
+    /// The body of a green node, if it decodes and its hash is `expected`.
+    fn optimized_mir(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<&'tcx Body<'tcx>>;
+
+    /// Prints how many bodies decoded, and how many did not, under `-Z incremental-info`.
+    fn report(&self);
 }
 
 impl<'tcx> GlobalCtxt<'tcx> {

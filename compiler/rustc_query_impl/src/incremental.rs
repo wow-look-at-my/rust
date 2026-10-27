@@ -20,6 +20,11 @@ fn all_inactive<'tcx, K>(state: &QueryState<'tcx, K>) -> bool {
 }
 
 pub(crate) fn encode_query_values<'tcx>(tcx: TyCtxt<'tcx>, encoder: &mut CacheEncoder<'tcx>) {
+    if tcx.sess.opts.unstable_opts.incremental_info
+        && let Some(Some(prev)) = tcx.prev_metadata.get()
+    {
+        prev.report();
+    }
     for_each_query_vtable!(CACHE_ON_DISK, tcx, |query| {
         encode_query_values_inner(tcx, query, encoder)
     });

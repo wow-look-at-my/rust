@@ -6,6 +6,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rustc_attr_ir::{AttributeKind, EncodeCrossCrate, find_attr};
@@ -2731,12 +2732,42 @@ impl<D: Decoder> Decodable<D> for EncodedMetadata {
 
 struct PrevMetadataMir<'tcx> {
     session: Lock<PrevSession<'tcx>>,
+    decoded: AtomicUsize,
+    rejected: AtomicUsize,
+    mismatched: AtomicUsize,
 }
 
 impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
-    fn optimized_mir(&self, tcx: TyCtxt<'tcx>, def: LocalDefId) -> Option<&'tcx mir::Body<'tcx>> {
-        let body = self.session.lock().body(PrevBody::OptimizedMir, def)?;
+    fn optimized_mir(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<&'tcx mir::Body<'tcx>> {
+        let Some(body) = self.session.lock().body(PrevBody::OptimizedMir, def) else {
+            self.rejected.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        // A decoded body can differ from the body this crate builds, as an async
+        // body did on grok-build.
+        let hash = short_value_fingerprint(
+            tcx.with_stable_hashing_context(|mut hcx| hash_result(&mut hcx, &body)),
+        );
+        if hash != expected {
+            self.mismatched.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        self.decoded.fetch_add(1, Ordering::Relaxed);
         Some(tcx.arena.alloc(body))
+    }
+
+    fn report(&self) {
+        eprintln!(
+            "[incremental] codegen: decoded {} MIR bodies from metadata, {} rejected, {} mismatched",
+            self.decoded.load(Ordering::Relaxed),
+            self.rejected.load(Ordering::Relaxed),
+            self.mismatched.load(Ordering::Relaxed),
+        );
     }
 }
 
@@ -2754,23 +2785,15 @@ pub(crate) fn prev_metadata_optimized_mir<'tcx>(
     let prev = tcx.prev_metadata.get_or_init(|| {
         let session = prev_metadata_path(tcx).and_then(|path| PrevSession::load(tcx, &path))?;
         // Leaked, because `GlobalCtxt` must not own a value whose drop can see `'tcx`.
-        let prev: &'tcx PrevMetadataMir<'tcx> =
-            Box::leak(Box::new(PrevMetadataMir { session: Lock::new(session) }));
+        let prev: &'tcx PrevMetadataMir<'tcx> = Box::leak(Box::new(PrevMetadataMir {
+            session: Lock::new(session),
+            decoded: AtomicUsize::new(0),
+            rejected: AtomicUsize::new(0),
+            mismatched: AtomicUsize::new(0),
+        }));
         Some(prev as &'tcx dyn PrevMetadata<'tcx>)
     });
-    let body = prev.as_ref()?.optimized_mir(tcx, def)?;
-    // A decoded body can differ from the body this crate builds, as an async
-    // body did on grok-build.
-    let hash = short_value_fingerprint(
-        tcx.with_stable_hashing_context(|mut hcx| hash_result(&mut hcx, &body)),
-    );
-    if hash != expected {
-        if tcx.sess.opts.unstable_opts.incremental_info {
-            eprintln!("[incremental] codegen: decoded MIR of {def:?} does not match, building it");
-        }
-        return None;
-    }
-    Some(body)
+    prev.as_ref()?.optimized_mir(tcx, def, expected)
 }
 
 /// The metadata work product of the incremental session, if there is one.
