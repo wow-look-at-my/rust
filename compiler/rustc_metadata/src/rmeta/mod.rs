@@ -694,6 +694,8 @@ define_tables! {
     const_param_default: Table<LazyValue<ty::EarlyBinder<'static, rustc_middle::ty::Const<'static>>>>,
     object_lifetime_default: Table<LazyValue<ObjectLifetimeDefault>>,
     optimized_mir: Table<LazyValue<mir::Body<'static>>>,
+    // The `ItemLocalId` of the lint root of each source scope of `optimized_mir`, in the order of `mir_lint_root_bodies`.
+    optimized_mir_lint_roots: Table<LazyArray<u32>>,
     mir_for_ctfe: Table<LazyValue<mir::Body<'static>>>,
     trivial_const: Table<LazyValue<(ConstValue, Ty<'static>)>>,
     closure_saved_names_of_captured_variables: Table<LazyValue<IndexVec<FieldIdx, Symbol>>>,

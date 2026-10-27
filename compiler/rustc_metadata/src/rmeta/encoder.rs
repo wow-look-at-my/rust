@@ -53,7 +53,9 @@ use twox_hash::XxHash3_128;
 
 use crate::diagnostics::{FailCreateFileEncoder, FailWriteFile};
 use crate::eii::EiiMapEncodedKeyValue;
-use crate::rmeta::decoder::prev_session::{PrevBody, PrevSession, exported_stable_id};
+use crate::rmeta::decoder::prev_session::{
+    PrevBody, PrevSession, exported_stable_id, mir_lint_root_bodies,
+};
 use crate::rmeta::remapped_def_id::RemappedRawDefId;
 use crate::rmeta::*;
 
@@ -2048,6 +2050,19 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                     .reused_body(PrevBody::OptimizedMir, def_id)
                     .unwrap_or_else(|| tcx.optimized_mir(def_id));
                 self.table_writer().optimized_mir(def_id, body);
+                let owner = tcx.local_def_id_to_hir_id(def_id).owner;
+                let mut lint_roots = Vec::new();
+                mir_lint_root_bodies(body, &mut |body| {
+                    lint_roots.extend(body.source_scopes.iter().map(
+                        |scope| match &scope.local_data {
+                            mir::ClearCrossCrate::Set(data) if data.lint_root.owner == owner => {
+                                data.lint_root.local_id.as_u32()
+                            }
+                            _ => u32::MAX,
+                        },
+                    ))
+                });
+                self.table_writer().optimized_mir_lint_roots(def_id, lint_roots);
 
                 self.table_writer()
                     .cross_crate_inlinable(def_id, tcx.cross_crate_inlinable(def_id));
