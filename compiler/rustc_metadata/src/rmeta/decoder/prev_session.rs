@@ -43,7 +43,7 @@ pub(crate) struct PrevSession<'tcx> {
     stable_crate_id: StableCrateId,
     def_path_hash_map: DefPathHashMapRef<'static>,
     alloc_decoding_state: AllocDecodingState,
-    hygiene_context: HygieneDecodeContext,
+    hygiene_context: RefCell<HygieneDecodeContext>,
     ty_cache: RefCell<FxHashMap<usize, Ty<'tcx>>>,
     /// Old file index to the matching file of this session, `None` when it has no match.
     files: RefCell<FxHashMap<u32, Option<Arc<MatchedFile>>>>,
@@ -51,6 +51,8 @@ pub(crate) struct PrevSession<'tcx> {
     scope: Cell<Option<ItemScope>>,
     rejected: Cell<bool>,
     poisoned: Cell<bool>,
+    /// Set when the item being decoded names an expansion that this session does not have.
+    expn_missing: Cell<bool>,
     /// Set when a dependency changed since the session.
     remap: Option<ForeignRemap>,
     pub(crate) reused: Cell<usize>,
@@ -128,6 +130,7 @@ impl<'tcx> PrevSession<'tcx> {
             scope: Cell::new(None),
             rejected: Cell::new(false),
             poisoned: Cell::new(false),
+            expn_missing: Cell::new(false),
             remap: None,
             reused: Cell::new(0),
             attempted: Cell::new(0),
@@ -287,6 +290,12 @@ impl<'tcx> PrevSession<'tcx> {
         self.rejected.set(false);
         let r = f();
         self.scope.set(None);
+        if self.expn_missing.replace(false) {
+            // The hygiene cache can hold contexts built on the root fallback.
+            *self.hygiene_context.borrow_mut() = Default::default();
+            self.rejected.set(false);
+            return None;
+        }
         if self.rejected.replace(false) || self.poisoned.get() {
             return None;
         }
@@ -525,7 +534,7 @@ impl<'a, 'tcx> SpanDecoder for PrevDecoder<'a, 'tcx> {
         let prev = self.prev;
         rustc_span::hygiene::decode_syntax_context(
             self,
-            &prev.hygiene_context,
+            &prev.hygiene_context.borrow(),
             |_, ctxt| match prev.root.syntax_contexts.get(&prev.blob, ctxt) {
                 Some(lazy) => prev.decode_at(lazy.position),
                 None => bug!("missing syntax context {ctxt:?} in the previous metadata"),
@@ -548,17 +557,16 @@ impl<'a, 'tcx> SpanDecoder for PrevDecoder<'a, 'tcx> {
                 .map(|lazy| prev.decode_at::<ExpnHash>(lazy.position));
             return match hash.and_then(ExpnId::from_hash) {
                 Some(expn_id) => expn_id,
-                // The hygiene cache may already hold contexts built on this fallback, so no
-                // later item of this file can be trusted either.
+                // An expansion hash holds its call site, so an edit above a macro call gives
+                // the expansion a new hash. Only this item is rejected.
                 None => {
-                    prev.poisoned.set(true);
+                    prev.expn_missing.set(true);
                     ExpnId::root()
                 }
             };
         }
         let Some(index) = prev.map_foreign_expn(cnum, index) else {
-            // The hygiene cache may already hold contexts built on this fallback.
-            prev.poisoned.set(true);
+            prev.expn_missing.set(true);
             return ExpnId::root();
         };
         let tcx = prev.tcx;
