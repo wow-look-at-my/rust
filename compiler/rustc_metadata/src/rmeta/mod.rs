@@ -317,13 +317,14 @@ pub(crate) struct CrateRoot {
     syntax_contexts: SyntaxContextTable,
     expn_data: ExpnDataTable,
     expn_hashes: ExpnHashTable,
-    foreign_refs: LazyValue<ForeignRefs>,
 
     def_path_hash_map: LazyValue<DefPathHashMapRef<'static>>,
 
     source_map: LazyTable<u32, u32, Option<LazyValue<rustc_span::SourceFile>>>,
     target_modifiers: LazyArray<TargetModifier>,
     denied_partial_mitigations: LazyArray<DeniedPartialMitigation>,
+    /// Encoded last of the lazy fields: every other part can write a foreign reference.
+    foreign_refs: LazyValue<ForeignRefs>,
 
     compiler_builtins: bool,
     needs_allocator: bool,
