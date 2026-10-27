@@ -22,7 +22,7 @@ use rustc_hir::def_id::{CRATE_DEF_ID, LOCAL_CRATE, LocalDefId, LocalDefIdSet};
 use rustc_hir::definitions::DefPathData;
 use rustc_hir_pretty::id_to_string;
 use rustc_index::IndexVec;
-use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
+use rustc_middle::dep_graph::{DepKind, DepNode, WorkProduct, WorkProductId};
 use rustc_middle::hir::map::compute_hir_hash;
 use rustc_middle::middle::dependency_format::Linkage;
 use rustc_middle::mir::interpret;
@@ -41,8 +41,8 @@ use rustc_span::hygiene::{
     SyntaxContextRemapper,
 };
 use rustc_span::{
-    ByteSymbol, ExternalSource, FileName, LocalExpnId, SourceFile, SpanData, SpanEncoder,
-    StableSourceFileId, Symbol, SyntaxContext, bug, span_bug,
+    ByteSymbol, ExternalSource, FileName, LocalExpnId, SourceFile, SpanData, SpanEncoder, Symbol,
+    SyntaxContext, bug, span_bug,
 };
 use rustc_structures::CrateType;
 use tracing::{debug, instrument, trace};
@@ -50,6 +50,7 @@ use twox_hash::XxHash3_128;
 
 use crate::diagnostics::{FailCreateFileEncoder, FailWriteFile};
 use crate::eii::EiiMapEncodedKeyValue;
+use crate::rmeta::decoder::prev_session::{PrevBody, PrevSession, exported_stable_id};
 use crate::rmeta::remapped_def_id::RemappedRawDefId;
 use crate::rmeta::*;
 
@@ -85,6 +86,17 @@ pub(super) struct EncodeContext<'a, 'tcx> {
     pub(super) local_defs_remapping: LocalDefsRemapping,
     syntax_context_remapping: HygieneRemappingResults<SyntaxContext, RemappedSyntaxContext>,
     local_expn_id_remapping: HygieneRemappingResults<LocalExpnId, RemappedLocalExpnIndex>,
+    /// The metadata of the incremental session, under `-Z incremental-rmeta-reuse`.
+    prev_session: Option<PrevSession<'tcx>>,
+    /// Each foreign reference this metadata writes by position.
+    foreign_refs: Option<ForeignRefsBuilder>,
+}
+
+#[derive(Default)]
+struct ForeignRefsBuilder {
+    def_ids: FxIndexSet<DefId>,
+    expns: FxIndexSet<ExpnId>,
+    files: FxIndexMap<(u32, u32), (StableSourceFileId, SourceFileHash)>,
 }
 
 /// If the current crate is a proc-macro, returns early with `LazyArray::default()`.
@@ -178,6 +190,11 @@ impl<'a, 'tcx> SpanEncoder for EncodeContext<'a, 'tcx> {
 
     fn encode_def_id(&mut self, def_id: DefId) {
         let def_id = self.local_defs_remapping.map_def_id(def_id);
+        if !def_id.is_local()
+            && let Some(refs) = &mut self.foreign_refs
+        {
+            refs.def_ids.insert(def_id);
+        }
 
         def_id.krate.encode(self);
         self.emit_u32(def_id.index.as_u32());
@@ -195,6 +212,8 @@ impl<'a, 'tcx> SpanEncoder for EncodeContext<'a, 'tcx> {
             // FIXME(#43047) FIXME(#74731) We may eventually want to avoid relying on external
             // metadata from proc-macro crates.
             self.hygiene_ctxt.borrow_mut().schedule_expn_data_for_encoding(expn_id);
+        } else if let Some(refs) = &mut self.foreign_refs {
+            refs.expns.insert(expn_id);
         }
         expn_id.krate.encode(self);
 
@@ -207,7 +226,8 @@ impl<'a, 'tcx> SpanEncoder for EncodeContext<'a, 'tcx> {
     }
 
     fn encode_span(&mut self, span: Span) {
-        match self.span_shorthands.entry(span) {
+        // Key without the parent, which is not encoded, so equal spans always share bytes.
+        match self.span_shorthands.entry(span.with_parent(None)) {
             Entry::Occupied(o) => {
                 // If an offset is smaller than the absolute position, we encode with the offset.
                 // This saves space since smaller numbers encode in less bits.
@@ -414,6 +434,10 @@ impl<'a, 'tcx> Encodable<EncodeContext<'a, 'tcx>> for SpanData {
             // This needs to be two lines to avoid holding the `s.source_file_cache`
             // while calling `cnum.encode(s)`
             let cnum = s.source_file_cache.0.cnum;
+            let file = (s.source_file_cache.0.stable_id, s.source_file_cache.0.src_hash);
+            if let Some(refs) = &mut s.foreign_refs {
+                refs.files.entry((cnum.as_u32(), metadata_index)).or_insert(file);
+            }
             cnum.encode(s);
         }
     }
@@ -567,6 +591,33 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         self.lazy(DefPathHashMapRef::BorrowedFromTcx(self.tcx.def_path_hash_to_def_index_map()))
     }
 
+    fn encode_foreign_refs(&mut self) -> LazyValue<ForeignRefs> {
+        let tcx = self.tcx;
+        let refs = self.foreign_refs.take().unwrap_or_default();
+        let value = ForeignRefs {
+            def_ids: refs
+                .def_ids
+                .iter()
+                .map(|&def_id| {
+                    (def_id.krate.as_u32(), def_id.index.as_u32(), tcx.def_path_hash(def_id))
+                })
+                .collect(),
+            expns: refs
+                .expns
+                .iter()
+                .map(|&expn_id| {
+                    (expn_id.krate.as_u32(), expn_id.local_id.as_u32(), expn_id.expn_hash())
+                })
+                .collect(),
+            files: refs
+                .files
+                .iter()
+                .map(|(&(cnum, index), &(stable_id, src_hash))| (cnum, index, stable_id, src_hash))
+                .collect(),
+        };
+        self.lazy(value)
+    }
+
     fn encode_source_map(
         &mut self,
     ) -> LazyTable<u32, u32, Option<LazyValue<rustc_span::SourceFile>>> {
@@ -624,10 +675,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             // Update the `StableSourceFileId` to make sure it incorporates the
             // id of the current crate. This way it will be unique within the
             // crate graph during downstream compilation sessions.
-            adapted_source_file.stable_id = StableSourceFileId::from_filename_for_export(
-                &adapted_source_file.name,
-                local_crate_stable_id,
-            );
+            adapted_source_file.stable_id = exported_stable_id(source_file, local_crate_stable_id);
 
             let on_disk_index: u32 =
                 on_disk_index.try_into().expect("cannot export more than U32_MAX files");
@@ -770,6 +818,8 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         let target_modifiers = stat!("target-modifiers", || self.encode_target_modifiers());
         let denied_partial_mitigations = stat!("denied-partial-mitigations", || self
             .encode_enabled_denied_partial_mitigations());
+        // Last before the root: everything above can write a foreign reference.
+        let foreign_refs = stat!("foreign-refs", || self.encode_foreign_refs());
 
         let root = stat!("crate-root", || {
             let attrs = tcx.hir_krate_attrs();
@@ -827,6 +877,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 syntax_contexts,
                 expn_data,
                 expn_hashes,
+                foreign_refs,
                 def_path_hash_map,
                 specialization_enabled_in: tcx.specialization_enabled_in(LOCAL_CRATE),
             })
@@ -1929,12 +1980,54 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         self.table_writer().rendered_precise_capturing_args(def_id, precise_capturing_args);
     }
 
+    /// Marks the query `kind(def_id)` green and records the read, as a call of the query does.
+    fn try_mark_query_green(&self, kind: DepKind, def_id: LocalDefId) -> bool {
+        let tcx = self.tcx;
+        let node = DepNode::construct(tcx, kind, &def_id.to_def_id());
+        match tcx.dep_graph.try_mark_green(tcx, &node) {
+            Some((_, index)) => {
+                tcx.dep_graph.read_index(index);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn reused_body(&self, kind: PrevBody, def_id: LocalDefId) -> Option<&'tcx mir::Body<'tcx>> {
+        let prev = self.prev_session.as_ref()?;
+        prev.requested.set(prev.requested.get() + 1);
+        let dep_kind = match kind {
+            PrevBody::OptimizedMir => DepKind::optimized_mir,
+            PrevBody::MirForCtfe => DepKind::mir_for_ctfe,
+        };
+        if !self.try_mark_query_green(dep_kind, def_id) {
+            return None;
+        }
+        Some(self.tcx.arena.alloc(prev.body(kind, def_id)?))
+    }
+
+    fn reused_promoted(
+        &self,
+        def_id: LocalDefId,
+    ) -> Option<&'tcx IndexVec<mir::Promoted, mir::Body<'tcx>>> {
+        let prev = self.prev_session.as_ref()?;
+        prev.requested.set(prev.requested.get() + 1);
+        if !self.try_mark_query_green(DepKind::promoted_mir, def_id) {
+            return None;
+        }
+        Some(self.tcx.arena.alloc(prev.promoted(def_id)?))
+    }
+
     fn encode_mir(&mut self) {
         if self.is_proc_macro {
             return;
         }
 
         let tcx = self.tcx;
+        if tcx.sess.opts.unstable_opts.incremental_rmeta_reuse {
+            self.prev_session =
+                prev_metadata_path(tcx).and_then(|path| PrevSession::load(tcx, &path));
+        }
         let reachable_set = tcx.reachable_set(());
 
         let keys_and_jobs = tcx.mir_keys(()).iter().filter_map(|&def_id| {
@@ -1946,7 +2039,10 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
 
             debug!("EntryBuilder::encode_mir({:?})", def_id);
             if encode_opt {
-                self.table_writer().optimized_mir(def_id, tcx.optimized_mir(def_id));
+                let body = self
+                    .reused_body(PrevBody::OptimizedMir, def_id)
+                    .unwrap_or_else(|| tcx.optimized_mir(def_id));
+                self.table_writer().optimized_mir(def_id, body);
 
                 self.table_writer()
                     .cross_crate_inlinable(def_id, tcx.cross_crate_inlinable(def_id));
@@ -1969,7 +2065,10 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                     self.table_writer().trivial_const(def_id, (val, ty));
                 } else {
                     is_trivial = false;
-                    self.table_writer().mir_for_ctfe(def_id, tcx.mir_for_ctfe(def_id));
+                    let body = self
+                        .reused_body(PrevBody::MirForCtfe, def_id)
+                        .unwrap_or_else(|| tcx.mir_for_ctfe(def_id));
+                    self.table_writer().mir_for_ctfe(def_id, body);
                 }
 
                 // FIXME(generic_const_exprs): this feels wrong to have in `encode_mir`
@@ -1989,13 +2088,31 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 }
             }
             if !is_trivial {
-                self.table_writer().promoted_mir(def_id, tcx.promoted_mir(def_id));
+                let promoted =
+                    self.reused_promoted(def_id).unwrap_or_else(|| tcx.promoted_mir(def_id));
+                self.table_writer().promoted_mir(def_id, promoted);
             }
 
             if tcx.is_coroutine(def_id.to_def_id())
                 && let Some(witnesses) = tcx.mir_coroutine_witnesses(def_id)
             {
                 self.table_writer().mir_coroutine_witnesses(def_id, witnesses);
+            }
+        }
+
+        if tcx.sess.opts.unstable_opts.incremental_rmeta_reuse
+            && tcx.sess.opts.unstable_opts.incremental_info
+        {
+            match &self.prev_session {
+                Some(prev) => eprintln!(
+                    "[incremental] metadata: decoded {} of {} MIR bodies from the previous session ({} marked green)",
+                    prev.reused.get(),
+                    prev.requested.get(),
+                    prev.attempted.get(),
+                ),
+                None => {
+                    eprintln!("[incremental] metadata: no previous metadata to decode MIR from")
+                }
             }
         }
 
@@ -2603,6 +2720,17 @@ impl<D: Decoder> Decodable<D> for EncodedMetadata {
     }
 }
 
+/// The metadata work product of the incremental session, if there is one.
+fn prev_metadata_path(tcx: TyCtxt<'_>) -> Option<PathBuf> {
+    if !tcx.dep_graph.is_fully_enabled() {
+        return None;
+    }
+    let old_dir = tcx.incr_comp_session.as_ref()?.old_session_directory.as_ref()?;
+    let id = WorkProductId::from_cgu_name(WorkProduct::METADATA_WORKPRODUCT_CGU_NAME);
+    let work_product = tcx.dep_graph.previous_work_product(&id)?;
+    Some(old_dir.join(work_product.saved_files.get(OutputType::Metadata.extension())?))
+}
+
 #[instrument(level = "trace", skip(tcx))]
 pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
     // Since encoding metadata is not in a query, and nothing is cached,
@@ -2656,7 +2784,9 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
         return;
     };
 
-    if tcx.sess.opts.jobs.frontend.is_some() {
+    // Under `-Z incremental-rmeta-reuse` the prefetch will compute the MIR that encoding decodes.
+    if tcx.sess.opts.jobs.frontend.is_some() && !tcx.sess.opts.unstable_opts.incremental_rmeta_reuse
+    {
         // Prefetch some queries used by metadata encoding.
         // This is not necessary for correctness, but is only done for performance reasons.
         // It can be removed if it turns out to cause trouble or be detrimental to performance.
@@ -2787,6 +2917,9 @@ fn with_encode_metadata_header(
         local_defs_remapping: Default::default(),
         syntax_context_remapping: Default::default(),
         local_expn_id_remapping: Default::default(),
+        prev_session: None,
+        // A proc-macro crate encodes no foreign references.
+        foreign_refs: (!tcx.crate_types().contains(&CrateType::ProcMacro)).then(Default::default),
     };
 
     // Encode the rustc version string in a predictable location.

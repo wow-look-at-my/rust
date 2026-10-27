@@ -1,0 +1,104 @@
+
+=== xai_grok_shell-1yymvei0n623d/dep-graph.bin  678820342 bytes, kind bits 9, 337 kinds, names mapped
+nodes 10606036 (index space 10606036), edges 92301047; edges/node avg 8.70 median 3 p90 17 p99 63 max 1553028; nodes with 0 edges 7.8%
+bytes: file header 26 | node headers 403029368 (59.4%: head 2B 3.1%, index 4B 6.2%, key fp 25.0%, value fp 25.0%) | edge lists 275401193 (40.6%) | spilled lengths 389093 (0.06%) | trailer 662
+key fp: distinct 5738480 = 54.1% of nodes (repeats 4867556, 11.5% of file); zero key 0.0%
+value fp: distinct 3767509 = 35.5% of nodes (repeats 16.1% of file); ZERO 8.8%; most common value 10.6%
+edge lists with >1 edge that exactly repeat an earlier node's list: 1731083 nodes, 36085402 B (5.3% of file)
+index: 100.00% of nodes have index = previous+1 in stream order; 100.00% of the index space holds a node
+top 20 kinds by node count:
+  layout_of                                      1404629 nodes  13.2% |    61259446 B   9.0% |     1.9 edges/node | value ZERO   0.0%
+  fn_abi_of_instance_no_deduced_attrs             497085 nodes   4.7% |    34218648 B   5.0% |    10.3 edges/node | value ZERO   0.0%
+  resolve_instance_raw                            483064 nodes   4.6% |    28398683 B   4.2% |     6.9 edges/node | value ZERO   0.0%
+  symbol_name                                     477043 nodes   4.5% |    52121477 B   7.7% |    23.7 edges/node | value ZERO   0.0%
+  implementations_of_trait                        412876 nodes   3.9% |    16877122 B   2.5% |     1.0 edges/node | value ZERO   0.0%
+  erase_and_anonymize_regions_ty                  342805 nodes   3.2% |    13437887 B   2.0% |     0.4 edges/node | value ZERO 100.0%
+  items_of_instance                               334016 nodes   3.1% |    40858905 B   6.0% |    28.0 edges/node | value ZERO   0.0%
+  check_mono_item                                 332149 nodes   3.1% |    22811856 B   3.4% |    10.2 edges/node | value ZERO   0.0%
+  size_estimate                                   330619 nodes   3.1% |    15176165 B   2.2% |     2.6 edges/node | value ZERO   0.0%
+  TraitSelect                                     238513 nodes   2.2% |    16766226 B   2.5% |    10.8 edges/node | value ZERO 100.0%
+  evaluate_root_goal_for_proof_tree_raw           229287 nodes   2.2% |    14923007 B   2.2% |     9.0 edges/node | value ZERO 100.0%
+  type_op_prove_predicate                         221121 nodes   2.1% |    10904734 B   1.6% |     3.8 edges/node | value ZERO   0.0%
+  try_normalize_generic_arg_after_erasing_regions    211702 nodes   2.0% |     9635413 B   1.4% |     2.7 edges/node | value ZERO   0.0%
+  def_kind                                        183665 nodes   1.7% |     7277003 B   1.1% |     1.1 edges/node | value ZERO   0.0%
+  needs_drop_raw                                  180629 nodes   1.7% |     9368547 B   1.4% |     4.7 edges/node | value ZERO   0.0%
+  is_copy_raw                                     178805 nodes   1.7% |     9479050 B   1.4% |     5.0 edges/node | value ZERO   0.0%
+  def_span                                        167701 nodes   1.6% |     7193389 B   1.1% |     1.8 edges/node | value ZERO   0.0%
+  def_ident_span                                  148701 nodes   1.4% |     6396507 B   0.9% |     1.7 edges/node | value ZERO   0.0%
+  lower_to_hir                                    138875 nodes   1.3% |     5277250 B   0.8% |     0.0 edges/node | value ZERO   0.0%
+  hir_owner                                       138875 nodes   1.3% |     5693875 B   0.8% |     1.0 edges/node | value ZERO   0.0%
+top 20 kinds by bytes:
+  layout_of                                      1404629 nodes  13.2% |    61259446 B   9.0% |     1.9 edges/node | value ZERO   0.0%
+  symbol_name                                     477043 nodes   4.5% |    52121477 B   7.7% |    23.7 edges/node | value ZERO   0.0%
+  items_of_instance                               334016 nodes   3.1% |    40858905 B   6.0% |    28.0 edges/node | value ZERO   0.0%
+  fn_abi_of_instance_no_deduced_attrs             497085 nodes   4.7% |    34218648 B   5.0% |    10.3 edges/node | value ZERO   0.0%
+  resolve_instance_raw                            483064 nodes   4.6% |    28398683 B   4.2% |     6.9 edges/node | value ZERO   0.0%
+  check_mono_item                                 332149 nodes   3.1% |    22811856 B   3.4% |    10.2 edges/node | value ZERO   0.0%
+  implementations_of_trait                        412876 nodes   3.9% |    16877122 B   2.5% |     1.0 edges/node | value ZERO   0.0%
+  TraitSelect                                     238513 nodes   2.2% |    16766226 B   2.5% |    10.8 edges/node | value ZERO 100.0%
+  size_estimate                                   330619 nodes   3.1% |    15176165 B   2.2% |     2.6 edges/node | value ZERO   0.0%
+  evaluate_root_goal_for_proof_tree_raw           229287 nodes   2.2% |    14923007 B   2.2% |     9.0 edges/node | value ZERO 100.0%
+  typeck_root                                      30566 nodes   0.3% |    14233675 B   2.1% |   142.2 edges/node | value ZERO   0.0%
+  erase_and_anonymize_regions_ty                  342805 nodes   3.2% |    13437887 B   2.0% |     0.4 edges/node | value ZERO 100.0%
+  CompileCodegenUnit                                 128 nodes   0.0% |    12858256 B   1.9% | 33471.4 edges/node | value ZERO   0.0%
+  check_match                                      40894 nodes   0.4% |    11568002 B   1.7% |    81.5 edges/node | value ZERO   0.0%
+  eval_to_allocation_raw                           79946 nodes   0.8% |    11116895 B   1.6% |    33.6 edges/node | value ZERO   0.0%
+  type_op_prove_predicate                         221121 nodes   2.1% |    10904734 B   1.6% |     3.8 edges/node | value ZERO   0.0%
+  try_normalize_generic_arg_after_erasing_regions    211702 nodes   2.0% |     9635413 B   1.4% |     2.7 edges/node | value ZERO   0.0%
+  check_liveness                                   39102 nodes   0.4% |     9484558 B   1.4% |    68.2 edges/node | value ZERO   0.0%
+  is_copy_raw                                     178805 nodes   1.7% |     9479050 B   1.4% |     5.0 edges/node | value ZERO   0.0%
+  needs_drop_raw                                  180629 nodes   1.7% |     9368547 B   1.4% |     4.7 edges/node | value ZERO   0.0%
+edge |delta| log2 buckets, % of edges (vs source | vs previous edge, first edge vs source):
+  [1,1]   3.9 |  13.0
+  [2,3]   1.7 |   6.1
+  [4,7]   1.4 |   4.3
+  [8,15]   1.1 |   2.5
+  [16,31]   1.0 |   1.7
+  [32,63]   0.8 |   1.2
+  [64,127]   0.6 |   0.9
+  [128,255]   0.6 |   0.7
+  [256,511]   0.7 |   0.7
+  [512,1023]   0.7 |   1.0
+  [1024,2047]   0.4 |   0.6
+  [2048,4095]   0.4 |   0.6
+  [4096,8191]   0.4 |   0.9
+  [8192,16383]   0.4 |   0.6
+  [16384,32767]   0.6 |   1.0
+  [32768,65535]   0.9 |   1.6
+  [65536,131071]   1.6 |   1.6
+  [131072,262143]   3.0 |   5.8
+  [262144,524287]   5.0 |   5.4
+  [524288,1048575]   9.0 |   8.3
+  [1048576,2097151]  13.7 |  13.3
+  [2097152,4194303]  26.8 |  15.0
+  [4194304,8388607]  18.7 |  10.5
+  [8388608,16777215]   6.6 |   2.7
+edge bytes: now 275401193 (2.98 B/edge); zigzag-varint delta-vs-previous 257315861 (2.79 B/edge, 1.07x)
+layout A (key/value tables + u32 refs, index implied by order, delta edges): est 517187581 B = 1.31x smaller
+layout B (built: flag byte, fp inline on first use else leb back-ref, index implied, delta edges): 471259463 B = 1.44x; +zstd1 1.91x; +zstd3 2.08x
+plain file: zstd1 1.79x; zstd3 1.88x
+
+=== xai_grok_shell-1yymvei0n623d/query-cache.bin  552092427 bytes
+regions: header 18 | gap before first entry 0 | query values 509007589 (92.2%, 2210492 entries) | side effects 11551 (0.0%) | const allocs 1095682 (0.2%, 27781) | hygiene 18043454 (3.3%, 339729) | footer 23934133 (4.3%)
+top 20 query kinds by cached bytes:
+  optimized_mir                                    25510 values |   184575181 B  33.4% |  7235.4 B/value
+  typeck_root                                      30566 values |   123697304 B  22.4% |  4046.9 B/value
+  symbol_name                                     335992 values |   100805016 B  18.3% |   300.0 B/value
+  items_of_instance                               334016 values |    28805591 B   5.2% |    86.2 B/value
+  mir_for_ctfe                                     13937 values |    17691294 B   3.2% |  1269.4 B/value
+  exported_generic_symbols                             1 values |    11793978 B   2.1% | 11793978.0 B/value
+  promoted_mir                                     26339 values |    10077313 B   1.8% |   382.6 B/value
+  type_of                                          74662 values |     3998574 B   0.7% |    53.6 B/value
+  def_span                                        141018 values |     3515310 B   0.6% |    24.9 B/value
+  generics_of                                      96069 values |     3460658 B   0.6% |    36.0 B/value
+  def_ident_span                                  141018 values |     2901651 B   0.5% |    20.6 B/value
+  fn_sig                                           16045 values |     2120874 B   0.4% |   132.2 B/value
+  size_estimate                                   330619 values |     1987908 B   0.4% |     6.0 B/value
+  hir_module_items                                   520 values |     1761364 B   0.3% |  3387.2 B/value
+  explicit_clauses_of                              96069 values |     1642857 B   0.3% |    17.1 B/value
+  used_trait_imports                               40894 values |     1204455 B   0.2% |    29.5 B/value
+  mir_coroutine_witnesses                           1828 values |     1082555 B   0.2% |   592.2 B/value
+  codegen_fn_attrs                                 36538 values |      882252 B   0.2% |    24.1 B/value
+  adt_def                                           3567 values |      711379 B   0.1% |   199.4 B/value
+  reachable_set                                        1 values |      625418 B   0.1% | 625418.0 B/value
+resources xai_grok_shell-1yymvei0n623d/dep-graph.bin: wall 13.3s, cpu 32.5s, peak RssAnon 550 MB

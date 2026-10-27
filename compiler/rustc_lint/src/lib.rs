@@ -137,7 +137,10 @@ use unused::*;
 
 #[rustfmt::skip]
 pub use builtin::MissingDoc;
-pub use context::{CheckLintNameResult, EarlyContext, LateContext, LintContext, LintStore};
+pub use context::{
+    CheckLintNameResult, EarlyContext, EffectiveVisibilityLookup, LateContext, LintContext,
+    LintStore,
+};
 pub use early::diagnostics::DiagAndSess;
 pub use early::{EarlyCheckNode, check_ast_node};
 pub use late::{check_crate, late_lint_mod, unerased_lint_store};

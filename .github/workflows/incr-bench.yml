@@ -1,0 +1,240 @@
+name: incr-bench
+
+# Measures the incremental cache of compiler configs on grok-build and on a syn workspace. Each leg runs for hours. A run starts on a dispatch, or on a push that changes incr-bench/ci-request.env. ci-request.env lines: baseline=REF, patched=REF (empty means the pushed commit), grok_ref=REF, workloads=grok syn, and one "config=NAME baseline|patched [RUSTC FLAGS]" per config.
+on:
+  push:
+    branches: ['**']
+    paths: [incr-bench/ci-request.env]
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Baseline compiler commit or ref of this repository.
+        required: true
+        default: dc44e7f2c436b6041742e138b9c2176f093196d5
+      patched:
+        description: Patched compiler commit or ref of this repository. Empty means the commit this run is on.
+        required: false
+        default: ''
+      grok_ref:
+        description: Commit or branch of wow-look-at-my/grok-build to build.
+        required: true
+        default: master
+      workloads:
+        description: Workloads, from grok and syn, separated by spaces.
+        required: false
+        default: grok syn
+      configs:
+        description: Entries "NAME baseline|patched [RUSTC FLAGS]" separated by ";". Empty means one plain config per compiler.
+        required: false
+        default: ''
+
+# A new request on a branch cancels the benchmark in progress on that branch.
+concurrency:
+  group: gha_${{ github.repository }}_${{ github.workflow }}_${{ github.ref != 'refs/heads/master' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  config:
+    runs-on: ${{ github.event.repository.visibility == 'public' && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
+    outputs:
+      grok_ref: ${{ steps.cfg.outputs.grok_ref }}
+      rustc_src: ${{ steps.cfg.outputs.rustc_src }}
+      compilers: ${{ steps.cfg.outputs.compilers }}
+      legs: ${{ steps.cfg.outputs.legs }}
+      names: ${{ steps.cfg.outputs.names }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: incr-bench
+      - id: cfg
+        run: incr-bench/scripts/ci-bench-inputs.sh "${{ github.event_name }}" "${{ inputs.baseline }}" "${{ inputs.patched }}" "${{ inputs.grok_ref }}" "${{ inputs.workloads }}" "${{ inputs.configs }}"
+      # The later jobs start together. A checkout in each of them sent a burst of git requests that GitHub answered with HTTP 429.
+      - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
+        with:
+          mode: send
+          name: bench-scripts
+          path: incr-bench
+
+  toolchain:
+    needs: config
+    name: toolchain ${{ matrix.compiler }}
+    runs-on: ${{ github.event.repository.visibility == 'public' && 'ubuntu-22.04' || vars.CI_RUNNER || 'ubuntu-22.04' }}
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.config.outputs.compilers) }}
+    steps:
+      - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
+        with:
+          mode: receive
+          name: bench-scripts
+          path: bench/incr-bench
+
+      - name: Restore the stage1 toolchain
+        id: toolchain
+        uses: wow-look-at-my/buildhost/.github/actions/buildhost-cache-restore@lkgb
+        with:
+          path: toolchain
+          key: ${{ matrix.key }}
+
+      - name: Free disk
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        run: bench/incr-bench/scripts/ci-free-disk.sh
+
+      - name: Check out the compiler
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bench/incr-bench/scripts/ci-checkout-rustc.sh rustc-src "${{ matrix.sha }}"
+
+      - name: Build the stage1 toolchain
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        run: bench/incr-bench/scripts/ci-build-stage1.sh rustc-src toolchain
+
+      - name: Save the stage1 toolchain
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        uses: wow-look-at-my/buildhost/.github/actions/buildhost-cache-save@lkgb
+        with:
+          path: toolchain
+          key: ${{ matrix.key }}
+
+      # The cache carries the toolchain across runs. A run file carries it to the legs of this run, and buildhost never evicts the files of a live run.
+      - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
+        with:
+          mode: send
+          name: toolchain-${{ matrix.compiler }}
+          path: toolchain
+
+  bench:
+    needs: [config, toolchain]
+    name: bench ${{ matrix.leg }}
+    # The same image as grok-build's own Linux CI.
+    runs-on: ${{ github.event.repository.visibility == 'public' && 'ubuntu-22.04' || vars.CI_RUNNER || 'ubuntu-22.04' }}
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.config.outputs.legs) }}
+    steps:
+      - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
+        with:
+          mode: receive
+          name: bench-scripts
+          path: bench/incr-bench
+
+      - name: Free disk
+        run: bench/incr-bench/scripts/ci-free-disk.sh
+
+      - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
+        with:
+          mode: receive
+          name: toolchain-${{ matrix.compiler }}
+          path: toolchain
+
+      - name: Check out grok-build
+        if: matrix.workload == 'grok'
+        uses: actions/checkout@v4
+        with:
+          repository: wow-look-at-my/grok-build
+          ref: ${{ needs.config.outputs.grok_ref }}
+          path: src
+
+      - if: matrix.workload == 'grok'
+        uses: ./src/.github/actions/setup-protoc
+
+      # grok-build's .cargo/config.toml links with mold.
+      - name: Install mold
+        if: matrix.workload == 'grok'
+        uses: wow-look-at-my/actions@cached-apt#latest
+        with:
+          packages: mold
+
+      - name: Check out the rustc source
+        if: matrix.workload == 'rustc'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bench/incr-bench/scripts/ci-checkout-rustc.sh src "${{ needs.config.outputs.rustc_src }}"
+
+      - name: Build the syn corpus
+        if: matrix.workload == 'syn'
+        run: bench/incr-bench/scripts/ci-syn-corpus.sh src
+
+      # Cargo comes from the toolchain the workload pins. The bench sets RUSTC to the stage1 compiler.
+      - name: Install the workload's pinned cargo
+        working-directory: src
+        run: rustup show
+
+      # The bench self-profiles one extra comment edit and prints the summary.
+      - name: Install summarize
+        run: cargo install --locked --git https://github.com/rust-lang/measureme --rev e22edccd0364a3058e8e618f51988d64db0b3e10 summarize
+
+      - name: Benchmark
+        run: bench/incr-bench/scripts/ci-bench.sh "${{ matrix.workload }}" src toolchain/bin/rustc "${{ runner.temp }}/targets" "results/${{ matrix.leg }}.tsv"
+        env:
+          BENCH_CONFIG: ${{ matrix.config }}
+          BENCH_COMPILER: ${{ matrix.compiler }}
+          BENCH_TOOLCHAIN: ${{ matrix.sha }}
+          BENCH_RUSTC_FLAGS: ${{ matrix.flags }}
+          # The widest -j the hosted runner's RAM holds for grok-build, as its own CI measured.
+          CARGO_BUILD_JOBS: "3"
+
+      - name: Leg table
+        run: bench/incr-bench/scripts/ci-report.sh "results/${{ matrix.leg }}.tsv" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
+        with:
+          mode: send
+          name: results-${{ matrix.leg }}
+          path: results
+
+  report:
+    needs: [config, bench]
+    runs-on: ${{ github.event.repository.visibility == 'public' && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: incr-bench
+          fetch-depth: 0
+          filter: tree:0
+
+      # The receive loop calls the library behind buildhost-handoff, because the number of legs is known only at run time.
+      - uses: actions/checkout@v4
+        with:
+          repository: wow-look-at-my/buildhost
+          ref: lkgb
+          path: buildhost-src
+          sparse-checkout: .github/actions/lib
+
+      - name: Receive the results of every leg
+        uses: wow-look-at-my/actions@typescript#latest
+        with:
+          script: |
+            const lib = require(`${process.env.GITHUB_WORKSPACE}/buildhost-src/.github/actions/lib/handoff.ts`);
+            const names: string[] = ${{ needs.config.outputs.names }};
+            for (const name of names) {
+              const dir = `${process.env.GITHUB_WORKSPACE}/in/${name}`;
+              await lib.handoff({ core, github, context, octokit, exec, steps: {}, inputs: { mode: 'receive', name: `results-${name}`, path: dir, server: 'https://pazer.build', token: '' } });
+              if (!fs.existsSync(`${dir}/${name}.tsv`)) throw new Error(`leg ${name} handed off no ${name}.tsv`);
+            }
+
+      - name: Write the report
+        run: |
+          mkdir -p incr-bench/results/ci
+          {
+            echo "# Incremental cache benchmark, run [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo
+            incr-bench/scripts/ci-report.sh in/*/*.tsv
+          } > "incr-bench/results/ci/${{ github.run_id }}.md"
+          cat "incr-bench/results/ci/${{ github.run_id }}.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit the report
+        run: |
+          incr-bench/scripts/ci-commit-results.sh "incr-bench/results/ci/${{ github.run_id }}.md" "incr-bench: benchmark results of run ${{ github.run_id }}"

@@ -1,0 +1,19 @@
+trial 0: clean; found 1874477 missing 0 mismatched 0; chain 0 words; end 458249930 file 458249930
+trial 1: clean; found 1874477 missing 0 mismatched 0; chain 0 words; end 458249930 file 458249930
+trial 2: writer killed mid-write (accepted); found 1874477 missing 0 mismatched 0; chain 2000 words; end 458589976 file 458814407
+trial 3: writer killed mid-write (accepted); found 1874477 missing 0 mismatched 0; chain 2000 words; end 458589976 file 458862950
+trial 4: writer killed mid-write (accepted); found 1874477 missing 0 mismatched 0; chain 2000 words; end 458589976 file 458862950
+trial 5: writer killed mid-write (accepted); found 1874477 missing 0 mismatched 0; chain 2000 words; end 458589976 file 458862950
+trial 6: writer killed mid-write (accepted); found 1874477 missing 0 mismatched 0; chain 2000 words; end 458589976 file 458862950
+trial 7: writer killed mid-write (accepted); found 1874477 missing 0 mismatched 0; chain 2000 words; end 458589976 file 458862950
+trial 8: clean; found 1874477 missing 0 mismatched 0; chain 4000 words; end 459370856 file 459370856
+trial 9: clean; found 1874477 missing 0 mismatched 0; chain 0 words; end 459738128 file 459738128
+trial 10: clean; found 1874477 missing 0 mismatched 0; chain 2000 words; end 460105400 file 460105400
+trial 11: clean; found 1874477 missing 0 mismatched 0; chain 4000 words; end 461025520 file 461025520
+trial 12: writer killed mid-write (accepted); found 1874477 missing 0 mismatched 0; chain 4000 words; end 461025520 file 461093539
+trial 13: clean; found 1874477 missing 0 mismatched 0; chain 0 words; end 461717424 file 461717424
+trial 14: writer killed mid-write (accepted); found 1874477 missing 0 mismatched 0; chain 0 words; end 461717424 file 462137661
+trial 15: clean; found 1874477 missing 0 mismatched 0; chain 2000 words; end 462760208 file 462760208
+after one more committed writer: clean; found 1874477 missing 0 mismatched 0
+kill test: 16/16 trials left a valid file; 8 kills landed mid-write
+EXIT 0

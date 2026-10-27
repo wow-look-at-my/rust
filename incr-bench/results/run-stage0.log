@@ -1,0 +1,37 @@
+stage0     r1 edits      cold                      8.527s  incr=107842170 B  dirs=2  wp=0/240 reused
+stage0     r1 edits      edit:comment              1.479s  incr=106770703 B  dirs=2  wp=239/240 reused
+stage0     r1 edits      nochange:comment          0.022s  incr=106770703 B  dirs=2  wp=0/0 reused
+stage0     r1 edits      revert:comment            1.573s  incr=106771002 B  dirs=2  wp=239/240 reused
+stage0     r1 edits      edit:body                 1.708s  incr=106859582 B  dirs=2  wp=237/240 reused
+stage0     r1 edits      nochange:body             0.023s  incr=106859582 B  dirs=2  wp=0/0 reused
+stage0     r1 edits      revert:body               1.811s  incr=106819716 B  dirs=2  wp=237/240 reused
+stage0     r1 edits      edit:sig                  1.627s  incr=106771086 B  dirs=2  wp=239/240 reused
+stage0     r1 edits      nochange:sig              0.022s  incr=106771086 B  dirs=2  wp=0/0 reused
+stage0     r1 edits      revert:sig                1.688s  incr=106770990 B  dirs=2  wp=239/240 reused
+stage0     r2 edits      cold                      8.292s  incr=107842151 B  dirs=2  wp=0/240 reused
+stage0     r2 edits      edit:comment              1.816s  incr=106770701 B  dirs=2  wp=239/240 reused
+stage0     r2 edits      nochange:comment          0.030s  incr=106770701 B  dirs=2  wp=0/0 reused
+stage0     r2 edits      revert:comment            1.772s  incr=106770995 B  dirs=2  wp=239/240 reused
+stage0     r2 edits      edit:body                 1.739s  incr=106859586 B  dirs=2  wp=237/240 reused
+stage0     r2 edits      nochange:body             0.030s  incr=106859586 B  dirs=2  wp=0/0 reused
+stage0     r2 edits      revert:body               2.047s  incr=106819714 B  dirs=2  wp=237/240 reused
+stage0     r2 edits      edit:sig                  1.858s  incr=106771094 B  dirs=2  wp=239/240 reused
+stage0     r2 edits      nochange:sig              0.025s  incr=106771094 B  dirs=2  wp=0/0 reused
+stage0     r2 edits      revert:sig                1.691s  incr=106770988 B  dirs=2  wp=239/240 reused
+stage0     r1 churn-cmd  round1:build              7.643s  incr=107842163 B  dirs=2  wp=0/240 reused
+stage0     r1 churn-cmd  round1:test               3.797s  incr=157841344 B  dirs=4  wp=0/65 reused
+stage0     r1 churn-cmd  round1:check              4.034s  incr=199290624 B  dirs=6  wp=0/0 reused
+stage0     r1 churn-cmd  round2:build              1.488s  incr=198209043 B  dirs=6  wp=240/240 reused
+stage0     r1 churn-cmd  round2:test               1.094s  incr=197801179 B  dirs=6  wp=65/65 reused
+stage0     r1 churn-cmd  round2:check              1.065s  incr=197777977 B  dirs=6  wp=0/0 reused
+stage0     r1 churn-cmd  round3:build              1.621s  incr=197777971 B  dirs=6  wp=240/240 reused
+stage0     r1 churn-cmd  round3:test               1.207s  incr=197777968 B  dirs=6  wp=65/65 reused
+stage0     r1 churn-cmd  round3:check              0.881s  incr=197777968 B  dirs=6  wp=0/0 reused
+stage0     r1 churn-feat round1:feat1              4.038s  incr=45023845 B  dirs=1  wp=0/167 reused
+stage0     r1 churn-feat round1:feat2              5.107s  incr=111293120 B  dirs=2  wp=0/182 reused
+stage0     r1 churn-feat round1:feat3              6.571s  incr=193806478 B  dirs=3  wp=0/186 reused
+stage0     r1 churn-feat round1:feat4              5.640s  incr=263483661 B  dirs=4  wp=0/182 reused
+stage0     r1 churn-feat round1:feat5              7.026s  incr=340217309 B  dirs=5  wp=0/182 reused
+stage0     r1 churn-feat round1:feat6              9.492s  incr=433119800 B  dirs=6  wp=0/186 reused
+done: rows appended to /home/user/bench-corpus/results-stage0.csv; logs in /home/user/bench-corpus/targets/stage0/logs
+exit=0

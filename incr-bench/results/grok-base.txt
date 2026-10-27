@@ -1,0 +1,4 @@
+base       cold             1510.8s graph=3.170GB qcache=2.368GB objs=1.771GB total=7.5G dirs=118 sessions=118
+base       edit:comment      183.2s graph=3.170GB qcache=2.201GB objs=1.771GB total=7.3G dirs=118 sessions=118
+base       edit:new-item     198.4s graph=3.171GB qcache=2.202GB objs=1.771GB total=7.3G dirs=118 sessions=118
+base       revert            203.5s graph=3.171GB qcache=2.202GB objs=1.771GB total=7.3G dirs=118 sessions=118

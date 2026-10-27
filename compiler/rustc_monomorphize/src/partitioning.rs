@@ -95,13 +95,14 @@
 use std::cmp;
 use std::collections::hash_map::Entry;
 use std::fs::{self, File};
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use rustc_attr_ir::lang_items::LangItem;
 use rustc_attr_ir::{InlineAttr, Linkage};
 use rustc_data_structures::either::Either;
-use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
+use rustc_data_structures::fx::{FxHasher, FxIndexMap, FxIndexSet};
 use rustc_data_structures::sync::par_join;
 use rustc_data_structures::unord::{UnordMap, UnordSet};
 use rustc_hir::def::DefKind;
@@ -314,6 +315,37 @@ where
 
 // This function requires the CGUs to be sorted by name on input, and ensures
 // they are sorted by name on return, for deterministic behaviour.
+/// Merges each CGU into the bucket that a hash of its name picks, under
+/// `-Z incremental-stable-cgu-merge`. The merge by size moves CGUs between merged units when
+/// any CGU changes size, which renames those units, and a renamed unit is compiled again.
+/// Here a CGU stays in its bucket whatever the sizes are.
+fn merge_by_name_hash<'tcx>(
+    codegen_units: &mut Vec<CodegenUnit<'tcx>>,
+    cgu_contents: &mut UnordMap<Symbol, Vec<Symbol>>,
+    max_codegen_units: usize,
+) {
+    let mut buckets: Vec<Option<CodegenUnit<'tcx>>> =
+        (0..max_codegen_units).map(|_| None).collect();
+    // `codegen_units` is sorted by name, so the first CGU of a bucket in name order keeps its name.
+    for mut cgu in codegen_units.drain(..) {
+        let mut hasher = FxHasher::default();
+        cgu.name().as_str().hash(&mut hasher);
+        let bucket = &mut buckets[(hasher.finish() % max_codegen_units as u64) as usize];
+        match bucket {
+            None => *bucket = Some(cgu),
+            Some(dst) => {
+                dst.items_mut().append(cgu.items_mut());
+                let mut consumed = cgu_contents.remove(&cgu.name()).unwrap();
+                cgu_contents.get_mut(&dst.name()).unwrap().append(&mut consumed);
+            }
+        }
+    }
+    for mut cgu in buckets.into_iter().flatten() {
+        cgu.compute_size_estimate();
+        codegen_units.push(cgu);
+    }
+}
+
 fn merge_codegen_units<'tcx>(
     cx: &PartitioningCx<'_, 'tcx>,
     codegen_units: &mut Vec<CodegenUnit<'tcx>>,
@@ -342,6 +374,12 @@ fn merge_codegen_units<'tcx>(
     // then at least one of the biggest N will have to grow. codegen_units[N-1]
     // is the smallest of those, and so has the most room to grow.
     let max_codegen_units = cx.tcx.sess.codegen_units().as_usize();
+    if cx.tcx.sess.opts.incremental.is_some()
+        && cx.tcx.sess.opts.unstable_opts.incremental_stable_cgu_merge
+        && codegen_units.len() > max_codegen_units
+    {
+        merge_by_name_hash(codegen_units, &mut cgu_contents, max_codegen_units);
+    }
     while codegen_units.len() > max_codegen_units {
         // Sort small CGUs to the back.
         codegen_units.sort_by_key(|cgu| cmp::Reverse(cgu.size_estimate()));

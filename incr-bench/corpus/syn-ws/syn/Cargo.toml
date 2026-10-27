@@ -1,0 +1,47 @@
+# The [[test]], [[bench]] and dev-dependency sections are removed so that the
+# workspace resolves and vendors only the runtime dependencies.
+
+[package]
+edition = "2021"
+rust-version = "1.71"
+name = "syn"
+version = "2.0.119"
+authors = ["David Tolnay <dtolnay@gmail.com>"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Parser for Rust source code"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dtolnay/syn"
+
+[features]
+clone-impls = []
+default = ["derive", "parsing", "printing", "clone-impls", "proc-macro"]
+derive = []
+extra-traits = []
+fold = []
+full = []
+parsing = []
+printing = ["dep:quote"]
+proc-macro = ["proc-macro2/proc-macro", "quote?/proc-macro"]
+visit = []
+visit-mut = []
+
+[lib]
+name = "syn"
+path = "src/lib.rs"
+
+[dependencies.proc-macro2]
+version = "1.0.91"
+default-features = false
+
+[dependencies.quote]
+version = "1.0.35"
+optional = true
+default-features = false
+
+[dependencies.unicode-ident]
+version = "1"

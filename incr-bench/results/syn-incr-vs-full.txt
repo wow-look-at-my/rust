@@ -1,0 +1,10 @@
+warming both target dirs
+edit     round     full_s     incr_s
+comment  1         12.891      2.722
+body     1         12.972      2.864
+sig      1         12.909      2.529
+comment  2         13.372      2.578
+body     2         13.951      3.048
+sig      2         13.564      2.881
+
+[exited with code 0]
