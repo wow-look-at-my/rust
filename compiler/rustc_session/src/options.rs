@@ -2601,6 +2601,10 @@ options! {
         "evict the least recently used crate directories once the incremental directory \
         exceeds this many bytes; falls back to the `RUSTC_INCREMENTAL_SIZE_CAP` environment \
         variable (default: no cap)"),
+    incremental_stable_cgu_merge: bool = (false, parse_bool, [TRACKED],
+        "when a crate has more codegen units than the limit, merge each into a bucket picked \
+        by a hash of its name instead of by size, so a size change renames no other unit \
+        (default: no)"),
     incremental_uncache: Option<Vec<String>> = (None, parse_opt_comma_list, [UNTRACKED],
         "comma-separated query names to treat as not cache_on_disk: the query cache does not \
         write or load their values, so they recompute when needed (default: none)"),
