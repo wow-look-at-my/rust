@@ -2580,11 +2580,11 @@ options! {
         "do not display the source code block in diagnostics for files in the directory"),
     implicit_sysroot_deps: bool = (true, parse_bool, [TRACKED],
         "allows rust to search sysroot for a crate's dependencies (default: yes)"),
-    incremental_ignore_spans: bool = (false, parse_bool, [TRACKED],
-        "ignore spans during ICH computation -- used for testing (default: no)"),
     incremental_explain_red: Option<Vec<String>> = (None, parse_opt_comma_list, [UNTRACKED],
         "comma-separated dep kinds: for each node of these kinds that cannot be marked green, \
         print the chain of red dependencies down to the input that changed (default: none)"),
+    incremental_ignore_spans: bool = (false, parse_bool, [TRACKED],
+        "ignore spans during ICH computation -- used for testing (default: no)"),
     incremental_info: bool = (false, parse_bool, [UNTRACKED],
         "print high-level information about incremental reuse (or the lack thereof) \
         (default: no)"),
