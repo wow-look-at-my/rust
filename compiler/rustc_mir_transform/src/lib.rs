@@ -798,7 +798,9 @@ fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
         return body;
     }
 
-    tcx.arena.alloc(inner_optimized_mir(tcx, did))
+    let body = inner_optimized_mir(tcx, did);
+    tcx.prev_metadata_explain_mismatch(did, &body);
+    tcx.arena.alloc(body)
 }
 
 fn inner_optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> Body<'_> {

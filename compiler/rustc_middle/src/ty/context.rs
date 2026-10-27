@@ -825,6 +825,9 @@ pub trait PrevMetadata<'tcx>: DynSend + DynSync {
 
     /// Prints how many bodies decoded, and how many did not, under `-Z incremental-info`.
     fn report(&self);
+
+    /// Prints the fields in which `built` differs from the first decoded body that did not match its hash, when `def` is that body.
+    fn explain_mismatch(&self, tcx: TyCtxt<'tcx>, def: LocalDefId, built: &Body<'tcx>);
 }
 
 impl<'tcx> GlobalCtxt<'tcx> {

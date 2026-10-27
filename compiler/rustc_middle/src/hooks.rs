@@ -118,6 +118,9 @@ declare_hooks! {
     /// Gives the optimized MIR of a green body from the metadata in `old_session_directory`, or `None`.
     hook prev_metadata_optimized_mir(def: LocalDefId) -> Option<&'tcx mir::Body<'tcx>>;
 
+    /// Under `-Z incremental-info`, prints how `built` differs from the decoded body of `def`.
+    hook prev_metadata_explain_mismatch(def: LocalDefId, built: &mir::Body<'tcx>) -> ();
+
     /// Serializes all eligible query return values into the on-disk cache.
     hook encode_query_values(encoder: &mut CacheEncoder<'tcx>) -> ();
 

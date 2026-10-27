@@ -2735,6 +2735,8 @@ struct PrevMetadataMir<'tcx> {
     decoded: AtomicUsize,
     rejected: AtomicUsize,
     mismatched: AtomicUsize,
+    /// Under `-Z incremental-info`, the first decoded body that did not match its hash.
+    first_mismatch: Lock<Option<(LocalDefId, Fingerprint, &'tcx mir::Body<'tcx>)>>,
 }
 
 impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
@@ -2755,10 +2757,74 @@ impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
         );
         if hash != expected {
             self.mismatched.fetch_add(1, Ordering::Relaxed);
+            if tcx.sess.opts.unstable_opts.incremental_info {
+                let mut first = self.first_mismatch.lock();
+                if first.is_none() {
+                    *first = Some((def, expected, &*tcx.arena.alloc(body)));
+                }
+            }
             return None;
         }
         self.decoded.fetch_add(1, Ordering::Relaxed);
         Some(tcx.arena.alloc(body))
+    }
+
+    fn explain_mismatch(&self, tcx: TyCtxt<'tcx>, def: LocalDefId, built: &mir::Body<'tcx>) {
+        let Some((first, expected, decoded)) = *self.first_mismatch.lock() else { return };
+        if first != def {
+            return;
+        }
+        let built_hash = short_value_fingerprint(
+            tcx.with_stable_hashing_context(|mut hcx| hash_result(&mut hcx, &built)),
+        );
+        eprintln!(
+            "[incremental] codegen: mismatch of {def:?}: the built body {} the dep graph",
+            if built_hash == expected { "matches" } else { "does not match" },
+        );
+        macro_rules! fields {
+            ($($field:ident),*) => {$(
+                let a: Fingerprint = tcx.with_stable_hashing_context(|mut hcx| {
+                    let mut hasher = StableHasher::new();
+                    decoded.$field.stable_hash(&mut hcx, &mut hasher);
+                    hasher.finish()
+                });
+                let b: Fingerprint = tcx.with_stable_hashing_context(|mut hcx| {
+                    let mut hasher = StableHasher::new();
+                    built.$field.stable_hash(&mut hcx, &mut hasher);
+                    hasher.finish()
+                });
+                if a != b {
+                    let (a, b) = (format!("{:#?}", decoded.$field), format!("{:#?}", built.$field));
+                    let line = a.lines().zip(b.lines()).find(|(x, y)| x != y);
+                    eprintln!(
+                        "[incremental] codegen: field {} differs, first lines {:?}",
+                        stringify!($field),
+                        line.map(|(x, y)| (x.trim().to_owned(), y.trim().to_owned())),
+                    );
+                }
+            )*};
+        }
+        fields!(
+            basic_blocks,
+            phase,
+            pass_count,
+            source,
+            source_scopes,
+            coroutine,
+            local_decls,
+            user_type_annotations,
+            arg_count,
+            spread_arg,
+            var_debug_info,
+            span,
+            required_consts,
+            mentioned_items,
+            is_polymorphic,
+            injection_phase,
+            tainted_by_errors,
+            coverage_early_info,
+            coverage_mir_info
+        );
     }
 
     fn report(&self) {
@@ -2768,6 +2834,20 @@ impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
             self.rejected.load(Ordering::Relaxed),
             self.mismatched.load(Ordering::Relaxed),
         );
+    }
+}
+
+/// Provides the `prev_metadata_explain_mismatch` hook.
+pub(crate) fn prev_metadata_explain_mismatch<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+    built: &mir::Body<'tcx>,
+) {
+    if !tcx.sess.opts.unstable_opts.incremental_info {
+        return;
+    }
+    if let Some(Some(prev)) = tcx.prev_metadata.get() {
+        prev.explain_mismatch(tcx, def, built);
     }
 }
 
@@ -2790,6 +2870,7 @@ pub(crate) fn prev_metadata_optimized_mir<'tcx>(
             decoded: AtomicUsize::new(0),
             rejected: AtomicUsize::new(0),
             mismatched: AtomicUsize::new(0),
+            first_mismatch: Lock::new(None),
         }));
         Some(prev as &'tcx dyn PrevMetadata<'tcx>)
     });
