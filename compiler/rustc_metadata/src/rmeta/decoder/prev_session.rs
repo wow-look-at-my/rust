@@ -110,43 +110,11 @@ impl<'tcx> PrevSession<'tcx> {
             .filter(|&(dep, &cnum)| dep.hash != tcx.crate_hash(cnum))
             .map(|(_, &cnum)| cnum)
             .collect();
-        let remap = if changed.is_empty() {
-            None
-        } else {
-            let refs: ForeignRefs = root.foreign_refs.decode(&blob);
-            if refs.def_ids.is_empty() {
-                return None;
-            }
-            let is_changed = |cnum: u32| changed.contains(&CrateNum::from_u32(cnum));
-            Some(ForeignRemap {
-                def_ids: refs
-                    .def_ids
-                    .into_iter()
-                    .filter(|&(cnum, ..)| is_changed(cnum))
-                    .map(|(cnum, index, hash)| ((cnum, index), hash))
-                    .collect(),
-                expns: refs
-                    .expns
-                    .into_iter()
-                    .filter(|&(cnum, ..)| is_changed(cnum))
-                    .map(|(cnum, index, hash)| ((cnum, index), hash))
-                    .collect(),
-                files: refs
-                    .files
-                    .into_iter()
-                    .filter(|&(cnum, ..)| is_changed(cnum))
-                    .map(|(cnum, index, id, hash)| ((cnum, index), (id, hash)))
-                    .collect(),
-                changed,
-                current_files: Default::default(),
-            })
-        };
-
         let alloc_decoding_state =
             AllocDecodingState::new(root.interpret_alloc_index.decode(&blob).collect());
         let def_path_hash_map = root.def_path_hash_map.decode(&blob);
 
-        Some(PrevSession {
+        let mut session = PrevSession {
             tcx,
             blob,
             root,
@@ -160,11 +128,43 @@ impl<'tcx> PrevSession<'tcx> {
             scope: Cell::new(None),
             rejected: Cell::new(false),
             poisoned: Cell::new(false),
-            remap,
+            remap: None,
             reused: Cell::new(0),
             attempted: Cell::new(0),
             requested: Cell::new(0),
-        })
+        };
+        if changed.is_empty() {
+            return Some(session);
+        }
+
+        let refs: ForeignRefs = session.decode_at(session.root.foreign_refs.position);
+        if refs.def_ids.is_empty() {
+            return None;
+        }
+        let is_changed = |cnum: u32| changed.contains(&CrateNum::from_u32(cnum));
+        session.remap = Some(ForeignRemap {
+            def_ids: refs
+                .def_ids
+                .into_iter()
+                .filter(|&(cnum, ..)| is_changed(cnum))
+                .map(|(cnum, index, hash)| ((cnum, index), hash))
+                .collect(),
+            expns: refs
+                .expns
+                .into_iter()
+                .filter(|&(cnum, ..)| is_changed(cnum))
+                .map(|(cnum, index, hash)| ((cnum, index), hash))
+                .collect(),
+            files: refs
+                .files
+                .into_iter()
+                .filter(|&(cnum, ..)| is_changed(cnum))
+                .map(|(cnum, index, id, hash)| ((cnum, index), (id, hash)))
+                .collect(),
+            changed,
+            current_files: Default::default(),
+        });
+        Some(session)
     }
 
     fn decoder(&self, pos: usize) -> PrevDecoder<'_, 'tcx> {
@@ -215,8 +215,8 @@ impl<'tcx> PrevSession<'tcx> {
             return Some(old);
         }
         let &hash = remap.expns.get(&(krate.as_u32(), old))?;
-        let cdata = CStore::from_tcx(self.tcx).get_crate_data(krate);
-        cdata.find_expn_index(self.tcx, hash).map(|index| index.as_u32())
+        let cstore = CStore::from_tcx(self.tcx);
+        cstore.get_crate_data(krate).find_expn_index(self.tcx, hash).map(|index| index.as_u32())
     }
 
     /// Maps a file of another crate, named by its index in that crate's source map at the time
@@ -230,7 +230,8 @@ impl<'tcx> PrevSession<'tcx> {
         let mut current_files = remap.current_files.borrow_mut();
         let files = current_files.entry(krate).or_insert_with(|| {
             let tcx = self.tcx;
-            let cdata = CStore::from_tcx(tcx).get_crate_data(krate);
+            let cstore = CStore::from_tcx(tcx);
+            let cdata = cstore.get_crate_data(krate);
             (0..cdata.root.source_map.size() as u32)
                 .map(|index| {
                     let file = cdata.imported_source_file(tcx, index).translated_source_file;
