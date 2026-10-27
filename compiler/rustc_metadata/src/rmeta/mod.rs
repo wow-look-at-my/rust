@@ -49,7 +49,9 @@ use rustc_session::config::mitigation_coverage::DeniedPartialMitigation;
 use rustc_session::config::{SymbolManglingVersion, TargetModifier};
 use rustc_span::edition::Edition;
 use rustc_span::hygiene::{DecodedSyntaxContext, ExpnIndex, MacroKind, SyntaxContextKey};
-use rustc_span::{self, ExpnData, ExpnHash, ExpnId, Ident, Span, Symbol};
+use rustc_span::{
+    self, ExpnData, ExpnHash, ExpnId, Ident, SourceFileHash, Span, StableSourceFileId, Symbol,
+};
 use rustc_target::spec::{PanicStrategy, TargetTuple};
 use table::TableBuilder;
 
@@ -315,6 +317,7 @@ pub(crate) struct CrateRoot {
     syntax_contexts: SyntaxContextTable,
     expn_data: ExpnDataTable,
     expn_hashes: ExpnHashTable,
+    foreign_refs: LazyValue<ForeignRefs>,
 
     def_path_hash_map: LazyValue<DefPathHashMapRef<'static>>,
 
@@ -530,6 +533,18 @@ pub(crate) mod remapped_def_id {
             (self.krate, self.index)
         }
     }
+}
+
+/// The stable identity of each foreign definition, expansion and source file
+/// that the metadata names by its position in another crate.
+#[derive(Default, Encodable, Decodable)]
+pub(crate) struct ForeignRefs {
+    /// Crate number, definition index, hash.
+    pub def_ids: Vec<(u32, u32, DefPathHash)>,
+    /// Crate number, expansion index, hash.
+    pub expns: Vec<(u32, u32, ExpnHash)>,
+    /// Crate number, index in that crate's source map, file id, source hash.
+    pub files: Vec<(u32, u32, StableSourceFileId, SourceFileHash)>,
 }
 
 /// A dependency record, as stored in the hashed [`CrateRoot`].

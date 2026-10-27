@@ -3,13 +3,13 @@
 use std::cell::{Cell, RefCell};
 use std::num::NonZero;
 
-use rustc_data_structures::fx::FxHashMap;
+use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hashes::Hash64;
 use rustc_hir::def_id::{DefId, DefIndex, DefPathHash, LocalDefId, StableCrateId};
 use rustc_middle::mir;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::hygiene::ExpnId;
-use rustc_span::{ExpnHash, SourceFile, Span, StableSourceFileId};
+use rustc_span::{ExpnHash, SourceFile, SourceFileHash, Span, StableSourceFileId};
 
 use super::*;
 
@@ -51,15 +51,29 @@ pub(crate) struct PrevSession<'tcx> {
     scope: Cell<Option<ItemScope>>,
     rejected: Cell<bool>,
     poisoned: Cell<bool>,
+    /// Set when a dependency changed since the session.
+    remap: Option<ForeignRemap>,
     pub(crate) reused: Cell<usize>,
     pub(crate) attempted: Cell<usize>,
     pub(crate) requested: Cell<usize>,
 }
 
+/// The stable ids of the positions the session wrote into the dependencies that changed.
+struct ForeignRemap {
+    changed: FxHashSet<CrateNum>,
+    def_ids: FxHashMap<(u32, u32), DefPathHash>,
+    expns: FxHashMap<(u32, u32), ExpnHash>,
+    files: FxHashMap<(u32, u32), (StableSourceFileId, SourceFileHash)>,
+    /// Per changed crate: file id to the index and source hash of that file today.
+    current_files:
+        RefCell<FxHashMap<CrateNum, FxHashMap<StableSourceFileId, (u32, SourceFileHash)>>>,
+}
+
 impl<'tcx> PrevSession<'tcx> {
-    /// Opens the metadata. Returns `None` when its crate graph differs from
-    /// this, because then encoded crate numbers and foreign hashes no longer
-    /// match.
+    /// Opens the metadata. Returns `None` when its list of crates differs
+    /// from this, since encoded crate numbers then name other crates. Returns
+    /// `None` when a dependency changed and the file has no table of foreign
+    /// ids to read its positions through.
     pub(crate) fn load(tcx: TyCtxt<'tcx>, path: &Path) -> Option<PrevSession<'tcx>> {
         let file = std::fs::File::open(path).ok()?;
         // SAFETY: the incremental session directory owns this file. Nothing writes to it now.
@@ -81,12 +95,52 @@ impl<'tcx> PrevSession<'tcx> {
         let old_deps: Vec<CrateDep> = root.crate_deps.decode(&blob).collect();
         let crates = tcx.crates(());
         if old_deps.len() != crates.len()
-            || !old_deps.iter().zip(crates.iter()).all(|(dep, &cnum)| {
-                dep.name == tcx.crate_name(cnum) && dep.hash == tcx.crate_hash(cnum)
-            })
+            || !old_deps
+                .iter()
+                .zip(crates.iter())
+                .all(|(dep, &cnum)| dep.name == tcx.crate_name(cnum))
         {
             return None;
         }
+        // A dependency that changed can move its definitions, expansions and files. Positions
+        // into it go through the table of stable ids instead.
+        let changed: FxHashSet<CrateNum> = old_deps
+            .iter()
+            .zip(crates.iter())
+            .filter(|&(dep, &cnum)| dep.hash != tcx.crate_hash(cnum))
+            .map(|(_, &cnum)| cnum)
+            .collect();
+        let remap = if changed.is_empty() {
+            None
+        } else {
+            let refs: ForeignRefs = root.foreign_refs.decode(&blob);
+            if refs.def_ids.is_empty() {
+                return None;
+            }
+            let is_changed = |cnum: u32| changed.contains(&CrateNum::from_u32(cnum));
+            Some(ForeignRemap {
+                def_ids: refs
+                    .def_ids
+                    .into_iter()
+                    .filter(|&(cnum, ..)| is_changed(cnum))
+                    .map(|(cnum, index, hash)| ((cnum, index), hash))
+                    .collect(),
+                expns: refs
+                    .expns
+                    .into_iter()
+                    .filter(|&(cnum, ..)| is_changed(cnum))
+                    .map(|(cnum, index, hash)| ((cnum, index), hash))
+                    .collect(),
+                files: refs
+                    .files
+                    .into_iter()
+                    .filter(|&(cnum, ..)| is_changed(cnum))
+                    .map(|(cnum, index, id, hash)| ((cnum, index), (id, hash)))
+                    .collect(),
+                changed,
+                current_files: Default::default(),
+            })
+        };
 
         let alloc_decoding_state =
             AllocDecodingState::new(root.interpret_alloc_index.decode(&blob).collect());
@@ -106,6 +160,7 @@ impl<'tcx> PrevSession<'tcx> {
             scope: Cell::new(None),
             rejected: Cell::new(false),
             poisoned: Cell::new(false),
+            remap,
             reused: Cell::new(0),
             attempted: Cell::new(0),
             requested: Cell::new(0),
@@ -130,6 +185,61 @@ impl<'tcx> PrevSession<'tcx> {
     /// The index the session gave to `def_id`.
     fn old_index(&self, def_id: LocalDefId) -> Option<DefIndex> {
         self.def_path_hash_map.def_path_hash_to_def_index(&self.tcx.def_path_hash(def_id.into()))
+    }
+
+    /// Maps a definition of another crate, named by its index at the time of the session.
+    fn map_foreign_index(&self, krate: CrateNum, old: DefIndex) -> DefIndex {
+        let Some(remap) = &self.remap else { return old };
+        if !remap.changed.contains(&krate) {
+            return old;
+        }
+        let found = remap
+            .def_ids
+            .get(&(krate.as_u32(), old.as_u32()))
+            .and_then(|&hash| self.tcx.def_path_hash_to_def_id(hash))
+            .filter(|def_id| def_id.krate == krate);
+        match found {
+            Some(def_id) => def_id.index,
+            // A cached type can hold this definition, so no later item can be trusted.
+            None => {
+                self.poisoned.set(true);
+                old
+            }
+        }
+    }
+
+    /// Maps an expansion of another crate, named by its index at the time of the session.
+    fn map_foreign_expn(&self, krate: CrateNum, old: u32) -> Option<u32> {
+        let Some(remap) = &self.remap else { return Some(old) };
+        if !remap.changed.contains(&krate) {
+            return Some(old);
+        }
+        let &hash = remap.expns.get(&(krate.as_u32(), old))?;
+        let cdata = CStore::from_tcx(self.tcx).get_crate_data(krate);
+        cdata.find_expn_index(self.tcx, hash).map(|index| index.as_u32())
+    }
+
+    /// Maps a file of another crate, named by its index in that crate's source map at the time
+    /// of the session. `None` when the file changed, since a position in it can then be wrong.
+    fn map_foreign_file(&self, krate: CrateNum, old: u32) -> Option<u32> {
+        let Some(remap) = &self.remap else { return Some(old) };
+        if !remap.changed.contains(&krate) {
+            return Some(old);
+        }
+        let &(stable_id, src_hash) = remap.files.get(&(krate.as_u32(), old))?;
+        let mut current_files = remap.current_files.borrow_mut();
+        let files = current_files.entry(krate).or_insert_with(|| {
+            let tcx = self.tcx;
+            let cdata = CStore::from_tcx(tcx).get_crate_data(krate);
+            (0..cdata.root.source_map.size() as u32)
+                .map(|index| {
+                    let file = cdata.imported_source_file(tcx, index).translated_source_file;
+                    (file.stable_id, (index, file.src_hash))
+                })
+                .collect()
+        });
+        let &(index, current_hash) = files.get(&stable_id)?;
+        (current_hash == src_hash).then_some(index)
     }
 
     fn map_local_index(&self, old: DefIndex) -> DefIndex {
@@ -325,6 +435,10 @@ impl<'a, 'tcx> PrevDecoder<'a, 'tcx> {
             return (RawSpan::Local { file: metadata_index, lo: lo.0, hi: (lo + len).0 }, ctxt);
         }
         let cnum = CrateNum::decode(self);
+        let Some(metadata_index) = self.prev.map_foreign_file(cnum, metadata_index) else {
+            self.prev.rejected.set(true);
+            return (RawSpan::Dummy, ctxt);
+        };
         let tcx = self.prev.tcx;
         let file =
             CStore::from_tcx(tcx).get_crate_data(cnum).imported_source_file(tcx, metadata_index);
@@ -398,7 +512,11 @@ impl<'a, 'tcx> SpanDecoder for PrevDecoder<'a, 'tcx> {
     fn decode_def_id(&mut self) -> DefId {
         let krate = CrateNum::decode(self);
         let raw = DefIndex::from_u32(self.read_u32());
-        let index = if krate == LOCAL_CRATE { self.prev.map_local_index(raw) } else { raw };
+        let index = if krate == LOCAL_CRATE {
+            self.prev.map_local_index(raw)
+        } else {
+            self.prev.map_foreign_index(krate, raw)
+        };
         DefId { krate, index }
     }
 
@@ -437,6 +555,11 @@ impl<'a, 'tcx> SpanDecoder for PrevDecoder<'a, 'tcx> {
                 }
             };
         }
+        let Some(index) = prev.map_foreign_expn(cnum, index) else {
+            // The hygiene cache may already hold contexts built on this fallback.
+            prev.poisoned.set(true);
+            return ExpnId::root();
+        };
         let tcx = prev.tcx;
         rustc_span::hygiene::decode_expn_id(cnum, index, |expn_id| {
             let ExpnId { krate, local_id } = expn_id;

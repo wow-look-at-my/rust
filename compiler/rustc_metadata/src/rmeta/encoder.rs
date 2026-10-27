@@ -88,6 +88,15 @@ pub(super) struct EncodeContext<'a, 'tcx> {
     local_expn_id_remapping: HygieneRemappingResults<LocalExpnId, RemappedLocalExpnIndex>,
     /// The metadata of the incremental session, under `-Z incremental-rmeta-reuse`.
     prev_session: Option<PrevSession<'tcx>>,
+    /// Each foreign reference this metadata writes by position.
+    foreign_refs: Option<ForeignRefsBuilder>,
+}
+
+#[derive(Default)]
+struct ForeignRefsBuilder {
+    def_ids: FxIndexSet<DefId>,
+    expns: FxIndexSet<ExpnId>,
+    files: FxIndexMap<(u32, u32), (StableSourceFileId, SourceFileHash)>,
 }
 
 /// If the current crate is a proc-macro, returns early with `LazyArray::default()`.
@@ -181,6 +190,11 @@ impl<'a, 'tcx> SpanEncoder for EncodeContext<'a, 'tcx> {
 
     fn encode_def_id(&mut self, def_id: DefId) {
         let def_id = self.local_defs_remapping.map_def_id(def_id);
+        if !def_id.is_local()
+            && let Some(refs) = &mut self.foreign_refs
+        {
+            refs.def_ids.insert(def_id);
+        }
 
         def_id.krate.encode(self);
         self.emit_u32(def_id.index.as_u32());
@@ -198,6 +212,8 @@ impl<'a, 'tcx> SpanEncoder for EncodeContext<'a, 'tcx> {
             // FIXME(#43047) FIXME(#74731) We may eventually want to avoid relying on external
             // metadata from proc-macro crates.
             self.hygiene_ctxt.borrow_mut().schedule_expn_data_for_encoding(expn_id);
+        } else if let Some(refs) = &mut self.foreign_refs {
+            refs.expns.insert(expn_id);
         }
         expn_id.krate.encode(self);
 
@@ -418,6 +434,10 @@ impl<'a, 'tcx> Encodable<EncodeContext<'a, 'tcx>> for SpanData {
             // This needs to be two lines to avoid holding the `s.source_file_cache`
             // while calling `cnum.encode(s)`
             let cnum = s.source_file_cache.0.cnum;
+            let file = (s.source_file_cache.0.stable_id, s.source_file_cache.0.src_hash);
+            if let Some(refs) = &mut s.foreign_refs {
+                refs.files.entry((cnum.as_u32(), metadata_index)).or_insert(file);
+            }
             cnum.encode(s);
         }
     }
@@ -569,6 +589,33 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
 
     fn encode_def_path_hash_map(&mut self) -> LazyValue<DefPathHashMapRef<'static>> {
         self.lazy(DefPathHashMapRef::BorrowedFromTcx(self.tcx.def_path_hash_to_def_index_map()))
+    }
+
+    fn encode_foreign_refs(&mut self) -> LazyValue<ForeignRefs> {
+        let tcx = self.tcx;
+        let refs = self.foreign_refs.take().unwrap_or_default();
+        let value = ForeignRefs {
+            def_ids: refs
+                .def_ids
+                .iter()
+                .map(|&def_id| {
+                    (def_id.krate.as_u32(), def_id.index.as_u32(), tcx.def_path_hash(def_id))
+                })
+                .collect(),
+            expns: refs
+                .expns
+                .iter()
+                .map(|&expn_id| {
+                    (expn_id.krate.as_u32(), expn_id.local_id.as_u32(), expn_id.expn_hash())
+                })
+                .collect(),
+            files: refs
+                .files
+                .iter()
+                .map(|(&(cnum, index), &(stable_id, src_hash))| (cnum, index, stable_id, src_hash))
+                .collect(),
+        };
+        self.lazy(value)
     }
 
     fn encode_source_map(
@@ -771,6 +818,8 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         let target_modifiers = stat!("target-modifiers", || self.encode_target_modifiers());
         let denied_partial_mitigations = stat!("denied-partial-mitigations", || self
             .encode_enabled_denied_partial_mitigations());
+        // Last before the root: everything above can write a foreign reference.
+        let foreign_refs = stat!("foreign-refs", || self.encode_foreign_refs());
 
         let root = stat!("crate-root", || {
             let attrs = tcx.hir_krate_attrs();
@@ -828,6 +877,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 syntax_contexts,
                 expn_data,
                 expn_hashes,
+                foreign_refs,
                 def_path_hash_map,
                 specialization_enabled_in: tcx.specialization_enabled_in(LOCAL_CRATE),
             })
@@ -2868,6 +2918,8 @@ fn with_encode_metadata_header(
         syntax_context_remapping: Default::default(),
         local_expn_id_remapping: Default::default(),
         prev_session: None,
+        // A proc-macro crate encodes no foreign references.
+        foreign_refs: (!tcx.crate_types().contains(&CrateType::ProcMacro)).then(Default::default),
     };
 
     // Encode the rustc version string in a predictable location.
