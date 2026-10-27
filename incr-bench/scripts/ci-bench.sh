@@ -141,6 +141,17 @@ build() {
 		printf '%s\t%s\t%s\t%s\n' "$workload" "$config" "$step" "$fates" >> "$fates_file"
 		echo "node fates $mode $step: $fates (previous, promoted, rerun-green, rerun-red, unreached, new)"
 	fi
+	# An -Zincremental-explain-red run names the red input behind each node of the listed kinds.
+	local red_seen=$target_root/$mode.red-seen
+	touch "$red_seen"
+	{ grep -E '^\[incremental\] red: ' "$log" || true; } | sort -u > "$red_seen.new"
+	{ grep -vxF -f "$red_seen" "$red_seen.new" || true; } > "$log.red"
+	sort -u -o "$red_seen" "$red_seen" "$red_seen.new"
+	rm -f "$red_seen.new"
+	if [[ -s $log.red ]]; then
+		echo "red nodes $mode $step: $(wc -l < "$log.red") chains, the first 40:"
+		sed -n 1,40p "$log.red" | cut -c1-700
+	fi
 	if [[ $step == cold && $graph != $'0\t0\t0\t0\t0' ]]; then
 		# The per-kind table rows end in the bytes column. Sum each kind over all crates.
 		awk -F'|' 'NF == 6 && $5 ~ /^ *[0-9]+ *$/ {

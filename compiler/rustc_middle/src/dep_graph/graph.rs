@@ -931,7 +931,10 @@ impl DepGraphData {
 
         match self.colors.get(prev_index) {
             DepNodeColor::Green(dep_node_index) => Some((prev_index, dep_node_index)),
-            DepNodeColor::Red => None,
+            DepNodeColor::Red => {
+                self.explain_red(tcx, prev_index);
+                None
+            }
             DepNodeColor::Unknown => {
                 // This DepNode and the corresponding query invocation existed
                 // in the previous compilation session too, so we can try to
@@ -944,9 +947,39 @@ impl DepGraphData {
                 let result = self.try_mark_previous_green(tcx, prev_index, None, &mut edge_buf);
                 debug_assert!(edge_buf.is_empty());
                 self.green_edge_buf.set(edge_buf);
+                if result.is_none() {
+                    self.explain_red(tcx, prev_index);
+                }
                 result.map(|dep_node_index| (prev_index, dep_node_index))
             }
         }
+    }
+
+    /// Under `-Zincremental-explain-red`, prints why a node of a listed kind is not green. Each
+    /// node in the chain is the first red edge of the node before it.
+    #[cold]
+    fn explain_red<'tcx>(&self, tcx: TyCtxt<'tcx>, prev_index: SerializedDepNodeIndex) {
+        let Some(kinds) = &tcx.sess.opts.unstable_opts.incremental_explain_red else { return };
+        let node = self.previous.index_to_node(prev_index);
+        let kind = format!("{:?}", node.kind);
+        if !kinds.iter().any(|k| *k == kind) {
+            return;
+        }
+        let mut chain = vec![format!("{node:?}")];
+        let mut seen = FxHashSet::default();
+        let mut current = prev_index;
+        while chain.len() < 24 && seen.insert(current) {
+            let Some(next) = self
+                .previous
+                .edge_targets_from(current)
+                .find(|&dep| matches!(self.colors.get(dep), DepNodeColor::Red))
+            else {
+                break;
+            };
+            chain.push(format!("{:?}", self.previous.index_to_node(next)));
+            current = next;
+        }
+        eprintln!("[incremental] red: {}", chain.join(" <- "));
     }
 
     /// Try to mark a dep-node which existed in the previous compilation session as green.
