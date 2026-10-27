@@ -53,6 +53,8 @@ pub(crate) struct PrevSession<'tcx> {
     poisoned: Cell<bool>,
     /// Set when the item being decoded names an expansion that this session does not have.
     expn_missing: Cell<bool>,
+    /// The HIR owner of the item being decoded, which HIR lowering gives as the parent of its spans.
+    span_parent: Cell<Option<LocalDefId>>,
     /// Set when a dependency changed since the session.
     remap: Option<ForeignRemap>,
     pub(crate) reused: Cell<usize>,
@@ -131,6 +133,7 @@ impl<'tcx> PrevSession<'tcx> {
             rejected: Cell::new(false),
             poisoned: Cell::new(false),
             expn_missing: Cell::new(false),
+            span_parent: Cell::new(None),
             remap: None,
             reused: Cell::new(0),
             attempted: Cell::new(0),
@@ -287,9 +290,19 @@ impl<'tcx> PrevSession<'tcx> {
             return None;
         }
         self.scope.set(self.item_scope(def_id, old));
+        // The stable hash of a span with a parent is relative to the parent.
+        let parent = self
+            .tcx
+            .sess
+            .opts
+            .incremental
+            .is_some()
+            .then(|| self.tcx.local_def_id_to_hir_id(def_id).owner.def_id);
+        self.span_parent.set(parent);
         self.rejected.set(false);
         let r = f();
         self.scope.set(None);
+        self.span_parent.set(None);
         if self.expn_missing.replace(false) {
             // The hygiene cache can hold contexts built on the root fallback.
             *self.hygiene_context.borrow_mut() = Default::default();
@@ -588,7 +601,7 @@ impl<'a, 'tcx> SpanDecoder for PrevDecoder<'a, 'tcx> {
             RawSpan::Foreign(data) => data.span(),
             RawSpan::Local { file, lo, hi } => {
                 let (lo, hi) = self.prev.place_local_span(file, lo, hi);
-                SpanData { lo, hi, ctxt, parent: None }.span()
+                SpanData { lo, hi, ctxt, parent: self.prev.span_parent.get() }.span()
             }
         }
     }
