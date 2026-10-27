@@ -22,7 +22,9 @@ use rustc_hir::def_id::{CRATE_DEF_ID, LOCAL_CRATE, LocalDefId, LocalDefIdSet};
 use rustc_hir::definitions::DefPathData;
 use rustc_hir_pretty::id_to_string;
 use rustc_index::IndexVec;
-use rustc_middle::dep_graph::{DepKind, DepNode, WorkProduct, WorkProductId};
+use rustc_middle::dep_graph::{
+    DepKind, DepNode, WorkProduct, WorkProductId, hash_result, short_value_fingerprint,
+};
 use rustc_middle::hir::map::compute_hir_hash;
 use rustc_middle::middle::dependency_format::Linkage;
 use rustc_middle::mir::interpret;
@@ -2748,9 +2750,7 @@ pub(crate) fn prev_metadata_optimized_mir<'tcx>(
     }
     // A provider runs for a green node only to rebuild a value that the query cache does not hold.
     let node = DepNode::construct(tcx, DepKind::optimized_mir, &def.to_def_id());
-    if !tcx.dep_graph.is_green(&node) {
-        return None;
-    }
+    let expected = tcx.dep_graph.green_value_fingerprint(&node)?;
     let prev = tcx.prev_metadata.get_or_init(|| {
         let session = prev_metadata_path(tcx).and_then(|path| PrevSession::load(tcx, &path))?;
         // Leaked, because `GlobalCtxt` must not own a value whose drop can see `'tcx`.
@@ -2758,7 +2758,19 @@ pub(crate) fn prev_metadata_optimized_mir<'tcx>(
             Box::leak(Box::new(PrevMetadataMir { session: Lock::new(session) }));
         Some(prev as &'tcx dyn PrevMetadata<'tcx>)
     });
-    prev.as_ref()?.optimized_mir(tcx, def)
+    let body = prev.as_ref()?.optimized_mir(tcx, def)?;
+    // A decoded body can differ from the body this crate builds, as an async
+    // body did on grok-build.
+    let hash = short_value_fingerprint(
+        tcx.with_stable_hashing_context(|mut hcx| hash_result(&mut hcx, &body)),
+    );
+    if hash != expected {
+        if tcx.sess.opts.unstable_opts.incremental_info {
+            eprintln!("[incremental] codegen: decoded MIR of {def:?} does not match, building it");
+        }
+        return None;
+    }
+    Some(body)
 }
 
 /// The metadata work product of the incremental session, if there is one.

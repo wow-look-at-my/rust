@@ -1092,6 +1092,13 @@ impl DepGraph {
         matches!(self.node_color(dep_node), DepNodeColor::Green(_))
     }
 
+    /// For a green node, the value fingerprint in the loaded dep graph. `None` for any other node.
+    pub fn green_value_fingerprint(&self, dep_node: &DepNode) -> Option<Fingerprint> {
+        let data = self.data()?;
+        let prev_index = data.previous.node_to_index_opt(dep_node)?;
+        data.is_index_green(prev_index).then(|| data.prev_value_fingerprint_of(prev_index))
+    }
+
     pub fn assert_dep_node_not_yet_allocated_in_current_session<S: std::fmt::Display>(
         &self,
         sess: &Session,
