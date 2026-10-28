@@ -670,7 +670,10 @@ impl<'a, 'tcx> SpanDecoder for PrevDecoder<'a, 'tcx> {
         let (raw, ctxt) = self.decode_raw_span_with_ctxt();
         match raw {
             RawSpan::Dummy => DUMMY_SP.with_ctxt(ctxt),
-            RawSpan::Foreign(data) => data.span(),
+            // HIR lowering gives a span from a foreign file, such as a macro of a dependency, the same parent.
+            RawSpan::Foreign(data) => {
+                SpanData { parent: self.prev.span_parent.get(), ..data }.span()
+            }
             RawSpan::Local { file, lo, hi } => {
                 let (lo, hi) = self.prev.place_local_span(file, lo, hi);
                 SpanData { lo, hi, ctxt, parent: self.prev.span_parent.get() }.span()
