@@ -686,8 +686,12 @@ fn run_runtime_cleanup_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
 
     pm::run_passes(tcx, body, passes, Some(MirPhase::Runtime(RuntimePhase::PostCleanup)));
 
-    // Clear this by anticipation. Optimizations and runtime MIR have no reason to look
-    // into this information, which is meant for borrowck diagnostics.
+    clear_local_info(body);
+}
+
+/// Drops the borrowck diagnostics data that metadata does not encode, so a body decoded from
+/// metadata hashes like the body built here.
+fn clear_local_info(body: &mut Body<'_>) {
     for decl in &mut body.local_decls {
         decl.local_info = ClearCrossCrate::Clear;
     }
@@ -813,7 +817,9 @@ fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
         return body;
     }
 
-    let body = inner_optimized_mir(tcx, did);
+    let mut body = inner_optimized_mir(tcx, did);
+    // Optimization passes add locals after the runtime cleanup cleared the others.
+    clear_local_info(&mut body);
     tcx.prev_metadata_explain_mismatch(did, &body);
     tcx.arena.alloc(body)
 }
