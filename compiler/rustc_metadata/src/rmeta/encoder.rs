@@ -2840,6 +2840,27 @@ impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
             coverage_early_info,
             coverage_mir_info
         );
+        // Debug output does not show a span's parent or context, and the hash reads both.
+        struct Spans(Vec<Span>);
+        impl<'tcx> mir::visit::Visitor<'tcx> for Spans {
+            fn visit_span(&mut self, span: Span) {
+                self.0.push(span);
+            }
+        }
+        let collect = |body: &mir::Body<'tcx>| {
+            let mut spans = Spans(Vec::new());
+            mir::visit::Visitor::visit_body(&mut spans, body);
+            spans.0
+        };
+        let (a, b) = (collect(decoded), collect(built));
+        eprintln!("[incremental] codegen: spans {} decoded, {} built", a.len(), b.len());
+        if let Some((x, y)) = a.iter().zip(&b).find(|(x, y)| x != y) {
+            eprintln!(
+                "[incremental] codegen: first span differs: decoded {:?} built {:?}",
+                x.data_untracked(),
+                y.data_untracked(),
+            );
+        }
     }
 
     fn report(&self) {
