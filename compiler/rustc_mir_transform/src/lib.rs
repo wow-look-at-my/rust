@@ -691,6 +691,21 @@ fn run_runtime_cleanup_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
     for decl in &mut body.local_decls {
         decl.local_info = ClearCrossCrate::Clear;
     }
+    // `StateTransform` copies the coroutine drop bodies out of this body before this point.
+    if let Some(info) = &mut body.coroutine {
+        for drop_body in [
+            &mut info.coroutine_drop,
+            &mut info.coroutine_drop_async,
+            &mut info.coroutine_drop_proxy_async,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for decl in &mut drop_body.local_decls {
+                decl.local_info = ClearCrossCrate::Clear;
+            }
+        }
+    }
 }
 
 pub(crate) fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
