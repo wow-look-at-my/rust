@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use rustc_attr_ir::{AttributeKind, EncodeCrossCrate, find_attr};
 use rustc_data_structures::fingerprint::Fingerprint;
-use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
+use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
 use rustc_data_structures::memmap::{Mmap, MmapMut};
 use rustc_data_structures::owned_slice::slice_owned;
 use rustc_data_structures::stable_hash::{StableHash, StableHasher};
