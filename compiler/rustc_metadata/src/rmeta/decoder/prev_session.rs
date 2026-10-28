@@ -270,16 +270,27 @@ impl<'tcx> PrevSession<'tcx> {
         }?;
         let mut body: mir::Body<'tcx> =
             self.with_item_scope(def_id, old, || self.decode_at(lazy.position))?;
-        if let PrevBody::OptimizedMir = kind {
-            self.set_lint_roots(def_id, old, &mut body);
-        }
+        let lint_roots = match kind {
+            PrevBody::OptimizedMir => {
+                self.root.tables.optimized_mir_lint_roots.get(&self.blob, old)
+            }
+            PrevBody::MirForCtfe => self.root.tables.mir_for_ctfe_lint_roots.get(&self.blob, old),
+        };
+        self.set_lint_roots(def_id, lint_roots, [&mut body]);
         Some(body)
     }
 
     /// Metadata clears the lint root of each source scope. The crate wrote them to a side
-    /// table, and this puts them back, so that the body is the one the crate built.
-    fn set_lint_roots(&self, def_id: LocalDefId, old: DefIndex, body: &mut mir::Body<'tcx>) {
-        let Some(lazy) = self.root.tables.optimized_mir_lint_roots.get(&self.blob, old) else {
+    /// table, and this puts them back, so that the bodies are the ones the crate built.
+    fn set_lint_roots<'a>(
+        &self,
+        def_id: LocalDefId,
+        lint_roots: Option<LazyArray<u32>>,
+        bodies: impl IntoIterator<Item = &'a mut mir::Body<'tcx>>,
+    ) where
+        'tcx: 'a,
+    {
+        let Some(lazy) = lint_roots else {
             return;
         };
         let mut left = lazy.num_elems;
@@ -288,20 +299,22 @@ impl<'tcx> PrevSession<'tcx> {
         }
         let mut dcx = self.decoder(lazy.position.get());
         let owner = self.tcx.local_def_id_to_hir_id(def_id).owner;
-        mir_lint_root_bodies_mut(body, &mut |body| {
-            for scope in body.source_scopes.iter_mut() {
-                if left == 0 {
-                    return;
+        for body in bodies {
+            mir_lint_root_bodies_mut(body, &mut |body| {
+                for scope in body.source_scopes.iter_mut() {
+                    if left == 0 {
+                        return;
+                    }
+                    left -= 1;
+                    let local_id = u32::decode(&mut dcx);
+                    if local_id != u32::MAX {
+                        scope.local_data = mir::ClearCrossCrate::Set(mir::SourceScopeLocalData {
+                            lint_root: HirId { owner, local_id: ItemLocalId::from_u32(local_id) },
+                        });
+                    }
                 }
-                left -= 1;
-                let local_id = u32::decode(&mut dcx);
-                if local_id != u32::MAX {
-                    scope.local_data = mir::ClearCrossCrate::Set(mir::SourceScopeLocalData {
-                        lint_root: HirId { owner, local_id: ItemLocalId::from_u32(local_id) },
-                    });
-                }
-            }
-        });
+            });
+        }
     }
 
     pub(crate) fn promoted(
@@ -310,7 +323,11 @@ impl<'tcx> PrevSession<'tcx> {
     ) -> Option<IndexVec<mir::Promoted, mir::Body<'tcx>>> {
         let old = self.old_index(def_id)?;
         let lazy = self.root.tables.promoted_mir.get(&self.blob, old)?;
-        self.with_item_scope(def_id, old, || self.decode_at(lazy.position))
+        let mut promoted: IndexVec<mir::Promoted, mir::Body<'tcx>> =
+            self.with_item_scope(def_id, old, || self.decode_at(lazy.position))?;
+        let lint_roots = self.root.tables.promoted_mir_lint_roots.get(&self.blob, old);
+        self.set_lint_roots(def_id, lint_roots, promoted.iter_mut());
+        Some(promoted)
     }
 
     fn with_item_scope<R>(

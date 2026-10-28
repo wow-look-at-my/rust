@@ -697,6 +697,9 @@ define_tables! {
     // The `ItemLocalId` of the lint root of each source scope of `optimized_mir`, in the order of `mir_lint_root_bodies`.
     optimized_mir_lint_roots: Table<LazyArray<u32>>,
     mir_for_ctfe: Table<LazyValue<mir::Body<'static>>>,
+    // The same as `optimized_mir_lint_roots`, for `mir_for_ctfe` and for all `promoted_mir` bodies.
+    mir_for_ctfe_lint_roots: Table<LazyArray<u32>>,
+    promoted_mir_lint_roots: Table<LazyArray<u32>>,
     trivial_const: Table<LazyValue<(ConstValue, Ty<'static>)>>,
     closure_saved_names_of_captured_variables: Table<LazyValue<IndexVec<FieldIdx, Symbol>>>,
     mir_coroutine_witnesses: Table<LazyValue<mir::CoroutineLayout<'static>>>,

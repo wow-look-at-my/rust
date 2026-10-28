@@ -1210,6 +1210,29 @@ fn should_encode_stability(def_kind: DefKind) -> bool {
     }
 }
 
+/// The `ItemLocalId` of the lint root of each source scope of `bodies`. That
+/// `ItemLocalId` is in the order of `mir_lint_root_bodies`, or `u32::MAX` where the
+/// scope has no lint root of this owner.
+fn mir_lint_roots<'a, 'tcx: 'a>(
+    tcx: TyCtxt<'tcx>,
+    def_id: LocalDefId,
+    bodies: impl IntoIterator<Item = &'a mir::Body<'tcx>>,
+) -> Vec<u32> {
+    let owner = tcx.local_def_id_to_hir_id(def_id).owner;
+    let mut lint_roots = Vec::new();
+    for body in bodies {
+        mir_lint_root_bodies(body, &mut |body| {
+            lint_roots.extend(body.source_scopes.iter().map(|scope| match &scope.local_data {
+                mir::ClearCrossCrate::Set(data) if data.lint_root.owner == owner => {
+                    data.lint_root.local_id.as_u32()
+                }
+                _ => u32::MAX,
+            }))
+        });
+    }
+    lint_roots
+}
+
 /// Whether we should encode MIR. Return a pair, resp. for CTFE and for LLVM.
 ///
 /// Computing, optimizing and encoding the MIR is a relatively expensive operation.
@@ -2050,18 +2073,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                     .reused_body(PrevBody::OptimizedMir, def_id)
                     .unwrap_or_else(|| tcx.optimized_mir(def_id));
                 self.table_writer().optimized_mir(def_id, body);
-                let owner = tcx.local_def_id_to_hir_id(def_id).owner;
-                let mut lint_roots = Vec::new();
-                mir_lint_root_bodies(body, &mut |body| {
-                    lint_roots.extend(body.source_scopes.iter().map(
-                        |scope| match &scope.local_data {
-                            mir::ClearCrossCrate::Set(data) if data.lint_root.owner == owner => {
-                                data.lint_root.local_id.as_u32()
-                            }
-                            _ => u32::MAX,
-                        },
-                    ))
-                });
+                let lint_roots = mir_lint_roots(tcx, def_id, [body]);
                 self.table_writer().optimized_mir_lint_roots(def_id, lint_roots);
 
                 self.table_writer()
@@ -2089,6 +2101,8 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                         .reused_body(PrevBody::MirForCtfe, def_id)
                         .unwrap_or_else(|| tcx.mir_for_ctfe(def_id));
                     self.table_writer().mir_for_ctfe(def_id, body);
+                    let lint_roots = mir_lint_roots(tcx, def_id, [body]);
+                    self.table_writer().mir_for_ctfe_lint_roots(def_id, lint_roots);
                     in_metadata.mir_for_ctfe.insert(def_id);
                 }
 
@@ -2112,6 +2126,8 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 let promoted =
                     self.reused_promoted(def_id).unwrap_or_else(|| tcx.promoted_mir(def_id));
                 self.table_writer().promoted_mir(def_id, promoted);
+                let lint_roots = mir_lint_roots(tcx, def_id, promoted);
+                self.table_writer().promoted_mir_lint_roots(def_id, lint_roots);
                 in_metadata.promoted_mir.insert(def_id);
             }
 
@@ -2795,7 +2811,7 @@ impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
         expected: Fingerprint,
     ) -> Option<&'tcx mir::Body<'tcx>> {
         let body = self.session.lock().body(PrevBody::MirForCtfe, def);
-        Some(tcx.arena.alloc(self.checked(tcx, body, expected)?))
+        Some(tcx.arena.alloc(self.checked(tcx, "CTFE MIR", def, body, expected)?))
     }
 
     fn promoted_mir(
@@ -2805,7 +2821,7 @@ impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
         expected: Fingerprint,
     ) -> Option<&'tcx IndexVec<mir::Promoted, mir::Body<'tcx>>> {
         let promoted = self.session.lock().promoted(def);
-        Some(tcx.arena.alloc(self.checked(tcx, promoted, expected)?))
+        Some(tcx.arena.alloc(self.checked(tcx, "promoted MIR", def, promoted, expected)?))
     }
 
     fn explain_mismatch(&self, tcx: TyCtxt<'tcx>, def: LocalDefId, built: &mir::Body<'tcx>) {
@@ -2909,6 +2925,8 @@ impl<'tcx> PrevMetadataMir<'tcx> {
     fn checked<T: StableHash>(
         &self,
         tcx: TyCtxt<'tcx>,
+        what: &str,
+        def: LocalDefId,
         value: Option<T>,
         expected: Fingerprint,
     ) -> Option<T> {
@@ -2921,7 +2939,10 @@ impl<'tcx> PrevMetadataMir<'tcx> {
             tcx.with_stable_hashing_context(|mut hcx| hash_result(&mut hcx, &value)),
         );
         if hash != expected {
-            mismatched.fetch_add(1, Ordering::Relaxed);
+            let earlier = mismatched.fetch_add(1, Ordering::Relaxed);
+            if earlier == 0 && tcx.sess.opts.unstable_opts.incremental_info {
+                eprintln!("[incremental] codegen: mismatch of the {what} of {def:?}");
+            }
             return None;
         }
         decoded.fetch_add(1, Ordering::Relaxed);

@@ -503,7 +503,9 @@ fn mir_for_ctfe(tcx: TyCtxt<'_>, def_id: LocalDefId) -> &Body<'_> {
     if let Some(body) = tcx.prev_metadata_mir_for_ctfe(def_id) {
         return body;
     }
-    tcx.arena.alloc(inner_mir_for_ctfe(tcx, def_id))
+    let mut body = inner_mir_for_ctfe(tcx, def_id);
+    clear_local_info(&mut body);
+    tcx.arena.alloc(body)
 }
 
 fn inner_mir_for_ctfe(tcx: TyCtxt<'_>, def: LocalDefId) -> Body<'_> {
@@ -880,6 +882,7 @@ fn promoted_mir(tcx: TyCtxt<'_>, def: LocalDefId) -> &IndexVec<Promoted, Body<'_
 
     for body in &mut promoted {
         run_analysis_to_runtime_passes(tcx, body);
+        clear_local_info(body);
     }
 
     tcx.arena.alloc(promoted)
