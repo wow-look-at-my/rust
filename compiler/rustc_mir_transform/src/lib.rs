@@ -500,6 +500,9 @@ fn mir_promoted(
 /// Compute the MIR that is used during CTFE (and thus has no optimizations run on it)
 fn mir_for_ctfe(tcx: TyCtxt<'_>, def_id: LocalDefId) -> &Body<'_> {
     debug_assert!(!tcx.is_trivial_const(def_id), "Tried to get mir_for_ctfe of a trivial const");
+    if let Some(body) = tcx.prev_metadata_mir_for_ctfe(def_id) {
+        return body;
+    }
     tcx.arena.alloc(inner_mir_for_ctfe(tcx, def_id))
 }
 
@@ -865,6 +868,9 @@ fn inner_optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> Body<'_> {
 fn promoted_mir(tcx: TyCtxt<'_>, def: LocalDefId) -> &IndexVec<Promoted, Body<'_>> {
     if tcx.is_constructor(def.to_def_id()) {
         return tcx.arena.alloc(IndexVec::new());
+    }
+    if let Some(promoted) = tcx.prev_metadata_promoted_mir(def) {
+        return promoted;
     }
 
     if !tcx.is_synthetic_mir(def) {

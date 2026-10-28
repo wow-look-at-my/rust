@@ -130,6 +130,11 @@ build() {
 		echo "codegen MIR from metadata $mode $step: $codegen (decoded, rejected, mismatched)"
 		{ grep -E '^\[incremental\] codegen: (mismatch of|field |spans |first span )' "$log" || true; } | sed -n 1,30p | cut -c1-600
 	fi
+	local consts
+	consts=$({ grep -oE 'codegen: decoded [0-9]+ CTFE and promoted MIR values from metadata, [0-9]+ rejected, [0-9]+ mismatched' "$log" || true; } | tr -d ',' | awk '{d += $3; r += $11; m += $13} END {printf "%d\t%d\t%d", d, r, m}')
+	if [[ $consts != $'0\t0\t0' ]]; then
+		echo "CTFE and promoted MIR from metadata $mode $step: $consts (decoded, rejected, mismatched)"
+	fi
 	# An -Zincremental-info run also prints the bytes each crate's dep graph spends on node heads, keys, values and edges.
 	graph=$({ grep -oE 'dep graph node bytes: total [0-9]+ heads [0-9]+ keys [0-9]+ values [0-9]+ edges [0-9]+' "$log" || true; } | awk '{t += $6; h += $8; k += $10; v += $12; e += $14} END {printf "%d\t%d\t%d\t%d\t%d", t, h, k, v, e}')
 	if [[ $graph != $'0\t0\t0\t0\t0' ]]; then

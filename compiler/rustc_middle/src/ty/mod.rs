@@ -73,8 +73,8 @@ pub use self::consts::{
     const_lit_matches_ty,
 };
 pub use self::context::{
-    CtxtInterners, CurrentGcx, FreeRegionInfo, GlobalCtxt, Lift, PrevMetadata, TyCtxt, TyCtxtFeed,
-    tls,
+    CtxtInterners, CurrentGcx, FreeRegionInfo, GlobalCtxt, Lift, MirInMetadata, PrevMetadata,
+    TyCtxt, TyCtxtFeed, tls,
 };
 pub use self::fold::*;
 pub use self::instance::{Instance, InstanceKind, ReifyReason, ShimKind};

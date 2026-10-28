@@ -118,6 +118,12 @@ declare_hooks! {
     /// Gives the optimized MIR of a green body from the metadata in `old_session_directory`, or `None`.
     hook prev_metadata_optimized_mir(def: LocalDefId) -> Option<&'tcx mir::Body<'tcx>>;
 
+    /// Gives the CTFE MIR of a green body from the metadata in `old_session_directory`, or `None`.
+    hook prev_metadata_mir_for_ctfe(def: LocalDefId) -> Option<&'tcx mir::Body<'tcx>>;
+
+    /// Gives the promoted MIR of a green body from the metadata in `old_session_directory`, or `None`.
+    hook prev_metadata_promoted_mir(def: LocalDefId) -> Option<&'tcx rustc_index::IndexVec<mir::Promoted, mir::Body<'tcx>>>;
+
     /// Under `-Z incremental-info`, prints how `built` differs from the decoded body of `def`.
     hook prev_metadata_explain_mismatch(def: LocalDefId, built: &mir::Body<'tcx>) -> ();
 

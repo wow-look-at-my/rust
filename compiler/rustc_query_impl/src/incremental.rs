@@ -57,9 +57,7 @@ where
     let _timer = tcx.prof.generic_activity_with_arg("encode_query_results_for", query.name);
 
     assert!(all_inactive(&query.state));
-    let in_metadata = (query.dep_kind == DepKind::optimized_mir)
-        .then(|| tcx.optimized_mir_in_metadata.get())
-        .flatten();
+    let in_metadata = tcx.mir_in_metadata.get().and_then(|sets| sets.for_kind(query.dep_kind));
     query.cache.for_each(&mut |key, value, dep_node| {
         if let Some(in_metadata) = in_metadata
             && let Some(def_id) = DepNode::construct(tcx, query.dep_kind, key).extract_def_id(tcx)
@@ -177,10 +175,13 @@ pub(crate) fn promote_from_disk_inner<'tcx, C: QueryCache>(
         if tcx.sess.opts.unstable_opts.incremental_uncache.is_some() {
             return;
         }
-        // Under `-Z incremental-rmeta-reuse` the metadata holds some optimized MIR in place of
-        // the query cache.
+        // Under `-Z incremental-rmeta-reuse` the metadata holds some MIR in place of the query
+        // cache.
         if tcx.sess.opts.unstable_opts.incremental_rmeta_reuse
-            && query.dep_kind == DepKind::optimized_mir
+            && matches!(
+                query.dep_kind,
+                DepKind::optimized_mir | DepKind::mir_for_ctfe | DepKind::promoted_mir
+            )
         {
             return;
         }

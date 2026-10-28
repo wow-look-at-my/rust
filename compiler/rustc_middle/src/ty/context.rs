@@ -55,7 +55,7 @@ use tracing::{debug, instrument};
 
 use crate::arena::Arena;
 use crate::dep_graph::dep_node::make_metadata;
-use crate::dep_graph::{DepGraph, DepNodeIndex};
+use crate::dep_graph::{DepGraph, DepKind, DepNodeIndex};
 use crate::hir::{ProjectedMaybeOwner, ProjectedOwnerInfo};
 use crate::ich::StableHashState;
 use crate::infer::canonical::{CanonicalParamEnvCache, CanonicalVarKind};
@@ -804,13 +804,33 @@ pub struct GlobalCtxt<'tcx> {
     /// Stores memory for globals (statics/consts).
     pub(crate) alloc_map: interpret::AllocMap<'tcx>,
 
-    /// Under `-Z incremental-rmeta-reuse`, the bodies whose optimized MIR this session's metadata holds.
-    pub optimized_mir_in_metadata: OnceLock<FxHashSet<LocalDefId>>,
+    /// Under `-Z incremental-rmeta-reuse`, the bodies whose MIR this session's metadata holds.
+    pub mir_in_metadata: OnceLock<MirInMetadata>,
 
     /// The metadata in `old_session_directory`. It gives green bodies their MIR.
     pub prev_metadata: OnceLock<Option<&'tcx dyn PrevMetadata<'tcx>>>,
 
     current_gcx: CurrentGcx,
+}
+
+/// The bodies whose MIR the metadata of this session holds, per query.
+#[derive(Default)]
+pub struct MirInMetadata {
+    pub optimized_mir: FxHashSet<LocalDefId>,
+    pub mir_for_ctfe: FxHashSet<LocalDefId>,
+    pub promoted_mir: FxHashSet<LocalDefId>,
+}
+
+impl MirInMetadata {
+    /// The set for the query of `kind`, if the metadata holds values of that query.
+    pub fn for_kind(&self, kind: DepKind) -> Option<&FxHashSet<LocalDefId>> {
+        match kind {
+            DepKind::optimized_mir => Some(&self.optimized_mir),
+            DepKind::mir_for_ctfe => Some(&self.mir_for_ctfe),
+            DepKind::promoted_mir => Some(&self.promoted_mir),
+            _ => None,
+        }
+    }
 }
 
 /// Decodes MIR out of the metadata in `old_session_directory`.
@@ -822,6 +842,22 @@ pub trait PrevMetadata<'tcx>: DynSend + DynSync {
         def: LocalDefId,
         expected: Fingerprint,
     ) -> Option<&'tcx Body<'tcx>>;
+
+    /// The CTFE body of a green node, if it decodes and its hash is `expected`.
+    fn mir_for_ctfe(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<&'tcx Body<'tcx>>;
+
+    /// The promoted bodies of a green node, if they decode and their hash is `expected`.
+    fn promoted_mir(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<&'tcx IndexVec<Promoted, Body<'tcx>>>;
 
     /// Prints how many bodies decoded, and how many did not, under `-Z incremental-info`.
     fn report(&self);
@@ -1028,7 +1064,7 @@ impl<'tcx> TyCtxt<'tcx> {
             caches: Default::default(),
             data_layout,
             alloc_map: interpret::AllocMap::new(),
-            optimized_mir_in_metadata: OnceLock::new(),
+            mir_in_metadata: OnceLock::new(),
             prev_metadata: OnceLock::new(),
             current_gcx,
         });
