@@ -57,11 +57,11 @@ where
     C: QueryCache<Value = Erased<V>>,
     V: Erasable + Encodable<CacheEncoder<'tcx>>,
 {
-    let mut count = 0;
     let _timer = tcx.prof.generic_activity_with_arg("encode_query_results_for", query.name);
 
     assert!(all_inactive(&query.state));
     let in_metadata = tcx.mir_in_metadata.get().and_then(|sets| sets.for_kind(query.dep_kind));
+    let mut values = Vec::new();
     query.cache.for_each(&mut |key, value, dep_node| {
         if let Some(in_metadata) = in_metadata
             && let Some(def_id) = DepNode::construct(tcx, query.dep_kind, key).extract_def_id(tcx)
@@ -71,11 +71,15 @@ where
             return;
         }
         if query.will_cache_on_disk_for_key(*key) {
-            encoder.encode_query_value::<V>(dep_node, &erase::restore_val::<V>(*value));
-            count += 1;
+            values.push((dep_node, *value));
         }
     });
-    count
+    // In node order, the index stores each node as a small step from the one before.
+    values.sort_unstable_by_key(|&(dep_node, _)| dep_node.as_u32());
+    for &(dep_node, value) in &values {
+        encoder.encode_query_value::<V>(dep_node, &erase::restore_val::<V>(value));
+    }
+    values.len()
 }
 
 pub(crate) fn verify_query_key_hashes<'tcx>(tcx: TyCtxt<'tcx>) {

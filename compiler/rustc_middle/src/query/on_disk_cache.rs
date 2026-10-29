@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::{fmt, mem};
 
+use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::flock;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexSet};
 use rustc_data_structures::memmap::Mmap;
@@ -36,6 +37,9 @@ use crate::ty::codec::{
     RefDecodable, SHORTHAND_OFFSET, TyDecoder, TyEncoder, forward_all_decoder_methods_to,
 };
 use crate::ty::{self, Ty, TyCtxt};
+
+#[cfg(test)]
+mod tests;
 
 const TAG_FILE_FOOTER: u128 = 0xC0FFEE_C0FFEE_C0FFEE_C0FFEE_C0FFEE;
 /// The footer of a session file whose values live in the shared values and pool files.
@@ -93,12 +97,12 @@ pub struct OnDiskCache {
     file_index_to_file: Lock<FxHashMap<SourceFileIndex, Arc<SourceFile>>>,
 
     /// For query dep nodes that have a disk-cached return value, maps the node
-    /// index to the position of its serialized value in `serialized_data`.
-    query_values_index: FxHashMap<SerializedDepNodeIndex, AbsoluteBytePos>,
+    /// to the position and length of its serialized value in `serialized_data`.
+    query_values_index: FxHashMap<SerializedDepNodeIndex, (AbsoluteBytePos, u32)>,
 
     /// For `DepKind::SideEffect` dep nodes, maps the node index to the position
-    /// of its serialized [`QuerySideEffect`] in `serialized_data`.
-    side_effects_index: FxHashMap<SerializedDepNodeIndex, AbsoluteBytePos>,
+    /// and length of its serialized [`QuerySideEffect`] in `serialized_data`.
+    side_effects_index: FxHashMap<SerializedDepNodeIndex, (AbsoluteBytePos, u32)>,
 
     alloc_decoding_state: AllocDecodingState,
 
@@ -168,6 +172,12 @@ struct IndexEntry {
     len: u32,
 }
 
+impl IndexEntry {
+    fn span(&self) -> (SerializedDepNodeIndex, (AbsoluteBytePos, u32)) {
+        (self.index, (self.pos, self.len))
+    }
+}
+
 /// Index entries sorted by node index, with the index stored as a delta.
 fn encode_index_entries<E: Encoder>(e: &mut E, entries: &mut [IndexEntry]) {
     entries.sort_unstable_by_key(|x| x.index.as_u32());
@@ -230,16 +240,22 @@ fn map_checked(path: &Path, magic: &[u8; 8], id: u64, len: usize) -> Result<Mmap
 }
 
 /// The values of a session file, in file order.
-struct ValuesIndex(Vec<(SerializedDepNodeIndex, AbsoluteBytePos)>);
+struct ValuesIndex(Vec<IndexEntry>);
 
 impl<E: Encoder> Encodable<E> for ValuesIndex {
     fn encode(&self, e: &mut E) {
         e.emit_usize(self.0.len());
-        let mut prev = 0;
-        for &(index, pos) in &self.0 {
-            e.emit_u32(index.as_u32());
-            e.emit_u64(pos.0.checked_sub(prev).expect("query cache values out of file order"));
-            prev = pos.0;
+        let Some(first) = self.0.first() else { return };
+        e.emit_u64(first.pos.0);
+        let mut prev_index = 0u32;
+        let mut next_pos = first.pos.0;
+        for x in &self.0 {
+            assert_eq!(x.pos.0, next_pos, "query cache values are not contiguous");
+            let step = i64::from(x.index.as_u32()) - i64::from(prev_index);
+            e.emit_u64(((step << 1) ^ (step >> 63)) as u64);
+            e.emit_u32(x.len);
+            prev_index = x.index.as_u32();
+            next_pos += u64::from(x.len);
         }
     }
 }
@@ -247,13 +263,62 @@ impl<E: Encoder> Encodable<E> for ValuesIndex {
 impl<D: Decoder> Decodable<D> for ValuesIndex {
     fn decode(d: &mut D) -> Self {
         let n = d.read_usize();
-        let mut pos = 0;
+        if n == 0 {
+            return ValuesIndex(Vec::new());
+        }
+        let mut pos = d.read_u64();
+        let mut index = 0i64;
         ValuesIndex(
             (0..n)
                 .map(|_| {
-                    let index = SerializedDepNodeIndex::from_u32(d.read_u32());
-                    pos += d.read_u64();
-                    (index, AbsoluteBytePos(pos))
+                    let zigzag = d.read_u64();
+                    index += ((zigzag >> 1) as i64) ^ -((zigzag & 1) as i64);
+                    let len = d.read_u32();
+                    let entry = IndexEntry {
+                        index: SerializedDepNodeIndex::from_u32(index as u32),
+                        pos: AbsoluteBytePos(pos),
+                        len,
+                    };
+                    pos += u64::from(len);
+                    entry
+                })
+                .collect(),
+        )
+    }
+}
+
+/// The `DefPathHash` of each `DefId` index in the file.
+struct DefPathHashes(Vec<DefPathHash>);
+
+impl<E: Encoder> Encodable<E> for DefPathHashes {
+    fn encode(&self, e: &mut E) {
+        let mut crates = FxIndexSet::default();
+        let crate_indices: Vec<usize> =
+            self.0.iter().map(|h| crates.insert_full(h.stable_crate_id().as_u64()).0).collect();
+        e.emit_usize(crates.len());
+        for krate in &crates {
+            e.emit_raw_bytes(&krate.to_le_bytes());
+        }
+        e.emit_usize(self.0.len());
+        for (hash, krate) in self.0.iter().zip(crate_indices) {
+            e.emit_usize(krate);
+            e.emit_raw_bytes(&hash.local_hash().as_u64().to_le_bytes());
+        }
+    }
+}
+
+impl<D: Decoder> Decodable<D> for DefPathHashes {
+    fn decode(d: &mut D) -> Self {
+        fn read_u64_raw<D: Decoder>(d: &mut D) -> u64 {
+            u64::from_le_bytes(d.read_raw_bytes(8).try_into().unwrap())
+        }
+        let crates: Vec<u64> = (0..d.read_usize()).map(|_| read_u64_raw(d)).collect();
+        let n = d.read_usize();
+        DefPathHashes(
+            (0..n)
+                .map(|_| {
+                    let krate = crates[d.read_usize()];
+                    DefPathHash(Fingerprint::new(krate, read_u64_raw(d)))
                 })
                 .collect(),
         )
@@ -276,7 +341,7 @@ struct Footer {
     expn_data: UnhashMap<ExpnHash, AbsoluteBytePos>,
     foreign_expn_data: UnhashMap<ExpnHash, u32>,
     // Each `DefId` in the file is an index into this table.
-    def_path_hashes: Vec<DefPathHash>,
+    def_path_hashes: DefPathHashes,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Encodable, Decodable)]
@@ -352,13 +417,13 @@ impl OnDiskCache {
             serialized_data: RwLock::new(Some(data)),
             file_index_to_stable_id: footer.file_index_to_stable_id,
             file_index_to_file: Default::default(),
-            query_values_index: footer.query_values_index.0.into_iter().collect(),
-            side_effects_index: footer.side_effects_index.0.into_iter().collect(),
+            query_values_index: footer.query_values_index.0.iter().map(IndexEntry::span).collect(),
+            side_effects_index: footer.side_effects_index.0.iter().map(IndexEntry::span).collect(),
             alloc_decoding_state: AllocDecodingState::new(footer.interpret_alloc_index),
             syntax_contexts: footer.syntax_contexts,
             expn_data: footer.expn_data,
             foreign_expn_data: footer.foreign_expn_data,
-            def_path_hashes: footer.def_path_hashes,
+            def_path_hashes: footer.def_path_hashes.0,
             hygiene_context: Default::default(),
             inplace: None,
             pool_data: RwLock::new(None),
@@ -387,8 +452,8 @@ impl OnDiskCache {
         let pool_path = values_path.with_file_name(POOL_FILENAME);
         let pool = map_checked(&pool_path, POOL_MAGIC, state.pool_id, state.pool_len)?;
         let mut cache = Self::new_empty();
-        cache.query_values_index = state.query_values.iter().map(|x| (x.index, x.pos)).collect();
-        cache.side_effects_index = state.side_effects.iter().map(|x| (x.index, x.pos)).collect();
+        cache.query_values_index = state.query_values.iter().map(IndexEntry::span).collect();
+        cache.side_effects_index = state.side_effects.iter().map(IndexEntry::span).collect();
         cache.serialized_data = RwLock::new(Some(values));
         cache.pool_data = RwLock::new(Some(pool));
         cache.inplace = Some(state);
@@ -562,7 +627,7 @@ impl OnDiskCache {
                     syntax_contexts,
                     expn_data,
                     foreign_expn_data,
-                    def_path_hashes,
+                    def_path_hashes: DefPathHashes(def_path_hashes),
                 },
             );
             if tcx.sess.opts.unstable_opts.incremental_info {
@@ -797,16 +862,16 @@ impl OnDiskCache {
         &self,
         tcx: TyCtxt<'tcx>,
         dep_node_index: SerializedDepNodeIndex,
-        index: &FxHashMap<SerializedDepNodeIndex, AbsoluteBytePos>,
+        index: &FxHashMap<SerializedDepNodeIndex, (AbsoluteBytePos, u32)>,
     ) -> Option<T>
     where
         T: for<'a> Decodable<CacheDecoder<'a, 'tcx>>,
     {
-        let pos = index.get(&dep_node_index).cloned()?;
+        let (pos, len) = index.get(&dep_node_index).cloned()?;
         if self.inplace.is_some() {
             return Some(self.with_entry_decoder(tcx, pos, |decoder| T::decode(decoder)));
         }
-        let value = self.with_decoder(tcx, pos, |decoder| decode_value(decoder));
+        let value = self.with_decoder(tcx, pos, |decoder| decode_value(decoder, len));
         Some(value)
     }
 
@@ -1011,14 +1076,12 @@ where
     value
 }
 
-/// Decodes a value that `encode_value` wrote. The index names the value, so it carries no
-/// tag. The length still catches a decoder that reads more or less than the encoder wrote.
-fn decode_value<D: Decoder, V: Decodable<D>>(decoder: &mut D) -> V {
+/// Decodes a value that `encode_value` wrote. The index names the value and holds its
+/// length, which catches a decoder that reads more or less than the encoder wrote.
+fn decode_value<D: Decoder, V: Decodable<D>>(decoder: &mut D, len: u32) -> V {
     let start_pos = decoder.position();
     let value = V::decode(decoder);
-    let end_pos = decoder.position();
-    let expected_len: u64 = Decodable::decode(decoder);
-    assert_eq!((end_pos - start_pos) as u64, expected_len);
+    assert_eq!(decoder.position() - start_pos, len as usize);
     value
 }
 
@@ -1361,8 +1424,8 @@ pub struct CacheEncoder<'tcx> {
     symbol_index_table: FxHashMap<u32, usize>,
     source_span_cache: SourceSpanCache,
 
-    query_values_index: Vec<(SerializedDepNodeIndex, AbsoluteBytePos)>,
-    side_effects_index: Vec<(SerializedDepNodeIndex, AbsoluteBytePos)>,
+    query_values_index: Vec<IndexEntry>,
+    side_effects_index: Vec<IndexEntry>,
     /// The `DefPathHash` of each `DefId` index written so far, outside the inplace format.
     def_path_hashes: FxIndexSet<DefPathHash>,
     /// The bytes that spans took, for `-Zincremental-info`.
@@ -1531,13 +1594,17 @@ impl<'tcx> CacheEncoder<'tcx> {
         ((end_pos - start_pos) as u64).encode(self);
     }
 
-    /// Writes `value` and then its length, for `decode_value`.
-    fn encode_value<V: Encodable<Self>>(&mut self, value: &V) {
+    /// Writes `value` for `decode_value`, and returns its index entry.
+    fn encode_value<V: Encodable<Self>>(
+        &mut self,
+        index: SerializedDepNodeIndex,
+        value: &V,
+    ) -> IndexEntry {
         let start_pos = self.position();
         self.prev_span = PrevSpan::default();
         value.encode(self);
-        let end_pos = self.position();
-        ((end_pos - start_pos) as u64).encode(self);
+        let len = (self.position() - start_pos).try_into().expect("query value over 4 GiB");
+        IndexEntry { index, pos: AbsoluteBytePos::new(start_pos), len }
     }
 
     pub fn encode_query_value<V: Encodable<Self>>(&mut self, index: DepNodeIndex, value: &V) {
@@ -1551,8 +1618,8 @@ impl<'tcx> CacheEncoder<'tcx> {
             return;
         }
 
-        self.query_values_index.push((index, AbsoluteBytePos::new(self.position())));
-        self.encode_value(value);
+        let entry = self.encode_value(index, value);
+        self.query_values_index.push(entry);
     }
 
     fn encode_side_effect(&mut self, index: DepNodeIndex, side_effect: &QuerySideEffect) {
@@ -1566,8 +1633,8 @@ impl<'tcx> CacheEncoder<'tcx> {
             return;
         }
 
-        self.side_effects_index.push((index, AbsoluteBytePos::new(self.position())));
-        self.encode_value(side_effect);
+        let entry = self.encode_value(index, side_effect);
+        self.side_effects_index.push(entry);
     }
 
     // copy&paste impl from rustc_metadata
