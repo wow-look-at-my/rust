@@ -221,7 +221,7 @@ use rustc_middle::mir::interpret::{AllocId, ErrorHandled, GlobalAlloc, Scalar};
 use rustc_middle::mir::visit::Visitor as MirVisitor;
 use rustc_middle::mir::{self, Body, Location, MentionedItem, traversal};
 use rustc_middle::mono::{
-    CodegenLocallyFacts, CollectionMode, InstantiationMode, MonoItem, NormalizationErrorInMono,
+    CalleeFacts, CollectionMode, InstantiationMode, MonoItem, NormalizationErrorInMono,
 };
 use rustc_middle::query::TyCtxtAt;
 use rustc_middle::ty::adjustment::{CustomCoerceUnsized, PointerCoercion};
@@ -1005,7 +1005,7 @@ fn visit_instance_use<'tcx>(
     if !tcx.should_codegen_locally(instance) {
         return;
     }
-    if let Some(intrinsic) = tcx.codegen_locally_facts(instance.def_id()).intrinsic {
+    if let Some(intrinsic) = tcx.callee_facts(instance.def_id()).intrinsic {
         if let Some(_requirement) = ValidityRequirement::from_intrinsic(intrinsic.name) {
             // The intrinsics assert_inhabited, assert_zero_valid, and assert_mem_uninitialized_valid will
             // be lowered in codegen to nothing or a call to panic_nounwind. So if we encounter any
@@ -1080,7 +1080,7 @@ fn should_codegen_locally<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> 
     let Some(def_id) = instance.def.def_id_if_not_guaranteed_local_codegen() else {
         return true;
     };
-    let facts = tcx.codegen_locally_facts(def_id);
+    let facts = tcx.callee_facts(def_id);
 
     if facts.is_foreign_item {
         // Foreign items are always linked against, there's no way of instantiating them.
@@ -1121,10 +1121,10 @@ fn should_codegen_locally<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> 
     true
 }
 
-fn codegen_locally_facts(tcx: TyCtxt<'_>, def_id: DefId) -> CodegenLocallyFacts {
+fn callee_facts(tcx: TyCtxt<'_>, def_id: DefId) -> CalleeFacts {
     let def_kind = tcx.def_kind(def_id);
     let local = def_id.is_local();
-    CodegenLocallyFacts {
+    CalleeFacts {
         is_foreign_item: tcx.is_foreign_item(def_id),
         force_inline: def_kind.has_codegen_attrs()
             && matches!(tcx.codegen_fn_attrs(def_id).inline, InlineAttr::Force { .. }),
@@ -1134,6 +1134,11 @@ fn codegen_locally_facts(tcx: TyCtxt<'_>, def_id: DefId) -> CodegenLocallyFacts 
             && !tcx.is_mir_available(def_id)
             && !matches!(def_kind, DefKind::Ctor(..)),
         intrinsic: tcx.intrinsic(def_id),
+        extern_abi: matches!(
+            def_kind,
+            DefKind::Fn | DefKind::AssocFn | DefKind::Ctor(_, hir::def::CtorKind::Fn)
+        )
+        .then(|| tcx.fn_sig(def_id).skip_binder().abi()),
     }
 }
 
@@ -1977,6 +1982,6 @@ pub(crate) fn collect_crate_mono_items<'tcx>(
 
 pub(crate) fn provide(providers: &mut Providers) {
     providers.hooks.should_codegen_locally = should_codegen_locally;
-    providers.queries.codegen_locally_facts = codegen_locally_facts;
+    providers.queries.callee_facts = callee_facts;
     providers.queries.items_of_instance = items_of_instance;
 }

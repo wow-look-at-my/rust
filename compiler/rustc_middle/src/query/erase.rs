@@ -243,7 +243,7 @@ impl_erasable_for_types_with_no_type_params! {
     rustc_middle::mir::interpret::AllocId,
     rustc_middle::mir::interpret::EvalStaticInitializerRawResult<'_>,
     rustc_middle::mir::interpret::EvalToValTreeResult<'_>,
-    rustc_middle::mono::CodegenLocallyFacts,
+    rustc_middle::mono::CalleeFacts,
     rustc_middle::mono::MonoItemPartitions<'_>,
     rustc_middle::traits::query::MethodAutoderefStepsResult<'_>,
     rustc_middle::ty::AdtDef<'_>,

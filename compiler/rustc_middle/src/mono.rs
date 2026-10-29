@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::hash::Hash;
 
+use rustc_abi::ExternAbi;
 use rustc_attr_ir::{InlineAttr, Linkage};
 use rustc_data_structures::base_n::{BaseNString, CASE_INSENSITIVE, ToBaseN};
 use rustc_data_structures::fingerprint::Fingerprint;
@@ -52,11 +53,11 @@ pub enum InstantiationMode {
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash, StableHash, TyEncodable, TyDecodable)]
 pub struct NormalizationErrorInMono;
 
-/// What the collector reads about an item to decide whether to codegen it in this crate.
-/// One query holds all of it, so a collected body depends on one node per callee, not on
-/// each of these queries for each callee.
+/// What the collector reads about each callee of a collected body. One query holds all of it,
+/// so a collected body depends on one node per callee, not on each of these queries for each
+/// callee.
 #[derive(Clone, Copy, Debug, StableHash)]
-pub struct CodegenLocallyFacts {
+pub struct CalleeFacts {
     pub is_foreign_item: bool,
     /// The item has `#[rustc_force_inline]`.
     pub force_inline: bool,
@@ -66,6 +67,8 @@ pub struct CodegenLocallyFacts {
     /// An item of another crate with no MIR that is not a constructor. Always false for a local item.
     pub missing_mir: bool,
     pub intrinsic: Option<ty::IntrinsicDef>,
+    /// The ABI of a function item or a tuple constructor. `None` for any other item.
+    pub extern_abi: Option<ExternAbi>,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash, StableHash, TyEncodable, TyDecodable)]
