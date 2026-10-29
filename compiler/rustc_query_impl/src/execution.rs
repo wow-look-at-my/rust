@@ -477,8 +477,9 @@ fn execute_job_incr<'tcx, C: QueryCache>(
 ) -> (C::Value, DepNodeIndex) {
     let dep_graph_data =
         tcx.dep_graph.data().expect("should always be present in incremental mode");
+    let transparent = is_transparent(query, dep_graph_data, key);
 
-    if !query.anon && !query.eval_always {
+    if !query.anon && !query.eval_always && !transparent {
         // The diagnostics for this query will be promoted to the current session during
         // `try_mark_green()`, so we can ignore them here.
         if let Some(ret) = start_query(job_id, false, || try {
@@ -501,7 +502,8 @@ fn execute_job_incr<'tcx, C: QueryCache>(
     let prof_timer = tcx.prof.query_provider();
 
     let (result, dep_node_index) = start_query(job_id, query.depth_limit, || {
-        if query.anon {
+        // A transparent task records its reads like an anon task, and gets no node.
+        if query.anon || transparent {
             return dep_graph_data.with_anon_task_inner(tcx, query.dep_kind, || {
                 (query.invoke_provider_fn)(tcx, key)
             });
@@ -519,6 +521,19 @@ fn execute_job_incr<'tcx, C: QueryCache>(
     prof_timer.finish_with_query_invocation_id(dep_node_index.into());
 
     (result, dep_node_index)
+}
+
+/// A value on disk is found through its node, so a key the query cache stores keeps its node.
+#[inline(always)]
+fn is_transparent<'tcx, C: QueryCache>(
+    query: &'tcx QueryVTable<'tcx, C>,
+    dep_graph_data: &DepGraphData,
+    key: C::Key,
+) -> bool {
+    dep_graph_data.is_transparent(query.dep_kind)
+        && !query.eval_always
+        && !query.feedable
+        && !query.will_cache_on_disk_for_key(key)
 }
 
 /// Given that the dep node for this query+key is green, obtain a value for it
@@ -602,10 +617,16 @@ fn load_from_disk_or_invoke_provider_green<'tcx, C: QueryCache>(
 fn ensure_can_skip_execution<'tcx, C: QueryCache>(
     query: &'tcx QueryVTable<'tcx, C>,
     tcx: TyCtxt<'tcx>,
+    key: C::Key,
     dep_node: DepNode,
 ) -> bool {
     // Queries with `eval_always` should never skip execution.
     if query.anon || query.eval_always {
+        return false;
+    }
+    if let Some(data) = tcx.dep_graph.data()
+        && is_transparent(query, data, key)
+    {
         return false;
     }
 
@@ -665,7 +686,7 @@ pub(super) fn execute_query_incr_inner<'tcx, C: QueryCache>(
 
     // Check if query execution can be skipped, for `ensure_ok`.
     if let QueryMode::EnsureOk = mode
-        && ensure_can_skip_execution(query, tcx, dep_node)
+        && ensure_can_skip_execution(query, tcx, key, dep_node)
     {
         return None;
     }
