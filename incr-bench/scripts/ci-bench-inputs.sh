@@ -20,7 +20,8 @@ die() {
 if [[ $event != workflow_dispatch ]]; then
 	request=incr-bench/ci-request.env
 	baseline='' patched='' grok_ref='' workloads='' configs=()
-	while IFS='=' read -r name value; do
+	# read fails on a last line with no newline. The -n test keeps that line.
+	while IFS='=' read -r name value || [[ -n $name ]]; do
 		case $name in
 		'' | '#'*) ;;
 		baseline) baseline=$value ;;
