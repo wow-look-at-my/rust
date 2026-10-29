@@ -53,5 +53,4 @@ fn custom_coerce_unsize_info<'tcx>(
 
 pub fn provide(providers: &mut Providers) {
     partitioning::provide(providers);
-    mono_checks::provide(&mut providers.queries);
 }

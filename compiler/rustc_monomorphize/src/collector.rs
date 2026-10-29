@@ -1337,7 +1337,7 @@ fn collect_items_of_instance<'tcx>(
     // normalization first.
     // We choose to emit the error outside to provide helpful diagnostics.
     check_normalization_error(tcx, instance, body)?;
-    tcx.ensure_ok().check_mono_item(instance);
+    crate::mono_checks::check_mono_item(tcx, instance, body);
 
     // Naively, in "used" collection mode, all functions get added to *both* `used_items` and
     // `mentioned_items`. Mentioned items processing will then notice that they have already been
