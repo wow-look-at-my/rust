@@ -419,6 +419,7 @@ impl OnDiskCache {
                 query_values_index: Default::default(),
                 side_effects_index: Default::default(),
                 def_path_hashes: Default::default(),
+                span_bytes: 0,
                 inplace: None,
             };
 
@@ -650,6 +651,7 @@ impl OnDiskCache {
                 query_values_index: Default::default(),
                 side_effects_index: Default::default(),
                 def_path_hashes: Default::default(),
+                span_bytes: 0,
                 inplace: Some(Box::new(inplace)),
             };
             tcx.sess.time("encode_query_values", || tcx.encode_query_values(&mut cache_encoder));
@@ -1083,16 +1085,15 @@ impl<'a, 'tcx> SpanDecoder for CacheDecoder<'a, 'tcx> {
         let (lo, hi) = match tag {
             TAG_PARTIAL_SPAN => (BytePos(0), BytePos(0)),
             TAG_RELATIVE_SPAN => {
-                let dlo = u32::decode(self);
-                let dto = u32::decode(self);
+                let zigzag = u32::decode(self);
+                let dlo = ((zigzag >> 1) as i32 ^ -((zigzag & 1) as i32)) as u32;
+                let len = u32::decode(self);
 
                 let enclosing = self
                     .source_span_cache
                     .lookup(parent.unwrap(), &self.tcx.untracked().source_span);
-                (
-                    BytePos(enclosing.lo.0.wrapping_add(dlo)),
-                    BytePos(enclosing.lo.0.wrapping_add(dto)),
-                )
+                let lo = enclosing.lo.0.wrapping_add(dlo);
+                (BytePos(lo), BytePos(lo.wrapping_add(len)))
             }
             TAG_FULL_SPAN => {
                 let file_lo_index = SourceFileIndex::decode(self);
@@ -1242,6 +1243,8 @@ pub struct CacheEncoder<'tcx> {
     side_effects_index: Vec<(SerializedDepNodeIndex, AbsoluteBytePos)>,
     /// The `DefPathHash` of each `DefId` index written so far, outside the inplace format.
     def_path_hashes: FxIndexSet<DefPathHash>,
+    /// The bytes that spans took, for `-Zincremental-info`.
+    span_bytes: usize,
 
     inplace: Option<Box<InplaceEncode>>,
 }
@@ -1276,6 +1279,20 @@ impl<'tcx> fmt::Debug for CacheEncoder<'tcx> {
 // Starts a pool item.
 
 impl<'tcx> CacheEncoder<'tcx> {
+    /// The bytes that spans took so far.
+    pub fn span_bytes(&self) -> usize {
+        self.span_bytes
+    }
+
+    /// The start is a zigzag offset from `parent_lo`, since a span can start before its parent.
+    /// The end is a length, which is short where an offset from the parent is not.
+    fn encode_relative_span(&mut self, lo: BytePos, hi: BytePos, parent_lo: BytePos) {
+        TAG_RELATIVE_SPAN.encode(self);
+        let dlo = lo.0.wrapping_sub(parent_lo.0) as i32;
+        (((dlo << 1) ^ (dlo >> 31)) as u32).encode(self);
+        hi.0.wrapping_sub(lo.0).encode(self);
+    }
+
     #[inline]
     fn source_file_index(&mut self, source_file: Arc<SourceFile>) -> SourceFileIndex {
         if self.inplace.is_some() {
@@ -1517,49 +1534,48 @@ impl<'tcx> SpanEncoder for CacheEncoder<'tcx> {
     }
 
     fn encode_span(&mut self, span: Span) {
-        let span_data = span.data_untracked();
-        span_data.ctxt.encode(self);
-        span_data.parent.encode(self);
+        let start = self.position();
+        let encode = |this: &mut Self| {
+            let span_data = span.data_untracked();
+            span_data.ctxt.encode(this);
+            span_data.parent.encode(this);
 
-        if span_data.is_dummy() {
-            return TAG_PARTIAL_SPAN.encode(self);
-        }
+            if span_data.is_dummy() {
+                return TAG_PARTIAL_SPAN.encode(this);
+            }
 
-        let parent = span_data
-            .parent
-            .map(|parent| self.source_span_cache.lookup(parent, &self.tcx.untracked().source_span));
-        if let Some(parent) = parent
-            && parent.contains(span_data)
-        {
-            TAG_RELATIVE_SPAN.encode(self);
-            (span_data.lo.0.wrapping_sub(parent.lo.0)).encode(self);
-            (span_data.hi.0.wrapping_sub(parent.lo.0)).encode(self);
-            return;
-        }
+            let parent = span_data.parent.map(|parent| {
+                this.source_span_cache.lookup(parent, &this.tcx.untracked().source_span)
+            });
+            if let Some(parent) = parent
+                && parent.contains(span_data)
+            {
+                return this.encode_relative_span(span_data.lo, span_data.hi, parent.lo);
+            }
 
-        let Some((file_lo, line_lo, col_lo)) =
-            self.caching_source_map_view.byte_pos_to_line_and_col(span_data.lo)
-        else {
-            return TAG_PARTIAL_SPAN.encode(self);
+            let Some((file_lo, line_lo, col_lo)) =
+                this.caching_source_map_view.byte_pos_to_line_and_col(span_data.lo)
+            else {
+                return TAG_PARTIAL_SPAN.encode(this);
+            };
+
+            if let Some(parent) = parent
+                && file_lo.contains(parent.lo)
+            {
+                return this.encode_relative_span(span_data.lo, span_data.hi, parent.lo);
+            }
+
+            let len = span_data.hi - span_data.lo;
+            let source_file_index = this.source_file_index(file_lo);
+
+            TAG_FULL_SPAN.encode(this);
+            source_file_index.encode(this);
+            line_lo.encode(this);
+            col_lo.encode(this);
+            len.encode(this);
         };
-
-        if let Some(parent) = parent
-            && file_lo.contains(parent.lo)
-        {
-            TAG_RELATIVE_SPAN.encode(self);
-            (span_data.lo.0.wrapping_sub(parent.lo.0)).encode(self);
-            (span_data.hi.0.wrapping_sub(parent.lo.0)).encode(self);
-            return;
-        }
-
-        let len = span_data.hi - span_data.lo;
-        let source_file_index = self.source_file_index(file_lo);
-
-        TAG_FULL_SPAN.encode(self);
-        source_file_index.encode(self);
-        line_lo.encode(self);
-        col_lo.encode(self);
-        len.encode(self);
+        encode(self);
+        self.span_bytes += self.position().saturating_sub(start);
     }
 
     fn encode_symbol(&mut self, sym: Symbol) {

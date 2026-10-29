@@ -142,9 +142,9 @@ build() {
 		echo "dep graph bytes $mode $step: $graph (total, heads, keys, values, edges)"
 	fi
 	if [[ $step == cold ]]; then
-		echo "query cache bytes by query $mode $step (bytes, values, query):"
-		{ grep -oE '^\[incremental\] query cache bytes: [a-z_0-9]+ [0-9]+ [0-9]+' "$log" || true; } |
-			awk '{c[$5] += $6; b[$5] += $7} END {for (q in b) printf "%d\t%d\t%s\n", b[q], c[q], q}' | sort -rn | sed -n 1,25p
+		echo "query cache bytes by query $mode $step (bytes, values, span bytes, query):"
+		{ grep -oE '^\[incremental\] query cache bytes: [a-z_0-9]+ [0-9]+ [0-9]+( [0-9]+)?' "$log" || true; } |
+			awk '{c[$5] += $6; b[$5] += $7; s[$5] += $8} END {for (q in b) printf "%d\t%d\t%d\t%s\n", b[q], c[q], s[q], q}' | sort -rn | sed -n 1,25p
 		echo "dep graph bytes by kind $mode $step (bytes, nodes, edges, edge bytes, kind):"
 		{ grep -E '^\[incremental\]  [A-Za-z_0-9]+ +\|' "$log" || true; } | tr -d '|%' |
 			awk '$2 != "Node" {n[$2] += $4; b[$2] += $6; e[$2] += $7; eb[$2] += $8} END {for (k in b) printf "%d\t%d\t%d\t%d\t%s\n", b[k], n[k], e[k], eb[k], k}' | sort -rn | sed -n 1,40p

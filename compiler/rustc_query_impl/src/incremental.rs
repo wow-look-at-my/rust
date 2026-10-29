@@ -30,16 +30,18 @@ pub(crate) fn encode_query_values<'tcx>(tcx: TyCtxt<'tcx>, encoder: &mut CacheEn
     let mut sizes = Vec::new();
     for_each_query_vtable!(CACHE_ON_DISK, tcx, |query| {
         let start = encoder.position();
+        let span_start = encoder.span_bytes();
         let count = encode_query_values_inner(tcx, query, encoder);
         if info {
-            sizes.push((encoder.position() - start, count, query.name));
+            let spans = encoder.span_bytes() - span_start;
+            sizes.push((encoder.position() - start, count, query.name, spans));
         }
     });
     if info {
         // A type shorthand counts against the query that encodes the type first.
         sizes.sort_unstable_by(|a, b| b.cmp(a));
-        for (bytes, count, name) in sizes.into_iter().take(20).filter(|s| s.0 > 0) {
-            eprintln!("[incremental] query cache bytes: {name} {count} {bytes}");
+        for (bytes, count, name, spans) in sizes.into_iter().take(20).filter(|s| s.0 > 0) {
+            eprintln!("[incremental] query cache bytes: {name} {count} {bytes} {spans}");
         }
     }
 }
