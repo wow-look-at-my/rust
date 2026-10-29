@@ -52,6 +52,22 @@ pub enum InstantiationMode {
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash, StableHash, TyEncodable, TyDecodable)]
 pub struct NormalizationErrorInMono;
 
+/// What the collector reads about an item to decide whether to codegen it in this crate.
+/// One query holds all of it, so a collected body depends on one node per callee, not on
+/// each of these queries for each callee.
+#[derive(Clone, Copy, Debug, StableHash)]
+pub struct CodegenLocallyFacts {
+    pub is_foreign_item: bool,
+    /// The item has `#[rustc_force_inline]`.
+    pub force_inline: bool,
+    /// An item of another crate that this crate links to. Always false for a local item.
+    pub reachable_non_generic: bool,
+    pub is_static: bool,
+    /// An item of another crate with no MIR that is not a constructor. Always false for a local item.
+    pub missing_mir: bool,
+    pub intrinsic: Option<ty::IntrinsicDef>,
+}
+
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash, StableHash, TyEncodable, TyDecodable)]
 pub enum MonoItem<'tcx> {
     Fn(Instance<'tcx>),

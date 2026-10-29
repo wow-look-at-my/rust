@@ -220,7 +220,9 @@ use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::mir::interpret::{AllocId, ErrorHandled, GlobalAlloc, Scalar};
 use rustc_middle::mir::visit::Visitor as MirVisitor;
 use rustc_middle::mir::{self, Body, Location, MentionedItem, traversal};
-use rustc_middle::mono::{CollectionMode, InstantiationMode, MonoItem, NormalizationErrorInMono};
+use rustc_middle::mono::{
+    CodegenLocallyFacts, CollectionMode, InstantiationMode, MonoItem, NormalizationErrorInMono,
+};
 use rustc_middle::query::TyCtxtAt;
 use rustc_middle::ty::adjustment::{CustomCoerceUnsized, PointerCoercion};
 use rustc_middle::ty::layout::ValidityRequirement;
@@ -1003,7 +1005,7 @@ fn visit_instance_use<'tcx>(
     if !tcx.should_codegen_locally(instance) {
         return;
     }
-    if let Some(intrinsic) = tcx.intrinsic(instance.def_id()) {
+    if let Some(intrinsic) = tcx.codegen_locally_facts(instance.def_id()).intrinsic {
         if let Some(_requirement) = ValidityRequirement::from_intrinsic(intrinsic.name) {
             // The intrinsics assert_inhabited, assert_zero_valid, and assert_mem_uninitialized_valid will
             // be lowered in codegen to nothing or a call to panic_nounwind. So if we encounter any
@@ -1078,15 +1080,14 @@ fn should_codegen_locally<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> 
     let Some(def_id) = instance.def.def_id_if_not_guaranteed_local_codegen() else {
         return true;
     };
+    let facts = tcx.codegen_locally_facts(def_id);
 
-    if tcx.is_foreign_item(def_id) {
+    if facts.is_foreign_item {
         // Foreign items are always linked against, there's no way of instantiating them.
         return false;
     }
 
-    if tcx.def_kind(def_id).has_codegen_attrs()
-        && matches!(tcx.codegen_fn_attrs(def_id).inline, InlineAttr::Force { .. })
-    {
+    if facts.force_inline {
         // `#[rustc_force_inline]` items should never be codegened. This should be caught by
         // the MIR validator.
         tcx.dcx().delayed_bug("attempt to codegen `#[rustc_force_inline]` item");
@@ -1097,19 +1098,19 @@ fn should_codegen_locally<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> 
         return true;
     }
 
-    if tcx.is_reachable_non_generic(def_id) || instance.upstream_monomorphization(tcx).is_some() {
+    if facts.reachable_non_generic || instance.upstream_monomorphization(tcx).is_some() {
         // We can link to the item in question, no instance needed in this crate.
         return false;
     }
 
-    if let DefKind::Static { .. } = tcx.def_kind(def_id) {
+    if facts.is_static {
         // We cannot monomorphize statics from upstream crates.
         return false;
     }
 
     // See comment in should_encode_mir in rustc_metadata for why we don't report
     // an error for constructors.
-    if !tcx.is_mir_available(def_id) && !matches!(tcx.def_kind(def_id), DefKind::Ctor(..)) {
+    if facts.missing_mir {
         tcx.dcx().emit_fatal(NoOptimizedMir {
             span: tcx.def_span(def_id),
             crate_name: tcx.crate_name(def_id.krate),
@@ -1118,6 +1119,22 @@ fn should_codegen_locally<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> 
     }
 
     true
+}
+
+fn codegen_locally_facts(tcx: TyCtxt<'_>, def_id: DefId) -> CodegenLocallyFacts {
+    let def_kind = tcx.def_kind(def_id);
+    let local = def_id.is_local();
+    CodegenLocallyFacts {
+        is_foreign_item: tcx.is_foreign_item(def_id),
+        force_inline: def_kind.has_codegen_attrs()
+            && matches!(tcx.codegen_fn_attrs(def_id).inline, InlineAttr::Force { .. }),
+        reachable_non_generic: !local && tcx.is_reachable_non_generic(def_id),
+        is_static: matches!(def_kind, DefKind::Static { .. }),
+        missing_mir: !local
+            && !tcx.is_mir_available(def_id)
+            && !matches!(def_kind, DefKind::Ctor(..)),
+        intrinsic: tcx.intrinsic(def_id),
+    }
 }
 
 /// For a given pair of source and target type that occur in an unsizing coercion,
@@ -1960,5 +1977,6 @@ pub(crate) fn collect_crate_mono_items<'tcx>(
 
 pub(crate) fn provide(providers: &mut Providers) {
     providers.hooks.should_codegen_locally = should_codegen_locally;
+    providers.queries.codegen_locally_facts = codegen_locally_facts;
     providers.queries.items_of_instance = items_of_instance;
 }

@@ -1981,6 +1981,10 @@ rustc_queries! {
         cache_on_disk
         separate_provide_extern
     }
+    /// What the mono item collector needs to know about `def_id` to decide whether this crate codegens it.
+    query codegen_locally_facts(def_id: DefId) -> rustc_middle::mono::CodegenLocallyFacts {
+        desc { "checking whether `{}` is codegened in this crate", tcx.def_path_str(def_id) }
+    }
     query is_unreachable_local_definition(def_id: LocalDefId) -> bool {
         desc {
             "checking whether `{}` is reachable from outside the crate",
