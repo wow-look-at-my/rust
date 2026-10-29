@@ -150,6 +150,12 @@ build() {
 		echo "query cache sections $mode $step (values, side effects, allocs, hygiene, footer, entries, def paths, ctxts, expns):"
 		{ grep -oE '^\[incremental\] query cache sections: values [0-9]+ side-effects [0-9]+ allocs [0-9]+ hygiene [0-9]+ footer [0-9]+ entries [0-9]+ def-paths [0-9]+ ctxts [0-9]+ expns [0-9]+' "$log" || true; } |
 			awk '{for (i = 6; i <= 22; i += 2) s[i] += $i} END {printf "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", s[6], s[8], s[10], s[12], s[14], s[16], s[18], s[20], s[22]}'
+		echo "query cache footer $mode $step (files, values index, side effects index, allocs index, ctxts, expns, foreign expns, def paths):"
+		{ grep -oE '^\[incremental\] query cache footer: files [0-9]+ values-index [0-9]+ side-effects-index [0-9]+ allocs-index [0-9]+ ctxts [0-9]+ expns [0-9]+ foreign-expns [0-9]+ def-paths [0-9]+' "$log" || true; } |
+			awk '{for (i = 6; i <= 20; i += 2) s[i] += $i} END {printf "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", s[6], s[8], s[10], s[12], s[14], s[16], s[18], s[20]}'
+		echo "query cache hygiene $mode $step (syntax context data, expansion data):"
+		{ grep -oE '^\[incremental\] query cache hygiene: ctxt-data [0-9]+ expn-data [0-9]+' "$log" || true; } |
+			awk '{c += $6; x += $8} END {printf "%d\t%d\n", c, x}'
 		echo "query cache type and predicate shorthand refs $mode $step (refs, bytes):"
 		{ grep -oE '^\[incremental\] query cache shorthand refs: [0-9]+ [0-9]+' "$log" || true; } |
 			awk '{r += $6; b += $7} END {printf "%d\t%d\n", r, b}'

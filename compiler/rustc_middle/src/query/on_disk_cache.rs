@@ -326,7 +326,8 @@ impl<D: Decoder> Decodable<D> for DefPathHashes {
 }
 
 // This type is used only for serialization and deserialization.
-#[derive(Encodable, Decodable)]
+// `CacheEncoder::encode_footer` writes the fields in the order `Decodable` reads them.
+#[derive(Decodable)]
 struct Footer {
     file_index_to_stable_id: FxHashMap<SourceFileIndex, EncodedSourceFileId>,
     query_values_index: ValuesIndex,
@@ -582,6 +583,8 @@ impl OnDiskCache {
             let mut syntax_contexts = FxHashMap::default();
             let mut expn_data = UnhashMap::default();
             let mut foreign_expn_data = UnhashMap::default();
+            let mut ctxt_bytes = 0;
+            let mut expn_bytes = 0;
 
             // Encode all hygiene data (`SyntaxContextData` and `ExpnData`) from the current
             // session.
@@ -592,12 +595,14 @@ impl OnDiskCache {
                 |encoder, ctxt, ctxt_data| {
                     let pos = AbsoluteBytePos::new(encoder.position());
                     encoder.encode_tagged(TAG_SYNTAX_CONTEXT, ctxt_data);
+                    ctxt_bytes += encoder.position() - pos.to_usize();
                     syntax_contexts.insert(ctxt.as_u32(), pos);
                 },
                 |encoder, expn_id, data, hash| {
                     if expn_id.krate == LOCAL_CRATE {
                         let pos = AbsoluteBytePos::new(encoder.position());
                         encoder.encode_tagged(TAG_EXPN_DATA, data.expect("local expn"));
+                        expn_bytes += encoder.position() - pos.to_usize();
                         expn_data.insert(hash, pos);
                     } else {
                         foreign_expn_data.insert(hash, expn_id.local_id.as_u32());
@@ -617,22 +622,39 @@ impl OnDiskCache {
                 syntax_contexts.len(),
                 expn_data.len(),
             );
-            encoder.encode_tagged(
-                TAG_FILE_FOOTER,
-                &Footer {
-                    file_index_to_stable_id,
-                    query_values_index,
-                    side_effects_index,
-                    interpret_alloc_index,
-                    syntax_contexts,
-                    expn_data,
-                    foreign_expn_data,
-                    def_path_hashes: DefPathHashes(def_path_hashes),
-                },
-            );
+            let footer_parts = encoder.encode_footer(&Footer {
+                file_index_to_stable_id,
+                query_values_index,
+                side_effects_index,
+                interpret_alloc_index,
+                syntax_contexts,
+                expn_data,
+                foreign_expn_data,
+                def_path_hashes: DefPathHashes(def_path_hashes),
+            });
             if tcx.sess.opts.unstable_opts.incremental_info {
                 let footer_end = encoder.position();
                 let (values, def_paths, ctxts, expns) = counts;
+                let [
+                    files,
+                    values_index,
+                    side_effects_index,
+                    allocs_index,
+                    ctxts_map,
+                    expns_map,
+                    foreign_expns,
+                    def_paths_table,
+                ] = footer_parts;
+                eprintln!(
+                    "[incremental] query cache footer: files {files} values-index {values_index} \
+                     side-effects-index {side_effects_index} allocs-index {allocs_index} \
+                     ctxts {ctxts_map} expns {expns_map} foreign-expns {foreign_expns} \
+                     def-paths {def_paths_table}"
+                );
+                eprintln!(
+                    "[incremental] query cache hygiene: ctxt-data {ctxt_bytes} \
+                     expn-data {expn_bytes}"
+                );
                 eprintln!(
                     "[incremental] query cache sections: values {} side-effects {} allocs {} \
                      hygiene {} footer {} entries {values} def-paths {def_paths} \
@@ -1583,6 +1605,31 @@ impl<'tcx> CacheEncoder<'tcx> {
     /// encode the specified tag, then the given value, then the number of
     /// bytes taken up by tag and value. On decoding, we can then verify that
     /// we get the expected tag and read the expected number of bytes.
+    /// Writes `footer` as `encode_tagged` does, and returns the bytes of each field.
+    fn encode_footer(&mut self, footer: &Footer) -> [usize; 8] {
+        let start_pos = self.position();
+        self.prev_span = PrevSpan::default();
+        TAG_FILE_FOOTER.encode(self);
+        let fields: [&dyn Fn(&mut Self); 8] = [
+            &|e| footer.file_index_to_stable_id.encode(e),
+            &|e| footer.query_values_index.encode(e),
+            &|e| footer.side_effects_index.encode(e),
+            &|e| footer.interpret_alloc_index.encode(e),
+            &|e| footer.syntax_contexts.encode(e),
+            &|e| footer.expn_data.encode(e),
+            &|e| footer.foreign_expn_data.encode(e),
+            &|e| footer.def_path_hashes.encode(e),
+        ];
+        let sizes = fields.map(|field| {
+            let at = self.position();
+            field(self);
+            self.position() - at
+        });
+        let end_pos = self.position();
+        ((end_pos - start_pos) as u64).encode(self);
+        sizes
+    }
+
     fn encode_tagged<T: Encodable<Self>, V: Encodable<Self>>(&mut self, tag: T, value: &V) {
         let start_pos = self.position();
         self.prev_span = PrevSpan::default();
