@@ -476,15 +476,18 @@ impl OnDiskCache {
                 inplace: None,
             };
 
+            let values_start = encoder.position();
             // Encode query return values.
             tcx.sess.time("encode_query_values", || {
                 tcx.encode_query_values(&mut encoder);
             });
+            let values_end = encoder.position();
 
             // Encode side effects.
             for (&dep_node_index, side_effect) in tcx.query_system.side_effects.borrow().iter() {
                 encoder.encode_side_effect(dep_node_index, side_effect);
             }
+            let side_effects_end = encoder.position();
 
             let interpret_alloc_index = {
                 let mut interpret_alloc_index = Vec::new();
@@ -509,6 +512,7 @@ impl OnDiskCache {
                 }
                 interpret_alloc_index
             };
+            let allocs_end = encoder.position();
 
             let mut syntax_contexts = FxHashMap::default();
             let mut expn_data = UnhashMap::default();
@@ -540,7 +544,14 @@ impl OnDiskCache {
             let footer_pos = encoder.position() as u64;
             let query_values_index = ValuesIndex(mem::take(&mut encoder.query_values_index));
             let side_effects_index = ValuesIndex(mem::take(&mut encoder.side_effects_index));
-            let def_path_hashes = mem::take(&mut encoder.def_path_hashes).into_iter().collect();
+            let def_path_hashes: Vec<_> =
+                mem::take(&mut encoder.def_path_hashes).into_iter().collect();
+            let counts = (
+                query_values_index.0.len(),
+                def_path_hashes.len(),
+                syntax_contexts.len(),
+                expn_data.len(),
+            );
             encoder.encode_tagged(
                 TAG_FILE_FOOTER,
                 &Footer {
@@ -554,6 +565,20 @@ impl OnDiskCache {
                     def_path_hashes,
                 },
             );
+            if tcx.sess.opts.unstable_opts.incremental_info {
+                let footer_end = encoder.position();
+                let (values, def_paths, ctxts, expns) = counts;
+                eprintln!(
+                    "[incremental] query cache sections: values {} side-effects {} allocs {} \
+                     hygiene {} footer {} entries {values} def-paths {def_paths} \
+                     ctxts {ctxts} expns {expns}",
+                    values_end - values_start,
+                    side_effects_end - values_end,
+                    allocs_end - side_effects_end,
+                    footer_pos as usize - allocs_end,
+                    footer_end - footer_pos as usize,
+                );
+            }
 
             // Encode the position of the footer as the last 8 bytes of the
             // file so we know where to look for it.
