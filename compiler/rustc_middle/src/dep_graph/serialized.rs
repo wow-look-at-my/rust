@@ -850,6 +850,26 @@ struct EncoderState {
     file: Lock<Option<FileEncoder<'static>>>,
     local: WorkerLocal<RefCell<LocalEncoderState>>,
     stats: Option<Lock<FxHashMap<DepKind, Stat>>>,
+    /// For `-Zincremental-info`: which nodes some edge of this session points at.
+    readers: Option<Lock<ReadStats>>,
+}
+
+/// Per node index: its kind, its bytes, and whether an edge points at it.
+#[derive(Default)]
+struct ReadStats {
+    kinds: Vec<Option<DepKind>>,
+    bytes: Vec<u32>,
+    read: Vec<bool>,
+}
+
+impl ReadStats {
+    fn grow(&mut self, index: usize) {
+        if self.kinds.len() <= index {
+            self.kinds.resize(index + 1, None);
+            self.bytes.resize(index + 1, 0);
+            self.read.resize(index + 1, false);
+        }
+    }
 }
 
 impl EncoderState {
@@ -862,6 +882,7 @@ impl EncoderState {
             previous,
             next_node_index: AtomicU64::new(0),
             stats: record_stats.then(|| Lock::new(FxHashMap::default())),
+            readers: record_stats.then(|| Lock::new(ReadStats::default())),
             file: Lock::new(Some(encoder)),
             local: WorkerLocal::new(|_| {
                 RefCell::new(LocalEncoderState {
@@ -947,6 +968,20 @@ impl EncoderState {
                 stat.node_counter += 1;
                 stat.edge_counter += edge_count as u64;
                 stat.bytes.add(bytes);
+            });
+        }
+
+        if let Some(readers) = &self.readers {
+            outline(move || {
+                let mut readers = readers.lock();
+                let index = index.as_usize();
+                readers.grow(index);
+                readers.kinds[index] = Some(node.kind);
+                readers.bytes[index] = bytes.total().try_into().unwrap_or(u32::MAX);
+                for edge in edges {
+                    readers.grow(edge.as_usize());
+                    readers.read[edge.as_usize()] = true;
+                }
             });
         }
     }
@@ -1160,6 +1195,29 @@ impl EncoderState {
 
             eprintln!("{SEPARATOR}");
             eprintln!("[incremental]");
+        }
+
+        if let Some(readers) = &self.readers {
+            let readers = readers.lock();
+            let mut unread: FxHashMap<DepKind, (u64, u64)> = FxHashMap::default();
+            for ((kind, &bytes), &read) in
+                readers.kinds.iter().zip(&readers.bytes).zip(&readers.read)
+            {
+                if let Some(kind) = *kind
+                    && !read
+                {
+                    let entry = unread.entry(kind).or_default();
+                    entry.0 += 1;
+                    entry.1 += u64::from(bytes);
+                }
+            }
+            // Sorted below.
+            #[allow(rustc::potential_query_instability)]
+            let mut unread: Vec<_> = unread.into_iter().collect();
+            unread.sort_by_key(|&(kind, (_, bytes))| (std::cmp::Reverse(bytes), kind.as_u16()));
+            for (kind, (nodes, bytes)) in unread {
+                eprintln!("[incremental] unread nodes: {kind:?} {nodes} {bytes}");
+            }
         }
     }
 }
