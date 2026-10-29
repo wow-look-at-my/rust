@@ -145,9 +145,9 @@ build() {
 		echo "query cache bytes by query $mode $step (bytes, values, query):"
 		{ grep -oE '^\[incremental\] query cache bytes: [a-z_0-9]+ [0-9]+ [0-9]+' "$log" || true; } |
 			awk '{c[$5] += $6; b[$5] += $7} END {for (q in b) printf "%d\t%d\t%s\n", b[q], c[q], q}' | sort -rn | sed -n 1,25p
-		echo "dep graph bytes by kind $mode $step (bytes, nodes, kind):"
+		echo "dep graph bytes by kind $mode $step (bytes, nodes, edges, edge bytes, kind):"
 		{ grep -E '^\[incremental\]  [A-Za-z_0-9]+ +\|' "$log" || true; } | tr -d '|%' |
-			awk '$2 != "Node" {n[$2] += $4; b[$2] += $6} END {for (k in b) printf "%d\t%d\t%s\n", b[k], n[k], k}' | sort -rn | sed -n 1,30p
+			awk '$2 != "Node" {n[$2] += $4; b[$2] += $6; e[$2] += $7; eb[$2] += $8} END {for (k in b) printf "%d\t%d\t%d\t%d\t%s\n", b[k], n[k], e[k], eb[k], k}' | sort -rn | sed -n 1,40p
 	fi
 	# An -Zincremental-info run prints what happened to each node, summed here over the crates this step compiled.
 	local seen=$target_root/$mode.fates-seen

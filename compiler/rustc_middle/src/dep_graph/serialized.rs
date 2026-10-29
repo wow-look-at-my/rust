@@ -954,7 +954,8 @@ impl EncoderState {
     #[inline]
     fn flush_mem_encoder(&self, local: &mut LocalEncoderState) {
         let data = &mut local.encoder.data;
-        if data.len() > 64 * 1024 {
+        // A flush starts the edge back-references again, so a larger block finds more of them.
+        if data.len() > 1024 * 1024 {
             self.file.lock().as_mut().unwrap().emit_raw_bytes(&data[..]);
             data.clear();
             local.refs.prev_index = None;
@@ -1129,8 +1130,14 @@ impl EncoderState {
 
             eprintln!("[incremental]");
             eprintln!(
-                "[incremental]  {:<36}| {:<17}| {:<12}| {:<17}| {:<12}|",
-                "Node Kind", "Node Frequency", "Node Count", "Avg. Edge Count", "Bytes"
+                "[incremental]  {:<36}| {:<17}| {:<12}| {:<17}| {:<12}| {:<12}| {:<12}|",
+                "Node Kind",
+                "Node Frequency",
+                "Node Count",
+                "Avg. Edge Count",
+                "Bytes",
+                "Edges",
+                "Edge Bytes"
             );
             eprintln!("{SEPARATOR}");
 
@@ -1140,12 +1147,14 @@ impl EncoderState {
                 let node_kind_avg_edges = (stat.edge_counter as f64) / (stat.node_counter as f64);
 
                 eprintln!(
-                    "[incremental]  {:<36}|{:>16.1}% |{:>12} |{:>17.1} |{:>12} |",
+                    "[incremental]  {:<36}|{:>16.1}% |{:>12} |{:>17.1} |{:>12} |{:>12} |{:>12} |",
                     format!("{:?}", stat.kind),
                     node_kind_ratio,
                     stat.node_counter,
                     node_kind_avg_edges,
                     stat.bytes.total(),
+                    stat.edge_counter,
+                    stat.bytes.edges,
                 );
             }
 
