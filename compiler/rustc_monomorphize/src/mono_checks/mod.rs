@@ -9,7 +9,7 @@ mod move_check;
 pub(crate) fn check_mono_item<'tcx>(
     tcx: TyCtxt<'tcx>,
     instance: Instance<'tcx>,
-    body: &Body<'tcx>,
+    body: &'tcx Body<'tcx>,
 ) {
     abi_check::check_feature_dependent_abi(tcx, instance, body);
     move_check::check_moves(tcx, instance, body);
