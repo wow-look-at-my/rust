@@ -127,6 +127,32 @@ fn anon_key_is_not_stored() {
 }
 
 #[test]
+fn key_that_shares_its_crate_half_is_stored_short() {
+    let red = DepKind::Red.as_u16();
+    let crate_key = |local: u64| DepNode {
+        kind: DepKind::from_u16(red),
+        key_fingerprint: Fingerprint::new(0x1234_5678_9ABC_DEF0u64, local).into(),
+    };
+    let shared = vec![
+        (0, crate_key(1), Fingerprint::ZERO, vec![]),
+        (1, crate_key(2), Fingerprint::ZERO, vec![]),
+        // An unrelated key in between does not break the reference.
+        (2, node(red, 9), Fingerprint::ZERO, vec![]),
+        (3, crate_key(3), Fingerprint::ZERO, vec![]),
+    ];
+    let unshared = vec![
+        (0, node(red, 1), Fingerprint::ZERO, vec![]),
+        (1, node(red, 2), Fingerprint::ZERO, vec![]),
+        (2, node(red, 9), Fingerprint::ZERO, vec![]),
+        (3, node(red, 3), Fingerprint::ZERO, vec![]),
+    ];
+    let shared_len = round_trip(&shared, &[]);
+    let unshared_len = round_trip(&unshared, &[]);
+    // Each of those later crate keys keeps several bytes and writes a one-byte distance.
+    assert_eq!(unshared_len - shared_len, 2 * 7, "{shared_len} vs {unshared_len} bytes");
+}
+
+#[test]
 fn value_is_stored_in_eight_bytes() {
     let red = DepKind::Red.as_u16();
     let zero = round_trip(&[(0, node(red, 7), Fingerprint::ZERO, vec![])], &[]);

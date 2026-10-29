@@ -105,7 +105,7 @@ impl<'tcx> MonoItem<'tcx> {
     // change NON_INCR_MIN_CGU_SIZE as well.
     pub fn size_estimate(&self, tcx: TyCtxt<'tcx>) -> usize {
         match *self {
-            MonoItem::Fn(instance) => tcx.size_estimate(instance),
+            MonoItem::Fn(instance) => tcx.size_estimate(instance.def),
             // Conservatively estimate the size of a static declaration or
             // assembly item to be 1.
             MonoItem::Static(_) | MonoItem::GlobalAsm(_) => 1,

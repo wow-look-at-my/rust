@@ -1401,14 +1401,14 @@ pub(crate) fn provide(providers: &mut Providers) {
             .unwrap_or_else(|| panic!("failed to find cgu with name {name:?}"))
     };
 
-    providers.queries.size_estimate = |tcx, instance| {
-        match instance.def {
+    providers.queries.size_estimate = |tcx, instance_kind| {
+        match instance_kind {
             // "Normal" functions size estimate: the number of
             // statements, plus one for the terminator.
             InstanceKind::Item(..)
             | InstanceKind::Shim(ShimKind::DropGlue(..))
             | InstanceKind::Shim(ShimKind::AsyncDropGlueCtor(..)) => {
-                let mir = tcx.instance_mir(instance.def);
+                let mir = tcx.instance_mir(instance_kind);
                 mir.basic_blocks
                     .iter()
                     .map(|bb| {

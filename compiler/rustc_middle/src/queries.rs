@@ -2829,8 +2829,9 @@ rustc_queries! {
         cache_on_disk
     }
 
-    query size_estimate(key: ty::Instance<'tcx>) -> usize {
-        desc { "estimating codegen size of `{}`", key }
+    /// The estimate counts the statements of the MIR of `key`.
+    query size_estimate(key: ty::InstanceKind<'tcx>) -> usize {
+        desc { "estimating codegen size of `{}`", tcx.def_path_str(key.def_id()) }
         cache_on_disk
     }
 

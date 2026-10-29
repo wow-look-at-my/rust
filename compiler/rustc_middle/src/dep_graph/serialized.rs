@@ -499,6 +499,8 @@ pub fn short_value_fingerprint(fingerprint: Fingerprint) -> Fingerprint {
 const FLAG_KEY_IS_ABSENT: u8 = 1 << 4;
 /// The node is the first of a block that one thread wrote. Edge back-references start again here.
 const FLAG_EDGES_RESTART: u8 = 1 << 5;
+/// The first half of the key is the first half of the key of an earlier node.
+const FLAG_KEY_HIGH_IS_REF: u8 = 1 << 6;
 
 /// One node of the serialized stream, without its edge targets.
 struct NodeRecord {
@@ -538,6 +540,10 @@ impl NodeRecord {
             Fingerprint::ZERO.into()
         } else if flags & FLAG_KEY_IS_REF != 0 {
             nodes[Self::decode_ref(d, index, nodes)].key_fingerprint
+        } else if flags & FLAG_KEY_HIGH_IS_REF != 0 {
+            let earlier: Fingerprint =
+                nodes[Self::decode_ref(d, index, nodes)].key_fingerprint.into();
+            Fingerprint::new(earlier.split().0, u64::from_le_bytes(d.read_array())).into()
         } else {
             Fingerprint::from_le_bytes(d.read_array()).into()
         };
@@ -632,6 +638,8 @@ struct EncoderRefs {
     /// The index of the last node in the unflushed buffer.
     prev_index: Option<u32>,
     keys: FingerprintRefs,
+    /// Keyed by the first half of a key, with zero as the second half.
+    key_highs: FingerprintRefs,
     values: FingerprintRefs,
     /// The position of the last edge of the unflushed buffer to each target.
     edge_positions: FxHashMap<u32, u32>,
@@ -644,6 +652,7 @@ impl EncoderRefs {
         EncoderRefs {
             prev_index: None,
             keys: FingerprintRefs::new(),
+            key_highs: FingerprintRefs::new(),
             values: FingerprintRefs::new(),
             edge_positions: FxHashMap::default(),
             edge_count: 0,
@@ -692,6 +701,12 @@ impl NodeInfo<'_> {
         let key_fingerprint: Fingerprint = node.key_fingerprint.into();
         let key_is_absent = node.kind.is_anon();
         let key_ref = if key_is_absent { None } else { refs.keys.replace(key_fingerprint, index) };
+        let (key_high, key_low) = key_fingerprint.split();
+        let key_high_ref = if key_is_absent || key_ref.is_some() {
+            None
+        } else {
+            refs.key_highs.replace(Fingerprint::new(key_high, 0u64), index)
+        };
         debug_assert_eq!(value_fingerprint, short_value_fingerprint(value_fingerprint));
         let value_is_zero = value_fingerprint == Fingerprint::ZERO;
         let value_ref =
@@ -714,6 +729,8 @@ impl NodeInfo<'_> {
             flags |= FLAG_KEY_IS_ABSENT;
         } else if key_ref.is_some() {
             flags |= FLAG_KEY_IS_REF;
+        } else if key_high_ref.is_some() {
+            flags |= FLAG_KEY_HIGH_IS_REF;
         }
         if value_is_zero {
             flags |= FLAG_VALUE_IS_ZERO;
@@ -727,10 +744,14 @@ impl NodeInfo<'_> {
             e.write_array(index.to_le_bytes());
         }
         let key_start = e.position();
-        match key_ref {
+        match (key_ref, key_high_ref) {
             _ if key_is_absent => {}
-            Some(target) => e.emit_u32(index - target),
-            None => e.write_array(key_fingerprint.to_le_bytes()),
+            (Some(target), _) => e.emit_u32(index - target),
+            (None, Some(target)) => {
+                e.emit_u32(index - target);
+                e.write_array(key_low.as_u64().to_le_bytes());
+            }
+            (None, None) => e.write_array(key_fingerprint.to_le_bytes()),
         }
         let value_start = e.position();
         if !value_is_zero {
