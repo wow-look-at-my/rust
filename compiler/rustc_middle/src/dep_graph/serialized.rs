@@ -344,8 +344,10 @@ impl SerializedDepGraph {
 
         let mut prev_index = None;
         let mut edge_history = Vec::new();
+        let mut kind_flags = KindFlags::new();
         for _ in 0..node_count {
-            let record = NodeRecord::decode(d, prev_index, &nodes, &value_fingerprints);
+            let record =
+                NodeRecord::decode(d, prev_index, &nodes, &value_fingerprints, &mut kind_flags);
             let index = record.index;
             prev_index = Some(index);
 
@@ -360,15 +362,12 @@ impl SerializedDepGraph {
             // select the number of byte elements per-array not per-element. Consider the
             // The in-memory structure for the edges list stores the byte width of the edges on
             // this node with the offset into the global edge data array.
-            let edges_header = EdgeHeader {
-                repr: (edge_list_data.len() << DEP_NODE_WIDTH_BITS)
-                    | (record.head.bytes_per_index() - 1),
+            let start = edge_list_data.len();
+            let width = record.decode_edges(d, &mut edge_list_data, &mut edge_history);
+            edge_list_indices[index] = EdgeHeader {
+                repr: (start << DEP_NODE_WIDTH_BITS) | (width - 1),
                 num_edges: record.num_edges,
             };
-
-            record.decode_edges(d, &mut edge_list_data, &mut edge_history);
-
-            edge_list_indices[index] = edges_header;
         }
 
         // When we access the edge list data, we do a fixed-size read from the edge list data then
@@ -428,34 +427,25 @@ impl SerializedDepGraph {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct NodeHead(u16);
 
-// Bit fields, where
-// M: bits used to store the length of a node's edge list
-// N: bits used to store the byte width of elements of the edge list
-// are
-// 0..M    length of the edge
-// M..M+N  bytes per index
-// M+N..16 kind
+// Bit fields. The kind, then one bit that says the flags byte is left out. Then the length of
+// the edge list plus one, or zero when the length does not fit.
 impl NodeHead {
     const TOTAL_BITS: usize = size_of::<DepKind>() * 8;
-    const LEN_BITS: usize = Self::TOTAL_BITS - Self::KIND_BITS - Self::WIDTH_BITS;
-    const WIDTH_BITS: usize = DEP_NODE_WIDTH_BITS;
     const KIND_BITS: usize = Self::TOTAL_BITS - DepKind::MAX.leading_zeros() as usize;
-    const MAX_INLINE_LEN: usize = (u16::MAX as usize >> (Self::TOTAL_BITS - Self::LEN_BITS)) - 1;
+    const SAME_FLAGS_BIT: usize = Self::KIND_BITS;
+    const LEN_SHIFT: usize = Self::KIND_BITS + 1;
+    const MAX_INLINE_LEN: usize = (u16::MAX as usize >> Self::LEN_SHIFT) - 1;
 
     #[inline]
-    fn new(kind: DepKind, edge_max_index: u32, edge_count: usize) -> Self {
-        debug_assert_eq!(Self::TOTAL_BITS, Self::LEN_BITS + Self::WIDTH_BITS + Self::KIND_BITS);
+    fn new(kind: DepKind, edge_count: usize, same_flags: bool) -> Self {
+        const { assert!(NodeHead::LEN_SHIFT + 5 <= NodeHead::TOTAL_BITS) };
 
         let mut head = kind.as_u16();
-
-        let free_bytes = edge_max_index.leading_zeros() as usize / 8;
-        let bytes_per_index = (DEP_NODE_SIZE - free_bytes).saturating_sub(1);
-        head |= (bytes_per_index as u16) << Self::KIND_BITS;
-
-        // Encode number of edges + 1 so that we can reserve 0 to indicate that the len doesn't fit
-        // in this bitfield.
+        if same_flags {
+            head |= 1 << Self::SAME_FLAGS_BIT;
+        }
         if edge_count <= Self::MAX_INLINE_LEN {
-            head |= (edge_count as u16 + 1) << (Self::KIND_BITS + Self::WIDTH_BITS);
+            head |= (edge_count as u16 + 1) << Self::LEN_SHIFT;
         }
 
         let head = Self(head);
@@ -469,15 +459,42 @@ impl NodeHead {
         DepKind::from_u16(self.0 & mask(Self::KIND_BITS) as u16)
     }
 
+    /// The flags are those of the last node of this kind in the block, with the index next.
     #[inline]
-    fn bytes_per_index(self) -> usize {
-        ((self.0 >> Self::KIND_BITS) & mask(Self::WIDTH_BITS) as u16) as usize + 1
+    fn same_flags(self) -> bool {
+        self.0 & (1 << Self::SAME_FLAGS_BIT) != 0
     }
 
     #[inline]
     fn len(self) -> Option<u32> {
-        ((self.0 as u32) >> (Self::WIDTH_BITS + Self::KIND_BITS)).checked_sub(1)
+        ((self.0 as u32) >> Self::LEN_SHIFT).checked_sub(1)
     }
+}
+
+/// The flags that the head can leave out: those that describe the key and the value.
+const KIND_FLAGS: u8 = FLAG_KEY_IS_REF
+    | FLAG_VALUE_IS_REF
+    | FLAG_VALUE_IS_ZERO
+    | FLAG_KEY_IS_ABSENT
+    | FLAG_KEY_HIGH_IS_REF;
+
+/// The last key and value flags of each kind in the block, for a head that leaves them out.
+struct KindFlags(Box<[Option<u8>]>);
+
+impl KindFlags {
+    fn new() -> Self {
+        KindFlags(vec![None; DepKind::NUM_VARIANTS].into())
+    }
+
+    fn clear(&mut self) {
+        self.0.fill(None);
+    }
+}
+
+/// The byte width of the largest of `targets`, at least one.
+fn edge_width(targets: &[u32]) -> usize {
+    let max = targets.iter().copied().max().unwrap_or(0);
+    (DEP_NODE_SIZE - max.leading_zeros() as usize / 8).max(1)
 }
 
 /// The index is the node's index plus one. Otherwise it follows as a fixed `u32`.
@@ -504,7 +521,6 @@ const FLAG_KEY_HIGH_IS_REF: u8 = 1 << 6;
 
 /// One node of the serialized stream, without its edge targets.
 struct NodeRecord {
-    head: NodeHead,
     index: SerializedDepNodeIndex,
     node: DepNode,
     value_fingerprint: Fingerprint,
@@ -517,17 +533,29 @@ fn leb_len(x: u64) -> u32 {
 }
 
 impl NodeRecord {
-    /// The head, the flags, and nothing else.
-    const MIN_SIZE: usize = 3;
+    /// The head, and nothing else.
+    const MIN_SIZE: usize = 2;
 
     fn decode(
         d: &mut MemDecoder<'_>,
         prev_index: Option<SerializedDepNodeIndex>,
         nodes: &IndexSlice<SerializedDepNodeIndex, DepNode>,
         value_fingerprints: &IndexSlice<SerializedDepNodeIndex, Fingerprint>,
+        kind_flags: &mut KindFlags,
     ) -> Self {
         let head = NodeHead(u16::from_le_bytes(d.read_array()));
-        let flags = d.read_u8();
+        let kind = head.kind().as_usize();
+        let flags = if head.same_flags() {
+            kind_flags.0[kind].expect("dep graph head repeats flags that no earlier node has")
+                | FLAG_INDEX_IS_NEXT
+        } else {
+            let flags = d.read_u8();
+            if flags & FLAG_EDGES_RESTART != 0 {
+                kind_flags.clear();
+            }
+            flags
+        };
+        kind_flags.0[kind] = Some(flags & KIND_FLAGS);
 
         let index = if flags & FLAG_INDEX_IS_NEXT != 0 {
             let prev = prev_index.expect("dep graph node refers to a missing previous node");
@@ -559,16 +587,22 @@ impl NodeRecord {
         let num_edges = head.len().unwrap_or_else(|| d.read_u32());
         let node = DepNode { kind: head.kind(), key_fingerprint };
         let edges_restart = flags & FLAG_EDGES_RESTART != 0;
-        NodeRecord { head, index, node, value_fingerprint, num_edges, edges_restart }
+        NodeRecord { index, node, value_fingerprint, num_edges, edges_restart }
     }
 
-    /// Reads this node's edge targets and appends them to `out` at the head's byte width.
-    /// `history` holds the targets of the block so far, for back-references.
-    fn decode_edges(&self, d: &mut MemDecoder<'_>, out: &mut Vec<u8>, history: &mut Vec<u32>) {
+    /// Reads this node's edge targets and appends them to `out` at the byte width of the
+    /// largest, which it returns. `history` holds the targets of the block so far, for
+    /// back-references.
+    fn decode_edges(
+        &self,
+        d: &mut MemDecoder<'_>,
+        out: &mut Vec<u8>,
+        history: &mut Vec<u32>,
+    ) -> usize {
         if self.edges_restart {
             history.clear();
         }
-        let width = self.head.bytes_per_index();
+        let first = history.len();
         let mut prev = self.index.as_u32() as i64;
         for _ in 0..self.num_edges {
             let code = d.read_u64();
@@ -586,9 +620,14 @@ impl NodeRecord {
             };
             let target = u32::try_from(target).expect("dep graph edge target out of range");
             history.push(target);
-            out.extend_from_slice(&target.to_le_bytes()[..width]);
             prev = i64::from(target);
         }
+        let targets = &history[first..];
+        let width = edge_width(targets);
+        for target in targets {
+            out.extend_from_slice(&target.to_le_bytes()[..width]);
+        }
+        width
     }
 
     fn decode_ref(
@@ -645,6 +684,7 @@ struct EncoderRefs {
     edge_positions: FxHashMap<u32, u32>,
     /// The number of edges in the unflushed buffer.
     edge_count: u32,
+    kind_flags: KindFlags,
 }
 
 impl EncoderRefs {
@@ -656,6 +696,7 @@ impl EncoderRefs {
             values: FingerprintRefs::new(),
             edge_positions: FxHashMap::default(),
             edge_count: 0,
+            kind_flags: KindFlags::new(),
         }
     }
 }
@@ -693,9 +734,6 @@ impl NodeInfo<'_> {
     fn encode(&self, e: &mut MemEncoder, index: DepNodeIndex, refs: &mut EncoderRefs) -> NodeBytes {
         let start = e.position();
         let NodeInfo { ref node, value_fingerprint, edges } = *self;
-        // The largest index picks the byte width of the edge list.
-        let edge_max = edges.iter().map(|e| e.as_u32()).max().unwrap_or(0);
-        let head = NodeHead::new(node.kind, edge_max, edges.len());
 
         let index = index.as_u32();
         let key_fingerprint: Fingerprint = node.key_fingerprint.into();
@@ -724,6 +762,7 @@ impl NodeInfo<'_> {
             flags |= FLAG_EDGES_RESTART;
             refs.edge_positions.clear();
             refs.edge_count = 0;
+            refs.kind_flags.clear();
         }
         if key_is_absent {
             flags |= FLAG_KEY_IS_ABSENT;
@@ -738,8 +777,14 @@ impl NodeInfo<'_> {
             flags |= FLAG_VALUE_IS_REF;
         }
 
+        let kind_flags = &mut refs.kind_flags.0[node.kind.as_usize()];
+        let same_flags = index_is_next && !edges_restart && *kind_flags == Some(flags & KIND_FLAGS);
+        *kind_flags = Some(flags & KIND_FLAGS);
+        let head = NodeHead::new(node.kind, edges.len(), same_flags);
         e.write_array(head.0.to_le_bytes());
-        e.emit_u8(flags);
+        if !same_flags {
+            e.emit_u8(flags);
+        }
         if !index_is_next {
             e.write_array(index.to_le_bytes());
         }

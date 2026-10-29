@@ -11,6 +11,11 @@ fn val(n: u64) -> Fingerprint {
     short_value_fingerprint(fp(n))
 }
 
+/// Kinds that store their key, unlike an anon kind.
+fn keyed_kinds() -> [u16; 4] {
+    [DepKind::Red, DepKind::type_of, DepKind::generics_of, DepKind::def_kind].map(|k| k.as_u16())
+}
+
 fn node(kind: u16, key: u64) -> DepNode {
     DepNode { kind: DepKind::from_u16(kind), key_fingerprint: fp(key).into() }
 }
@@ -39,8 +44,9 @@ fn round_trip(entries: &[(u32, DepNode, Fingerprint, Vec<u32>)], flush_before: &
     let mut d = MemDecoder::new(&data, 0).unwrap();
     let mut prev_index = None;
     let mut history = Vec::new();
+    let mut kind_flags = KindFlags::new();
     for (index, node, value, edges) in entries {
-        let record = NodeRecord::decode(&mut d, prev_index, &nodes, &values);
+        let record = NodeRecord::decode(&mut d, prev_index, &nodes, &values, &mut kind_flags);
         assert_eq!(record.index.as_u32(), *index);
         if node.kind.is_anon() {
             assert_eq!(record.node.kind, node.kind);
@@ -50,9 +56,10 @@ fn round_trip(entries: &[(u32, DepNode, Fingerprint, Vec<u32>)], flush_before: &
         }
         assert_eq!(record.value_fingerprint, *value);
         assert_eq!(record.num_edges as usize, edges.len());
-        let width = record.head.bytes_per_index();
         let mut raw = Vec::new();
-        record.decode_edges(&mut d, &mut raw, &mut history);
+        let width = record.decode_edges(&mut d, &mut raw, &mut history);
+        let largest = edges.iter().copied().max().unwrap_or(0);
+        assert_eq!(width, (4 - largest.leading_zeros() as usize / 8).max(1));
         assert_eq!(raw.len(), width * edges.len());
         for (chunk, &edge) in raw.chunks(width).zip(edges) {
             let mut bytes = [0u8; 4];
@@ -128,28 +135,50 @@ fn anon_key_is_not_stored() {
 
 #[test]
 fn key_that_shares_its_crate_half_is_stored_short() {
-    let red = DepKind::Red.as_u16();
-    let crate_key = |local: u64| DepNode {
-        kind: DepKind::from_u16(red),
+    // A different kind for each node, so that no head leaves its flags out.
+    let [a, b, c, d] = keyed_kinds();
+    let crate_key = |kind: u16, local: u64| DepNode {
+        kind: DepKind::from_u16(kind),
         key_fingerprint: Fingerprint::new(0x1234_5678_9ABC_DEF0u64, local).into(),
     };
     let shared = vec![
-        (0, crate_key(1), Fingerprint::ZERO, vec![]),
-        (1, crate_key(2), Fingerprint::ZERO, vec![]),
+        (0, crate_key(a, 1), Fingerprint::ZERO, vec![]),
+        (1, crate_key(b, 2), Fingerprint::ZERO, vec![]),
         // An unrelated key in between does not break the reference.
-        (2, node(red, 9), Fingerprint::ZERO, vec![]),
-        (3, crate_key(3), Fingerprint::ZERO, vec![]),
+        (2, node(c, 9), Fingerprint::ZERO, vec![]),
+        (3, crate_key(d, 3), Fingerprint::ZERO, vec![]),
     ];
     let unshared = vec![
-        (0, node(red, 1), Fingerprint::ZERO, vec![]),
-        (1, node(red, 2), Fingerprint::ZERO, vec![]),
-        (2, node(red, 9), Fingerprint::ZERO, vec![]),
-        (3, node(red, 3), Fingerprint::ZERO, vec![]),
+        (0, node(a, 1), Fingerprint::ZERO, vec![]),
+        (1, node(b, 2), Fingerprint::ZERO, vec![]),
+        (2, node(c, 9), Fingerprint::ZERO, vec![]),
+        (3, node(d, 3), Fingerprint::ZERO, vec![]),
     ];
     let shared_len = round_trip(&shared, &[]);
     let unshared_len = round_trip(&unshared, &[]);
     // Each of those later crate keys keeps several bytes and writes a one-byte distance.
     assert_eq!(unshared_len - shared_len, 2 * 7, "{shared_len} vs {unshared_len} bytes");
+}
+
+#[test]
+fn head_leaves_out_the_flags_of_the_last_node_of_its_kind() {
+    let [a, b, c, _] = keyed_kinds();
+    let same_kind = vec![
+        (0, node(a, 1), val(1), vec![]),
+        (1, node(a, 2), val(2), vec![0]),
+        (2, node(a, 3), val(3), vec![1]),
+    ];
+    let other_kinds = vec![
+        (0, node(a, 1), val(1), vec![]),
+        (1, node(b, 2), val(2), vec![0]),
+        (2, node(c, 3), val(3), vec![1]),
+    ];
+    let same = round_trip(&same_kind, &[]);
+    let other = round_trip(&other_kinds, &[]);
+    assert_eq!(other - same, 2, "{same} vs {other} bytes");
+    // A flush starts a block, and the first node of a block writes its flags again.
+    let flushed = round_trip(&same_kind, &[2]);
+    assert!(flushed > same, "{flushed} vs {same} bytes");
 }
 
 #[test]
