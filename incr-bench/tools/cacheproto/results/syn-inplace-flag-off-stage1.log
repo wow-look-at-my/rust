@@ -1,0 +1,4 @@
+run 1: wall 784 ms persist_result_cache 0.095s serialize_result_cache 0.029s query-cache.bin 8022086 B query-values.bin 0 B dep-graph.bin 10934400 B
+run 2: wall 856 ms persist_result_cache 0.086s serialize_result_cache 0.029s query-cache.bin 8022086 B query-values.bin 0 B dep-graph.bin 10934400 B
+run 3: wall 777 ms persist_result_cache 0.086s serialize_result_cache 0.029s query-cache.bin 8022086 B query-values.bin 0 B dep-graph.bin 10934400 B
+EXIT 0

@@ -3,12 +3,13 @@ use rustc_data_structures::unord::UnordMap;
 #[expect(unused_imports, reason = "used by doc comments")]
 use rustc_middle::dep_graph::DepKindVTable;
 use rustc_middle::dep_graph::{
-    DepGraphData, DepNode, DepNodeIndex, DepNodeKey, SerializedDepNodeIndex,
+    DepGraphData, DepKind, DepNode, DepNodeIndex, DepNodeKey, SerializedDepNodeIndex,
 };
 use rustc_middle::query::erase::{Erasable, Erased};
 use rustc_middle::query::on_disk_cache::{CacheDecoder, CacheEncoder};
 use rustc_middle::query::{QueryCache, QueryState, QueryVTable, erase};
 use rustc_middle::ty::TyCtxt;
+use rustc_middle::ty::codec::TyEncoder;
 use rustc_middle::verify_ich::incremental_verify_ich;
 use rustc_serialize::{Decodable, Encodable};
 use rustc_span::bug;
@@ -20,27 +21,57 @@ fn all_inactive<'tcx, K>(state: &QueryState<'tcx, K>) -> bool {
 }
 
 pub(crate) fn encode_query_values<'tcx>(tcx: TyCtxt<'tcx>, encoder: &mut CacheEncoder<'tcx>) {
+    if tcx.sess.opts.unstable_opts.incremental_info
+        && let Some(Some(prev)) = tcx.prev_metadata.get()
+    {
+        prev.report();
+    }
+    let info = tcx.sess.opts.unstable_opts.incremental_info;
+    let mut sizes = Vec::new();
     for_each_query_vtable!(CACHE_ON_DISK, tcx, |query| {
-        encode_query_values_inner(tcx, query, encoder)
+        let start = encoder.position();
+        let count = encode_query_values_inner(tcx, query, encoder);
+        if info {
+            sizes.push((encoder.position() - start, count, query.name));
+        }
     });
+    if info {
+        // A type shorthand counts against the query that encodes the type first.
+        sizes.sort_unstable_by(|a, b| b.cmp(a));
+        for (bytes, count, name) in sizes.into_iter().take(20).filter(|s| s.0 > 0) {
+            eprintln!("[incremental] query cache bytes: {name} {count} {bytes}");
+        }
+    }
 }
 
 fn encode_query_values_inner<'tcx, C, V>(
     tcx: TyCtxt<'tcx>,
     query: &'tcx QueryVTable<'tcx, C>,
     encoder: &mut CacheEncoder<'tcx>,
-) where
+) -> usize
+where
     C: QueryCache<Value = Erased<V>>,
     V: Erasable + Encodable<CacheEncoder<'tcx>>,
 {
+    let mut count = 0;
     let _timer = tcx.prof.generic_activity_with_arg("encode_query_results_for", query.name);
 
     assert!(all_inactive(&query.state));
+    let in_metadata = tcx.mir_in_metadata.get().and_then(|sets| sets.for_kind(query.dep_kind));
     query.cache.for_each(&mut |key, value, dep_node| {
+        if let Some(in_metadata) = in_metadata
+            && let Some(def_id) = DepNode::construct(tcx, query.dep_kind, key).extract_def_id(tcx)
+            && let Some(def_id) = def_id.as_local()
+            && in_metadata.contains(&def_id)
+        {
+            return;
+        }
         if query.will_cache_on_disk_for_key(*key) {
             encoder.encode_query_value::<V>(dep_node, &erase::restore_val::<V>(*value));
+            count += 1;
         }
     });
+    count
 }
 
 pub(crate) fn verify_query_key_hashes<'tcx>(tcx: TyCtxt<'tcx>) {
@@ -139,6 +170,21 @@ pub(crate) fn promote_from_disk_inner<'tcx, C: QueryCache>(
     prof_timer.finish_with_query_invocation_id(dep_node_index.into());
 
     let Some(value) = value else {
+        // A previous session under `-Z incremental-uncache` did not write
+        // this kind.
+        if tcx.sess.opts.unstable_opts.incremental_uncache.is_some() {
+            return;
+        }
+        // Under `-Z incremental-rmeta-reuse` the metadata holds some MIR in place of the query
+        // cache.
+        if tcx.sess.opts.unstable_opts.incremental_rmeta_reuse
+            && matches!(
+                query.dep_kind,
+                DepKind::optimized_mir | DepKind::mir_for_ctfe | DepKind::promoted_mir
+            )
+        {
+            return;
+        }
         // The key is cache-on-disk and its node is green, so a value must be on disk.
         bug!("failed to load disk-cached value for green node {dep_node:?}");
     };

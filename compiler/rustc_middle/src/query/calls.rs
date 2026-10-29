@@ -123,14 +123,20 @@ impl<'tcx> TyCtxt<'tcx> {
 ///
 /// (Also performs some associated bookkeeping, if a value was found.)
 #[inline(always)]
-fn try_get_cached<'tcx, C>(tcx: TyCtxt<'tcx>, cache: &C, key: C::Key) -> Option<C::Value>
+fn try_get_cached<'tcx, C>(
+    tcx: TyCtxt<'tcx>,
+    query: &'tcx QueryVTable<'tcx, C>,
+    key: C::Key,
+) -> Option<C::Value>
 where
     C: QueryCache,
 {
-    match cache.lookup(&key) {
+    match query.cache.lookup(&key) {
         Some((value, index)) => {
             tcx.prof.query_cache_hit(index.into());
-            tcx.dep_graph.read_index(index);
+            if !query.global_input {
+                tcx.dep_graph.read_index(index);
+            }
             Some(value)
         }
         None => None,
@@ -149,7 +155,7 @@ pub(crate) fn query_get_at<'tcx, C>(
 where
     C: QueryCache,
 {
-    match try_get_cached(tcx, &query.cache, key) {
+    match try_get_cached(tcx, query, key) {
         Some(value) => value,
         None => (query.execute_query_fn)(tcx, span, key, QueryMode::Get).unwrap(),
     }
@@ -164,7 +170,7 @@ pub(crate) fn query_ensure_ok<'tcx, C>(
 ) where
     C: QueryCache,
 {
-    match try_get_cached(tcx, &query.cache, key) {
+    match try_get_cached(tcx, query, key) {
         Some(_value) => {}
         None => {
             (query.execute_query_fn)(tcx, DUMMY_SP, key, QueryMode::EnsureOk);
@@ -191,7 +197,7 @@ where
         }
     };
 
-    match try_get_cached(tcx, &query.cache, key) {
+    match try_get_cached(tcx, query, key) {
         Some(value) => convert(value),
         None => {
             match (query.execute_query_fn)(tcx, DUMMY_SP, key, QueryMode::EnsureOk) {
@@ -224,7 +230,7 @@ pub(crate) fn query_feed<'tcx, C>(
     let format_value = query.format_value;
 
     // Check whether the in-memory cache already has a value for this key.
-    match try_get_cached(tcx, &query.cache, key) {
+    match try_get_cached(tcx, query, key) {
         Some(old) => {
             // The query already has a cached value for this key.
             // That's OK if both values are the same, i.e. they have the same hash,

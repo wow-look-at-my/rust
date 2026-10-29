@@ -25,7 +25,9 @@ use {super::debug::EdgeFilter, std::env};
 
 use super::edges::{ReadsRecorder, SMALL_READS_MAX, TaskReads};
 use super::retained::RetainedDepGraph;
-use super::serialized::{GraphEncoder, SerializedDepGraph, SerializedDepNodeIndex};
+use super::serialized::{
+    GraphEncoder, SerializedDepGraph, SerializedDepNodeIndex, short_value_fingerprint,
+};
 use super::{DepKind, DepNode, WorkProductId, read_deps, with_deps};
 use crate::ich::StableHashState;
 use crate::ty::TyCtxt;
@@ -414,7 +416,7 @@ impl DepGraphData {
     ///
     /// FIXME: This could perhaps return a `WithDepNode` to ensure that the
     /// user of this function actually performs the read.
-    fn with_anon_task_inner<'tcx, OP, R>(
+    pub fn with_anon_task_inner<'tcx, OP, R>(
         &self,
         tcx: TyCtxt<'tcx>,
         dep_kind: DepKind,
@@ -520,6 +522,11 @@ impl DepGraph {
                         panic_on_forbidden_read(data, dep_node_index)
                     }
                 };
+                // This node has no deps and is green in every session, so an edge to it
+                // can never turn a reader red.
+                if dep_node_index == DepNodeIndex::SINGLETON_ZERO_DEPS_ANON_NODE {
+                    return;
+                }
                 let task_deps = &mut *task_deps;
 
                 if cfg!(debug_assertions) {
@@ -700,6 +707,15 @@ impl DepGraphData {
         matches!(self.colors.get(prev_index), DepNodeColor::Green(_))
     }
 
+    /// The current index of a previous-session node that is green, or `None`.
+    #[inline]
+    pub fn green_index(&self, prev_index: SerializedDepNodeIndex) -> Option<DepNodeIndex> {
+        match self.colors.get(prev_index) {
+            DepNodeColor::Green(index) => Some(index),
+            DepNodeColor::Red | DepNodeColor::Unknown => None,
+        }
+    }
+
     #[inline]
     pub fn prev_value_fingerprint_of(&self, prev_index: SerializedDepNodeIndex) -> Fingerprint {
         self.previous.value_fingerprint_for_index(prev_index)
@@ -794,6 +810,7 @@ impl DepGraphData {
         edges: &[DepNodeIndex],
         value_fingerprint: Option<Fingerprint>,
     ) -> DepNodeIndex {
+        let value_fingerprint = value_fingerprint.map(short_value_fingerprint);
         if let Some(prev_index) = self.previous.node_to_index_opt(&key) {
             // Determine the color and index of the new `DepNode`.
             let is_green = if let Some(value_fingerprint) = value_fingerprint {
@@ -914,7 +931,10 @@ impl DepGraphData {
 
         match self.colors.get(prev_index) {
             DepNodeColor::Green(dep_node_index) => Some((prev_index, dep_node_index)),
-            DepNodeColor::Red => None,
+            DepNodeColor::Red => {
+                self.explain_red(tcx, prev_index);
+                None
+            }
             DepNodeColor::Unknown => {
                 // This DepNode and the corresponding query invocation existed
                 // in the previous compilation session too, so we can try to
@@ -927,9 +947,39 @@ impl DepGraphData {
                 let result = self.try_mark_previous_green(tcx, prev_index, None, &mut edge_buf);
                 debug_assert!(edge_buf.is_empty());
                 self.green_edge_buf.set(edge_buf);
+                if result.is_none() {
+                    self.explain_red(tcx, prev_index);
+                }
                 result.map(|dep_node_index| (prev_index, dep_node_index))
             }
         }
+    }
+
+    /// Under `-Zincremental-explain-red`, prints why a node of a listed kind is not green. Each
+    /// node in the chain is the first red edge of the node before it.
+    #[cold]
+    fn explain_red<'tcx>(&self, tcx: TyCtxt<'tcx>, prev_index: SerializedDepNodeIndex) {
+        let Some(kinds) = &tcx.sess.opts.unstable_opts.incremental_explain_red else { return };
+        let node = self.previous.index_to_node(prev_index);
+        let kind = format!("{:?}", node.kind);
+        if !kinds.iter().any(|k| *k == kind) {
+            return;
+        }
+        let mut chain = vec![format!("{node:?}")];
+        let mut seen = FxHashSet::default();
+        let mut current = prev_index;
+        while chain.len() < 24 && seen.insert(current) {
+            let Some(next) = self
+                .previous
+                .edge_targets_from(current)
+                .find(|&dep| matches!(self.colors.get(dep), DepNodeColor::Red))
+            else {
+                break;
+            };
+            chain.push(format!("{:?}", self.previous.index_to_node(next)));
+            current = next;
+        }
+        eprintln!("[incremental] red: {}", chain.join(" <- "));
     }
 
     /// Try to mark a dep-node which existed in the previous compilation session as green.
@@ -1040,6 +1090,13 @@ impl DepGraph {
     /// current compilation session. Used in various assertions
     pub fn is_green(&self, dep_node: &DepNode) -> bool {
         matches!(self.node_color(dep_node), DepNodeColor::Green(_))
+    }
+
+    /// For a green node, the value fingerprint in the loaded dep graph. `None` for any other node.
+    pub fn green_value_fingerprint(&self, dep_node: &DepNode) -> Option<Fingerprint> {
+        let data = self.data()?;
+        let prev_index = data.previous.node_to_index_opt(dep_node)?;
+        data.is_index_green(prev_index).then(|| data.prev_value_fingerprint_of(prev_index))
     }
 
     pub fn assert_dep_node_not_yet_allocated_in_current_session<S: std::fmt::Display>(

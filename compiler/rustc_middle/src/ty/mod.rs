@@ -73,7 +73,8 @@ pub use self::consts::{
     const_lit_matches_ty,
 };
 pub use self::context::{
-    CtxtInterners, CurrentGcx, FreeRegionInfo, GlobalCtxt, Lift, TyCtxt, TyCtxtFeed, tls,
+    CtxtInterners, CurrentGcx, FreeRegionInfo, GlobalCtxt, Lift, MirInMetadata, PrevMetadata,
+    TyCtxt, TyCtxtFeed, tls,
 };
 pub use self::fold::*;
 pub use self::instance::{Instance, InstanceKind, ReifyReason, ShimKind};
@@ -1957,11 +1958,11 @@ impl<'tcx> TyCtxt<'tcx> {
         args: GenericArgsRef<'tcx>,
     ) -> Result<&'tcx CoroutineLayout<'tcx>, &'tcx LayoutError<'tcx>> {
         let coroutine_kind_ty = args.as_coroutine().kind_ty();
-        let mir = self.optimized_mir(def_id);
         let ty = || Ty::new_coroutine(self, def_id, args);
         // Regular coroutine
         if coroutine_kind_ty.is_unit() {
-            mir.coroutine_layout_raw().ok_or_else(|| self.layout_error(LayoutError::Unknown(ty())))
+            self.coroutine_layout_from_mir(def_id)
+                .ok_or_else(|| self.layout_error(LayoutError::Unknown(ty())))
         } else {
             // If we have a `Coroutine` that comes from an coroutine-closure,
             // then it may be a by-move or by-ref body.
@@ -1974,7 +1975,7 @@ impl<'tcx> TyCtxt<'tcx> {
             // If the types differ, then we must be getting the by-move body of
             // a by-ref coroutine.
             if identity_kind_ty == coroutine_kind_ty {
-                mir.coroutine_layout_raw()
+                self.coroutine_layout_from_mir(def_id)
                     .ok_or_else(|| self.layout_error(LayoutError::Unknown(ty())))
             } else {
                 assert_matches!(coroutine_kind_ty.to_opt_closure_kind(), Some(ClosureKind::FnOnce));
@@ -1982,8 +1983,7 @@ impl<'tcx> TyCtxt<'tcx> {
                     identity_kind_ty.to_opt_closure_kind(),
                     Some(ClosureKind::Fn | ClosureKind::FnMut)
                 );
-                self.optimized_mir(self.coroutine_by_move_body_def_id(def_id))
-                    .coroutine_layout_raw()
+                self.coroutine_layout_from_mir(self.coroutine_by_move_body_def_id(def_id))
                     .ok_or_else(|| self.layout_error(LayoutError::Unknown(ty())))
             }
         }
@@ -2401,6 +2401,9 @@ pub fn provide(providers: &mut Providers) {
         trait_impls_in_crate: trait_def::trait_impls_in_crate_provider,
         traits: trait_def::traits_provider,
         vtable_allocation: vtable::vtable_allocation_provider,
+        coroutine_layout_from_mir: |tcx, def_id| {
+            tcx.optimized_mir(def_id).coroutine_layout_raw().cloned()
+        },
         ..*providers
     };
 }

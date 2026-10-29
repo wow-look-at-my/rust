@@ -1,0 +1,15 @@
+trial 0: clean; found 1874477 missing 0 mismatched 0; 0 slots name an uncommitted generation; end 607627168 file 607627168
+trial 1: clean; found 1874477 missing 0 mismatched 0; 0 slots name an uncommitted generation; end 607627168 file 607627168
+trial 2: writer killed mid-write (accepted); found 1874477 missing 0 mismatched 0; 913 slots name an uncommitted generation; end 607977320 file 608540856
+trial 3: writer killed mid-write (accepted); found 1874477 missing 0 mismatched 0; 1868 slots name an uncommitted generation; end 607977320 file 608924072
+trial 4: writer killed mid-write (accepted); found 1874477 missing 0 mismatched 0; 1868 slots name an uncommitted generation; end 607977320 file 609307288
+trial 5: writer killed mid-write (accepted); found 1874477 missing 0 mismatched 0; 2518 slots name an uncommitted generation; end 607977320 file 610457128
+trial 6: writer killed mid-write (accepted); found 1874477 missing 0 mismatched 0; 2518 slots name an uncommitted generation; end 607977320 file 611606968
+trial 7: writer killed mid-write (accepted); found 1874477 missing 0 mismatched 0; 3289 slots name an uncommitted generation; end 607977320 file 612131352
+trial 8: writer killed mid-write (accepted); found 1874477 missing 0 mismatched 0; 3313 slots name an uncommitted generation; end 612655736 file 613127232
+trial 9: writer killed mid-write (accepted); found 1874477 missing 0 mismatched 0; 3862 slots name an uncommitted generation; end 613507984 file 613780192
+trial 10: writer killed mid-write (accepted); found 1874477 missing 0 mismatched 0; 4129 slots name an uncommitted generation; end 614160944 file 614433152
+trial 11: clean; found 1874477 missing 0 mismatched 0; 4125 slots name an uncommitted generation; end 615365864 file 615365864
+after one more committed writer: clean; found 1874477 missing 0 mismatched 0
+kill test: 12/12 trials left a valid file; 9 kills landed mid-write
+EXIT 0

@@ -1,10 +1,12 @@
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::{fmt, mem};
 
-use rustc_data_structures::fx::{FxHashMap, FxIndexSet};
+use rustc_data_structures::flock;
+use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexSet};
 use rustc_data_structures::memmap::Mmap;
 use rustc_data_structures::sync::{HashMapExt, Lock, RwLock};
 use rustc_data_structures::unhash::UnhashMap;
@@ -13,6 +15,7 @@ use rustc_hir::def_id::{CrateNum, DefId, DefIndex, LOCAL_CRATE, LocalDefId, Stab
 use rustc_hir::definitions::DefPathHash;
 use rustc_index::IndexVec;
 use rustc_macros::{Decodable, Encodable};
+use rustc_serialize::opaque::mem_encoder::MemEncoder;
 use rustc_serialize::opaque::{FileEncodeResult, FileEncoder, IntEncodedWithFixedSize, MemDecoder};
 use rustc_serialize::{ContextOrd, Decodable, Decoder, Encodable, Encoder};
 use rustc_session::Session;
@@ -29,10 +32,20 @@ use crate::ich::SourceSpanCache;
 use crate::mir::interpret::{AllocDecodingSession, AllocDecodingState};
 use crate::mir::{self, interpret};
 use crate::mono::MonoItem;
-use crate::ty::codec::{RefDecodable, TyDecoder, TyEncoder, forward_all_decoder_methods_to};
+use crate::ty::codec::{
+    RefDecodable, SHORTHAND_OFFSET, TyDecoder, TyEncoder, forward_all_decoder_methods_to,
+};
 use crate::ty::{self, Ty, TyCtxt};
 
 const TAG_FILE_FOOTER: u128 = 0xC0FFEE_C0FFEE_C0FFEE_C0FFEE_C0FFEE;
+/// The footer of a session file whose values live in the shared values and pool files.
+const TAG_FILE_FOOTER_INPLACE: u128 = 0xC0FFEE_C0FFEE_C0FFEE_C0FFEE_1F1AC2;
+
+/// The first bytes of a values file and of a pool file. An 8-byte id follows each.
+const VALUES_MAGIC: &[u8; 8] = b"RSQVALS2";
+const POOL_MAGIC: &[u8; 8] = b"RSQPOOL2";
+const HEADER_LEN: usize = 16;
+const POOL_FILENAME: &str = "query-pool.bin";
 
 // A normal span encoded with both location information and a `SyntaxContext`
 const TAG_FULL_SPAN: u8 = 0;
@@ -94,6 +107,106 @@ pub struct OnDiskCache {
     // we try to map an `ExpnHash` to its value in the current
     // compilation session.
     foreign_expn_data: UnhashMap<ExpnHash, u32>,
+
+    /// Set when the loaded `query-cache.bin` indexes the shared values file.
+    inplace: Option<InplaceState>,
+    /// The mapped pool file of `inplace`.
+    pool_data: RwLock<Option<Mmap>>,
+    /// What this session decoded from the pool. The save reuses those pool items.
+    pool_decoded: PoolDecoded,
+}
+
+/// What the loaded `query-cache.bin` records about the shared values and pool files.
+struct InplaceState {
+    values_id: u64,
+    /// The file length when the session committed. Later bytes are not its.
+    values_len: usize,
+    pool_id: u64,
+    pool_len: usize,
+    /// The pool length after the save that started this pool.
+    pool_base_len: usize,
+    query_values: Vec<IndexEntry>,
+    side_effects: Vec<IndexEntry>,
+}
+
+/// Pool items that this session decoded, by pool position.
+#[derive(Default)]
+struct PoolDecoded {
+    ctxts: Lock<FxHashMap<usize, SyntaxContext>>,
+    expns: Lock<FxHashMap<usize, ExpnId>>,
+    files: Lock<FxHashMap<usize, Arc<SourceFile>>>,
+    /// The pool position of each symbol, by symbol index.
+    symbols: Lock<FxHashMap<u32, usize>>,
+}
+
+/// One entry of the values file: the position of its alloc table and its byte
+/// length.
+#[derive(Clone, Copy)]
+struct IndexEntry {
+    index: SerializedDepNodeIndex,
+    pos: AbsoluteBytePos,
+    len: u32,
+}
+
+/// Index entries sorted by node index, with the index stored as a delta.
+fn encode_index_entries<E: Encoder>(e: &mut E, entries: &mut [IndexEntry]) {
+    entries.sort_unstable_by_key(|x| x.index.as_u32());
+    e.emit_usize(entries.len());
+    let mut prev = 0u32;
+    for x in entries.iter() {
+        e.emit_u32(x.index.as_u32() - prev);
+        e.emit_u64(x.pos.0);
+        e.emit_u32(x.len);
+        prev = x.index.as_u32();
+    }
+}
+
+/// An id for a fresh values file, so a session file never reads another values file
+/// that took the same path.
+fn new_values_id() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    let mut hasher = std::hash::DefaultHasher::new();
+    std::hash::Hash::hash(&(nanos, std::process::id()), &mut hasher);
+    std::hash::Hasher::finish(&hasher)
+}
+
+fn decode_index_entries<D: Decoder>(d: &mut D) -> Vec<IndexEntry> {
+    let n = d.read_usize();
+    let mut prev = 0u32;
+    (0..n)
+        .map(|_| {
+            prev += d.read_u32();
+            let pos = AbsoluteBytePos(d.read_u64());
+            IndexEntry { index: SerializedDepNodeIndex::from_u32(prev), pos, len: d.read_u32() }
+        })
+        .collect()
+}
+
+/// Reads the 16-byte header of the file at `path`, and the file length.
+fn read_header(path: &Path) -> Option<([u8; HEADER_LEN], u64)> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut header = [0u8; HEADER_LEN];
+    f.read_exact(&mut header).ok()?;
+    Some((header, f.metadata().ok()?.len()))
+}
+
+/// Maps the file at `path` if its header holds `magic` and `id` and it holds `len` bytes.
+fn map_checked(path: &Path, magic: &[u8; 8], id: u64, len: usize) -> Result<Mmap, ()> {
+    let file = std::fs::File::open(path).map_err(|_| ())?;
+    // SAFETY: Writers only append. A reader reads only its committed prefix.
+    let data = unsafe { Mmap::map(file) }.map_err(|_| ())?;
+    if data.len() < len
+        || len < HEADER_LEN
+        || data[..8] != magic[..]
+        || data[8..16] != id.to_le_bytes()
+    {
+        return Err(());
+    }
+    MemDecoder::new(&data[..len], 0)?;
+    Ok(data)
 }
 
 // This type is used only for serialization and deserialization.
@@ -155,7 +268,12 @@ impl OnDiskCache {
     ///
     /// The serialized cache has some basic integrity checks, if those checks indicate that the
     /// on-disk data is corrupt, an error is returned.
-    pub fn new(sess: &Session, data: Mmap, start_pos: usize) -> Result<Self, ()> {
+    pub fn new(
+        sess: &Session,
+        data: Mmap,
+        start_pos: usize,
+        values_path: &Path,
+    ) -> Result<Self, ()> {
         assert!(sess.opts.incremental.is_some());
 
         let mut decoder = MemDecoder::new(&data, start_pos)?;
@@ -166,6 +284,13 @@ impl OnDiskCache {
             .with_position(decoder.len() - IntEncodedWithFixedSize::ENCODED_SIZE, |decoder| {
                 IntEncodedWithFixedSize::decode(decoder).0 as usize
             });
+        match decoder.with_position(footer_pos, |decoder| u128::decode(decoder)) {
+            TAG_FILE_FOOTER => {}
+            TAG_FILE_FOOTER_INPLACE => {
+                return Self::new_inplace(&mut decoder, footer_pos, values_path);
+            }
+            _ => return Err(()),
+        }
         // Decode the file footer, which contains all the lookup tables, etc.
         let footer: Footer =
             decoder.with_position(footer_pos, |decoder| decode_tagged(decoder, TAG_FILE_FOOTER));
@@ -181,6 +306,47 @@ impl OnDiskCache {
             expn_data: footer.expn_data,
             foreign_expn_data: footer.foreign_expn_data,
             hygiene_context: Default::default(),
+            inplace: None,
+            pool_data: RwLock::new(None),
+            pool_decoded: Default::default(),
+        })
+    }
+
+    fn new_inplace(
+        decoder: &mut MemDecoder<'_>,
+        footer_pos: usize,
+        values_path: &Path,
+    ) -> Result<Self, ()> {
+        let state = decoder.with_position(footer_pos, |d| {
+            let _tag = u128::decode(d);
+            InplaceState {
+                values_id: d.read_u64(),
+                values_len: d.read_u64() as usize,
+                pool_id: d.read_u64(),
+                pool_len: d.read_u64() as usize,
+                pool_base_len: d.read_u64() as usize,
+                query_values: decode_index_entries(d),
+                side_effects: decode_index_entries(d),
+            }
+        });
+        let values = map_checked(values_path, VALUES_MAGIC, state.values_id, state.values_len)?;
+        let pool_path = values_path.with_file_name(POOL_FILENAME);
+        let pool = map_checked(&pool_path, POOL_MAGIC, state.pool_id, state.pool_len)?;
+        let mut cache = Self::new_empty();
+        cache.query_values_index = state.query_values.iter().map(|x| (x.index, x.pos)).collect();
+        cache.side_effects_index = state.side_effects.iter().map(|x| (x.index, x.pos)).collect();
+        cache.serialized_data = RwLock::new(Some(values));
+        cache.pool_data = RwLock::new(Some(pool));
+        cache.inplace = Some(state);
+        Ok(cache)
+    }
+
+    /// Whether this session keeps the entries of green nodes from the shared
+    /// values file without loading them.
+    pub fn inplace_keeps_entries(&self) -> bool {
+        self.inplace.as_ref().is_some_and(|s| {
+            let grown = s.pool_len.saturating_sub(s.pool_base_len);
+            grown * 4 <= s.pool_base_len.max(1 << 20)
         })
     }
 
@@ -196,6 +362,9 @@ impl OnDiskCache {
             expn_data: UnhashMap::default(),
             foreign_expn_data: UnhashMap::default(),
             hygiene_context: Default::default(),
+            inplace: None,
+            pool_data: RwLock::new(None),
+            pool_decoded: Default::default(),
         }
     }
 
@@ -203,6 +372,7 @@ impl OnDiskCache {
     pub fn close_serialized_data_mmap(&self) {
         // Obtain a write lock, and replace the mmap with None to drop it.
         *self.serialized_data.write() = None;
+        *self.pool_data.write() = None;
     }
 
     /// Serialize the current-session data that will be loaded by [`OnDiskCache`]
@@ -242,6 +412,7 @@ impl OnDiskCache {
                 source_span_cache: Default::default(),
                 query_values_index: Default::default(),
                 side_effects_index: Default::default(),
+                inplace: None,
             };
 
             // Encode query return values.
@@ -330,6 +501,179 @@ impl OnDiskCache {
         })
     }
 
+    /// Saves this session's values to the shared values file at `values_path`
+    /// and to the pool file beside it, and its index of them to `session`.
+    /// This ends up as the session's `query-cache.bin`. The entry of a green
+    /// node stays where an earlier session left it. Only the values of other
+    /// nodes are encoded. Their types, predicates, symbols, source files,
+    /// hygiene data and allocations go to the pool, which only grows, so the
+    /// positions in old entries stay valid. When more than a quarter of the
+    /// values file would be dead, the live entries are copied as bytes into a
+    /// fresh values file. When `inplace_keeps_entries` is false, every value
+    /// is encoded into a fresh values file and a fresh pool.
+    pub fn serialize_inplace(
+        &self,
+        tcx: TyCtxt<'_>,
+        mut session: FileEncoder<'static>,
+        values_path: &Path,
+    ) -> FileEncodeResult {
+        tcx.dep_graph.with_ignore(|| {
+            let lock_path = values_path.with_extension("lock");
+            // Another rustc of this crate holds the lock only while it saves, so wait for it.
+            let _lock = loop {
+                match flock::Lock::try_lock(&lock_path, true, true) {
+                    Ok(lock) => break Some(lock),
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(err) if flock::Lock::error_unsupported(&err) => break None,
+                    Err(err) => return Err((lock_path, err)),
+                }
+            };
+
+            let old = self.inplace.as_ref().filter(|_| self.inplace_keeps_entries());
+            let serialized_data = self.serialized_data.read();
+            let pool_data = self.pool_data.read();
+            let data = tcx.dep_graph.data().unwrap();
+            let carry = |old: &[IndexEntry]| -> (Vec<IndexEntry>, FxHashSet<DepNodeIndex>) {
+                let mut entries = Vec::with_capacity(old.len());
+                let mut set = FxHashSet::default();
+                for x in old {
+                    if let Some(current) = data.green_index(x.index) {
+                        let index = SerializedDepNodeIndex::from_curr_for_serialization(current);
+                        entries.push(IndexEntry { index, ..*x });
+                        set.insert(current);
+                    }
+                }
+                (entries, set)
+            };
+            let (mut query_values, carried_values) =
+                carry(old.map_or(&[][..], |i| &i.query_values));
+            let (mut side_effects, carried_side_effects) =
+                carry(old.map_or(&[][..], |i| &i.side_effects));
+            let live: u64 = query_values.iter().chain(&side_effects).map(|x| x.len as u64).sum();
+
+            // A file on disk that another session replaced since this session loaded it
+            // has a different id. This session then writes a fresh copy of what it loaded.
+            let on_disk = |path: &Path, magic: &[u8; 8], id: u64, len: usize| {
+                read_header(path).filter(|(header, file_len)| {
+                    header[..8] == magic[..]
+                        && header[8..] == id.to_le_bytes()
+                        && *file_len >= len as u64
+                })
+            };
+
+            let pool_path = values_path.with_file_name(POOL_FILENAME);
+            let pool_tmp = pool_path.with_extension("tmp");
+            let pool_appended = old
+                .is_some_and(|o| on_disk(&pool_path, POOL_MAGIC, o.pool_id, o.pool_len).is_some());
+            let (pool, pool_id) = if pool_appended {
+                let pool = FileEncoder::append(&pool_path).map_err(|e| (pool_path.clone(), e))?;
+                (pool, old.unwrap().pool_id)
+            } else {
+                let mut pool = FileEncoder::new(&pool_tmp).map_err(|e| (pool_tmp.clone(), e))?;
+                let id = new_values_id();
+                pool.emit_raw_bytes(POOL_MAGIC);
+                pool.emit_raw_bytes(&id.to_le_bytes());
+                // The carried entries hold positions in the loaded pool, so a fresh pool
+                // starts as a copy of it.
+                if let (Some(o), Some(loaded)) = (old, &*pool_data) {
+                    pool.emit_raw_bytes(&loaded[HEADER_LEN..o.pool_len]);
+                }
+                (pool, id)
+            };
+
+            let values_appended = old.is_some_and(|o| {
+                on_disk(values_path, VALUES_MAGIC, o.values_id, o.values_len)
+                    .is_some_and(|(_, file_len)| (file_len - live) * 4 <= file_len)
+            });
+            let values_tmp = values_path.with_extension("tmp");
+            let (encoder, values_id) = if values_appended {
+                let encoder =
+                    FileEncoder::append(values_path).map_err(|e| (values_path.into(), e))?;
+                (encoder, old.unwrap().values_id)
+            } else {
+                let mut encoder =
+                    FileEncoder::new(&values_tmp).map_err(|e| (values_tmp.clone(), e))?;
+                let id = new_values_id();
+                encoder.emit_raw_bytes(VALUES_MAGIC);
+                encoder.emit_raw_bytes(&id.to_le_bytes());
+                let loaded = match (&*serialized_data, old) {
+                    (Some(data), Some(o)) => &data[..o.values_len],
+                    _ => &[],
+                };
+                for x in query_values.iter_mut().chain(side_effects.iter_mut()) {
+                    let mut d = MemDecoder::new(loaded, x.pos.to_usize()).unwrap();
+                    let back = d.read_usize();
+                    let start = x.pos.to_usize() - back;
+                    let new_start = encoder.position();
+                    encoder.emit_raw_bytes(&loaded[start..start + x.len as usize]);
+                    x.pos = AbsoluteBytePos::new(new_start + back);
+                }
+                (encoder, id)
+            };
+
+            let inplace = InplaceEncode {
+                pool,
+                stack: Vec::new(),
+                symbols: Default::default(),
+                ctxts: Default::default(),
+                expns: Default::default(),
+                expns_in_progress: Default::default(),
+                files: Default::default(),
+                carried_values,
+                carried_side_effects,
+                query_values: Vec::new(),
+                side_effects: Vec::new(),
+                reuse_decoded: old.is_some(),
+            };
+            let mut cache_encoder = CacheEncoder {
+                tcx,
+                encoder,
+                type_shorthands: Default::default(),
+                predicate_shorthands: Default::default(),
+                interpret_allocs: Default::default(),
+                caching_source_map_view: CachingSourceMapView::new(tcx.sess.source_map()),
+                file_to_file_index: Default::default(),
+                hygiene_context: Default::default(),
+                symbol_index_table: Default::default(),
+                source_span_cache: Default::default(),
+                query_values_index: Default::default(),
+                side_effects_index: Default::default(),
+                inplace: Some(Box::new(inplace)),
+            };
+            tcx.sess.time("encode_query_values", || tcx.encode_query_values(&mut cache_encoder));
+            for (&dep_node_index, side_effect) in tcx.query_system.side_effects.borrow().iter() {
+                cache_encoder.encode_side_effect(dep_node_index, side_effect);
+            }
+            let inplace = *cache_encoder.inplace.take().unwrap();
+            query_values.extend(inplace.query_values);
+            side_effects.extend(inplace.side_effects);
+            let mut pool = inplace.pool;
+            let pool_len = pool.finish()?;
+            let values_len = cache_encoder.finish()?;
+            if !pool_appended {
+                std::fs::rename(&pool_tmp, &pool_path).map_err(|e| (pool_path.clone(), e))?;
+            }
+            if !values_appended {
+                std::fs::rename(&values_tmp, values_path).map_err(|e| (values_path.into(), e))?;
+            }
+            let pool_base_len = old.map_or(pool_len, |o| o.pool_base_len);
+
+            let footer_pos = session.position() as u64;
+            session.emit_u128(TAG_FILE_FOOTER_INPLACE);
+            session.emit_u64(values_id);
+            session.emit_u64(values_len as u64);
+            session.emit_u64(pool_id);
+            session.emit_u64(pool_len as u64);
+            session.emit_u64(pool_base_len as u64);
+            encode_index_entries(&mut session, &mut query_values);
+            encode_index_entries(&mut session, &mut side_effects);
+            IntEncodedWithFixedSize(footer_pos).encode(&mut session);
+            session.finish()
+        })
+    }
+
     /// Loads a `QuerySideEffect` created during the previous compilation session.
     pub(crate) fn load_side_effect(
         &self,
@@ -363,8 +707,43 @@ impl OnDiskCache {
         T: for<'a> Decodable<CacheDecoder<'a, 'tcx>>,
     {
         let pos = index.get(&dep_node_index).cloned()?;
+        if self.inplace.is_some() {
+            return Some(self.with_entry_decoder(tcx, pos, |decoder| T::decode(decoder)));
+        }
         let value = self.with_decoder(tcx, pos, |decoder| decode_tagged(decoder, dep_node_index));
         Some(value)
+    }
+
+    /// Decodes one entry of the values file. `pos` is the position of the entry's alloc table.
+    fn with_entry_decoder<'tcx, T, F: for<'s> FnOnce(&mut CacheDecoder<'s, 'tcx>) -> T>(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        pos: AbsoluteBytePos,
+        f: F,
+    ) -> T {
+        let state = self.inplace.as_ref().unwrap();
+        let serialized_data = self.serialized_data.read();
+        let pool_data = self.pool_data.read();
+        let data = &serialized_data.as_deref().unwrap()[..state.values_len];
+        let pool = MemDecoder::new(&pool_data.as_deref().unwrap()[..state.pool_len], 0).unwrap();
+        let mut table = MemDecoder::new(data, pos.to_usize()).unwrap();
+        let start = pos.to_usize() - table.read_usize();
+        let alloc_decoding_state = AllocDecodingState::new(Vec::<u64>::decode(&mut table));
+        let mut decoder = CacheDecoder {
+            tcx,
+            opaque: MemDecoder::new(data, start).unwrap(),
+            pool: Some(pool),
+            pool_decoded: &self.pool_decoded,
+            file_index_to_file: &self.file_index_to_file,
+            file_index_to_stable_id: &self.file_index_to_stable_id,
+            alloc_decoding_session: alloc_decoding_state.new_decoding_session(),
+            syntax_contexts: &self.syntax_contexts,
+            expn_data: &self.expn_data,
+            foreign_expn_data: &self.foreign_expn_data,
+            hygiene_context: &self.hygiene_context,
+            source_span_cache: SourceSpanCache::default(),
+        };
+        f(&mut decoder)
     }
 
     fn with_decoder<'a, 'tcx, T, F: for<'s> FnOnce(&mut CacheDecoder<'s, 'tcx>) -> T>(
@@ -381,6 +760,8 @@ impl OnDiskCache {
             tcx,
             opaque: MemDecoder::new(serialized_data.as_deref().unwrap_or(&[]), pos.to_usize())
                 .unwrap(),
+            pool: None,
+            pool_decoded: &self.pool_decoded,
             file_index_to_file: &self.file_index_to_file,
             file_index_to_stable_id: &self.file_index_to_stable_id,
             alloc_decoding_session: self.alloc_decoding_state.new_decoding_session(),
@@ -402,6 +783,9 @@ impl OnDiskCache {
 pub struct CacheDecoder<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
     opaque: MemDecoder<'a>,
+    /// The pool file, when `opaque` is an entry of the values file.
+    pool: Option<MemDecoder<'a>>,
+    pool_decoded: &'a PoolDecoded,
     file_index_to_file: &'a Lock<FxHashMap<SourceFileIndex, Arc<SourceFile>>>,
     file_index_to_stable_id: &'a FxHashMap<SourceFileIndex, EncodedSourceFileId>,
     alloc_decoding_session: AllocDecodingSession<'a>,
@@ -417,28 +801,56 @@ impl<'a, 'tcx> CacheDecoder<'a, 'tcx> {
     fn file_index_to_file(&self, index: SourceFileIndex) -> Arc<SourceFile> {
         let CacheDecoder { tcx, file_index_to_file, file_index_to_stable_id, .. } = *self;
 
-        Arc::clone(file_index_to_file.borrow_mut().entry(index).or_insert_with(|| {
-            let source_file_id = &file_index_to_stable_id[&index];
-            let source_file_cnum = tcx.stable_crate_id_to_crate_num(source_file_id.stable_crate_id);
+        Arc::clone(
+            file_index_to_file.borrow_mut().entry(index).or_insert_with(|| {
+                Self::resolve_source_file(tcx, &file_index_to_stable_id[&index])
+            }),
+        )
+    }
 
-            // If this `SourceFile` is from a foreign crate, then make sure
-            // that we've imported all of the source files from that crate.
-            // This has usually already been done during macro invocation.
-            // However, when encoding query results like `TypeckResults`,
-            // we might encode an `AdtDef` for a foreign type (because it
-            // was referenced in the body of the function). There is no guarantee
-            // that we will load the source files from that crate during macro
-            // expansion, so we use `import_source_files` to ensure that the foreign
-            // source files are actually imported before we call `source_file_by_stable_id`.
-            if source_file_cnum != LOCAL_CRATE {
-                self.tcx.import_source_files(source_file_cnum);
-            }
+    /// The source file of a source file item of the pool at `pos`.
+    fn pool_file(&mut self, pos: usize) -> Arc<SourceFile> {
+        if let Some(file) = self.pool_decoded.files.lock().get(&pos) {
+            return Arc::clone(file);
+        }
+        let id = self.with_position(pos, |d| EncodedSourceFileId::decode(d));
+        let file = Self::resolve_source_file(self.tcx, &id);
+        self.pool_decoded.files.lock().insert(pos, Arc::clone(&file));
+        file
+    }
 
-            tcx.sess
-                .source_map()
-                .source_file_by_stable_id(source_file_id.stable_source_file_id)
-                .expect("failed to lookup `SourceFile` in new context")
-        }))
+    /// Decodes the expansion of an expansion item of the pool, at the decoder position.
+    fn decode_pool_expn(&mut self) -> ExpnId {
+        let hash = ExpnHash::decode(self);
+        if let Some(expn_id) = ExpnId::from_hash(hash) {
+            return expn_id;
+        }
+        let krate = self.tcx.stable_crate_id_to_crate_num(hash.stable_crate_id());
+        if self.read_u8() == 1 {
+            let data = ExpnData::decode(self);
+            rustc_span::hygiene::register_local_expn_id(data, hash)
+        } else {
+            let index_guess = self.read_u32();
+            self.tcx.expn_hash_to_expn_id(krate, index_guess, hash)
+        }
+    }
+
+    fn resolve_source_file(
+        tcx: TyCtxt<'tcx>,
+        source_file_id: &EncodedSourceFileId,
+    ) -> Arc<SourceFile> {
+        let source_file_cnum = tcx.stable_crate_id_to_crate_num(source_file_id.stable_crate_id);
+
+        // If this `SourceFile` is from a foreign crate, then make sure that
+        // we've imported all of the source files from that crate.
+        if source_file_cnum != LOCAL_CRATE {
+            tcx.import_source_files(source_file_cnum);
+        }
+
+        tcx.sess
+            .source_map()
+            .source_file_by_stable_id(source_file_id.stable_source_file_id)
+            .expect("failed to lookup `SourceFile` in new context")
     }
 
     // copy&paste impl from rustc_metadata
@@ -448,11 +860,20 @@ impl<'a, 'tcx> CacheDecoder<'a, 'tcx> {
         new_from_index: impl Fn(u32) -> S,
         read_and_intern_str_or_byte_str_this: impl Fn(&mut Self) -> S,
         read_and_intern_str_or_byte_str_opaque: impl Fn(&mut MemDecoder<'a>) -> S,
+        index_of: impl Fn(&S) -> u32,
     ) -> S {
         let tag = self.read_u8();
 
         match tag {
             SYMBOL_STR => read_and_intern_str_or_byte_str_this(self),
+            SYMBOL_OFFSET if self.pool.is_some() => {
+                let pos = self.read_usize();
+                let s = read_and_intern_str_or_byte_str_opaque(
+                    &mut self.pool.as_ref().unwrap().split_at(pos),
+                );
+                self.pool_decoded.symbols.lock().insert(index_of(&s), pos);
+                s
+            }
             SYMBOL_OFFSET => {
                 // read str offset
                 let pos = self.read_usize();
@@ -512,9 +933,13 @@ impl<'a, 'tcx> TyDecoder<'tcx> for CacheDecoder<'a, 'tcx> {
     where
         F: FnOnce(&mut Self) -> R,
     {
-        debug_assert!(pos < self.opaque.len());
-
-        let new_opaque = self.opaque.split_at(pos);
+        let new_opaque = match &self.pool {
+            Some(pool) => pool.split_at(pos),
+            None => {
+                debug_assert!(pos < self.opaque.len());
+                self.opaque.split_at(pos)
+            }
+        };
         let old_opaque = mem::replace(&mut self.opaque, new_opaque);
         let r = f(self);
         self.opaque = old_opaque;
@@ -551,6 +976,19 @@ impl<'a, 'tcx> Decodable<CacheDecoder<'a, 'tcx>> for Vec<u8> {
 
 impl<'a, 'tcx> SpanDecoder for CacheDecoder<'a, 'tcx> {
     fn decode_syntax_context(&mut self) -> SyntaxContext {
+        if self.pool.is_some() {
+            let pos = self.read_usize();
+            if pos == 0 {
+                return SyntaxContext::root();
+            }
+            if let Some(&ctxt) = self.pool_decoded.ctxts.lock().get(&pos) {
+                return ctxt;
+            }
+            let key = self.with_position(pos, |d| SyntaxContextKey::decode(d));
+            let ctxt = rustc_span::hygiene::syntax_context_from_key(key);
+            self.pool_decoded.ctxts.lock().insert(pos, ctxt);
+            return ctxt;
+        }
         let syntax_contexts = self.syntax_contexts;
         rustc_span::hygiene::decode_syntax_context(
             self,
@@ -568,6 +1006,18 @@ impl<'a, 'tcx> SpanDecoder for CacheDecoder<'a, 'tcx> {
     }
 
     fn decode_expn_id(&mut self) -> ExpnId {
+        if self.pool.is_some() {
+            let pos = self.read_usize();
+            if pos == 0 {
+                return ExpnId::root();
+            }
+            if let Some(&expn_id) = self.pool_decoded.expns.lock().get(&pos) {
+                return expn_id;
+            }
+            let expn_id = self.with_position(pos, |d| d.decode_pool_expn());
+            self.pool_decoded.expns.lock().insert(pos, expn_id);
+            return expn_id;
+        }
         let hash = ExpnHash::decode(self);
         if hash.is_root() {
             return ExpnId::root();
@@ -636,7 +1086,11 @@ impl<'a, 'tcx> SpanDecoder for CacheDecoder<'a, 'tcx> {
                 let col_lo = RelativeBytePos::decode(self);
                 let len = BytePos::decode(self);
 
-                let file_lo = self.file_index_to_file(file_lo_index);
+                let file_lo = if self.pool.is_some() {
+                    self.pool_file(file_lo_index.0 as usize)
+                } else {
+                    self.file_index_to_file(file_lo_index)
+                };
                 let lo = file_lo.lines()[line_lo - 1] + col_lo;
                 let lo = file_lo.absolute_position(lo);
                 let hi = lo + len;
@@ -683,6 +1137,7 @@ impl<'a, 'tcx> BlobDecoder for CacheDecoder<'a, 'tcx> {
             Symbol::new,
             |this| Symbol::intern(this.read_str()),
             |opaque| Symbol::intern(opaque.read_str()),
+            |sym| sym.as_u32(),
         )
     }
 
@@ -691,6 +1146,7 @@ impl<'a, 'tcx> BlobDecoder for CacheDecoder<'a, 'tcx> {
             ByteSymbol::new,
             |this| ByteSymbol::intern(this.read_byte_str()),
             |opaque| ByteSymbol::intern(opaque.read_byte_str()),
+            |sym| sym.as_u32(),
         )
     }
 
@@ -742,6 +1198,8 @@ impl_decodable_via_ref_decodable_for_foreign_types! {
     &'tcx [(ty::Clause<'tcx>, Span)],
     &'tcx [DefId],
     &'tcx [Spanned<MonoItem<'tcx>>],
+    &'tcx [rustc_middle::middle::dead_code::DeadCodeBodyUse],
+    &'tcx [rustc_middle::middle::reachable::ReachableBodyRef],
     &'tcx [ty::Variance],
     &'tcx rustc_ast::tokenstream::TokenStream,
     // tidy-alphabetical-end
@@ -765,6 +1223,28 @@ pub struct CacheEncoder<'tcx> {
 
     query_values_index: Vec<(SerializedDepNodeIndex, AbsoluteBytePos)>,
     side_effects_index: Vec<(SerializedDepNodeIndex, AbsoluteBytePos)>,
+
+    inplace: Option<Box<InplaceEncode>>,
+}
+
+/// The state of a session that writes entries to the values file and items to the pool.
+struct InplaceEncode {
+    pool: FileEncoder<'static>,
+    /// The pool items that are under construction, innermost last. Every write goes to the last one.
+    stack: Vec<MemEncoder>,
+    /// The pool position of each item that is in the pool, by what it encodes.
+    symbols: FxHashMap<u32, usize>,
+    ctxts: FxHashMap<SyntaxContext, usize>,
+    expns: FxHashMap<ExpnId, usize>,
+    expns_in_progress: FxHashSet<ExpnId>,
+    files: FxHashMap<*const SourceFile, usize>,
+    /// Green nodes whose entry from an earlier session stays in use.
+    carried_values: FxHashSet<DepNodeIndex>,
+    carried_side_effects: FxHashSet<DepNodeIndex>,
+    query_values: Vec<IndexEntry>,
+    side_effects: Vec<IndexEntry>,
+    /// Whether the pool items that this session decoded still have to go into the maps above.
+    reuse_decoded: bool,
 }
 
 impl<'tcx> fmt::Debug for CacheEncoder<'tcx> {
@@ -774,10 +1254,101 @@ impl<'tcx> fmt::Debug for CacheEncoder<'tcx> {
     }
 }
 
+// Starts a pool item.
+
 impl<'tcx> CacheEncoder<'tcx> {
     #[inline]
     fn source_file_index(&mut self, source_file: Arc<SourceFile>) -> SourceFileIndex {
+        if self.inplace.is_some() {
+            let key = Arc::as_ptr(&source_file);
+            let pos = match self.inplace.as_ref().unwrap().files.get(&key) {
+                Some(&pos) => pos,
+                None => {
+                    self.begin_pool_item();
+                    EncodedSourceFileId::new(self.tcx, &source_file).encode(self);
+                    let pos = self.end_pool_item();
+                    self.inplace.as_mut().unwrap().files.insert(key, pos);
+                    pos
+                }
+            };
+            return SourceFileIndex(pos.try_into().expect("query pool over 4 GiB"));
+        }
         self.file_to_file_index[&(&raw const *source_file)]
+    }
+
+    /// Records the pool items that this session decoded, so that they are reused rather
+    /// than written to the pool again.
+    fn reuse_decoded_pool_items(&mut self) {
+        let tcx = self.tcx;
+        let decoded = &tcx.query_system.on_disk_cache.as_ref().unwrap().pool_decoded;
+        let inplace = self.inplace.as_mut().unwrap();
+        #[allow(rustc::potential_query_instability)]
+        inplace.symbols.extend(decoded.symbols.lock().iter().map(|(&sym, &pos)| (sym, pos)));
+        #[allow(rustc::potential_query_instability)]
+        for (&pos, &ctxt) in decoded.ctxts.lock().iter() {
+            inplace.ctxts.insert(ctxt, pos);
+        }
+        #[allow(rustc::potential_query_instability)]
+        for (&pos, &expn) in decoded.expns.lock().iter() {
+            inplace.expns.insert(expn, pos);
+        }
+        #[allow(rustc::potential_query_instability)]
+        for (&pos, file) in decoded.files.lock().iter() {
+            inplace.files.insert(Arc::as_ptr(file), pos);
+        }
+        #[allow(rustc::potential_query_instability)]
+        for (key, &ty) in tcx.caches.ty_rcache.borrow().iter() {
+            if key.cnum.is_none() {
+                self.type_shorthands.insert(ty, key.pos + SHORTHAND_OFFSET);
+            }
+        }
+    }
+
+    /// Starts a pool item. Writes go to it until `end_pool_item`.
+    fn begin_pool_item(&mut self) {
+        self.inplace.as_mut().unwrap().stack.push(MemEncoder::new());
+    }
+
+    /// Writes the innermost pool item to the pool and returns its pool position.
+    fn end_pool_item(&mut self) -> usize {
+        let inplace = self.inplace.as_mut().unwrap();
+        let bytes = inplace.stack.pop().unwrap().finish();
+        let pos = inplace.pool.position();
+        inplace.pool.emit_raw_bytes(&bytes);
+        pos
+    }
+
+    #[inline]
+    fn top_item(&mut self) -> Option<&mut MemEncoder> {
+        self.inplace.as_mut().and_then(|inplace| inplace.stack.last_mut())
+    }
+
+    /// Writes `value` as one entry: the value, then a back pointer to the entry start, then
+    /// the pool positions of its allocations. Returns the position of the back pointer and
+    /// the entry length.
+    fn encode_entry<V: Encodable<Self>>(&mut self, value: &V) -> (AbsoluteBytePos, u32) {
+        if std::mem::take(&mut self.inplace.as_mut().unwrap().reuse_decoded) {
+            self.reuse_decoded_pool_items();
+        }
+        let start = self.encoder.position();
+        self.interpret_allocs.clear();
+        value.encode(self);
+        let mut interpret_alloc_index = Vec::new();
+        let mut idx = 0;
+        // Encoding an allocation can reference further allocations.
+        while idx < self.interpret_allocs.len() {
+            let id = self.interpret_allocs[idx];
+            self.begin_pool_item();
+            let tcx = self.tcx;
+            interpret::specialized_encode_alloc_id(self, tcx, id);
+            interpret_alloc_index.push(self.end_pool_item() as u64);
+            idx += 1;
+        }
+        let table_pos = self.encoder.position();
+        self.encoder.emit_usize(table_pos - start);
+        interpret_alloc_index.encode(&mut self.encoder);
+        let len = self.encoder.position() - start;
+        (AbsoluteBytePos::new(table_pos), len.try_into().expect("query value over 4 GiB"))
     }
 
     /// Encode something with additional information that allows to do some
@@ -796,14 +1367,30 @@ impl<'tcx> CacheEncoder<'tcx> {
     }
 
     pub fn encode_query_value<V: Encodable<Self>>(&mut self, index: DepNodeIndex, value: &V) {
+        if self.inplace.as_ref().is_some_and(|i| i.carried_values.contains(&index)) {
+            return;
+        }
         let index = SerializedDepNodeIndex::from_curr_for_serialization(index);
+        if self.inplace.is_some() {
+            let (pos, len) = self.encode_entry(value);
+            self.inplace.as_mut().unwrap().query_values.push(IndexEntry { index, pos, len });
+            return;
+        }
 
         self.query_values_index.push((index, AbsoluteBytePos::new(self.position())));
         self.encode_tagged(index, value);
     }
 
     fn encode_side_effect(&mut self, index: DepNodeIndex, side_effect: &QuerySideEffect) {
+        if self.inplace.as_ref().is_some_and(|i| i.carried_side_effects.contains(&index)) {
+            return;
+        }
         let index = SerializedDepNodeIndex::from_curr_for_serialization(index);
+        if self.inplace.is_some() {
+            let (pos, len) = self.encode_entry(side_effect);
+            self.inplace.as_mut().unwrap().side_effects.push(IndexEntry { index, pos, len });
+            return;
+        }
 
         self.side_effects_index.push((index, AbsoluteBytePos::new(self.position())));
         self.encode_tagged(index, side_effect);
@@ -817,8 +1404,21 @@ impl<'tcx> CacheEncoder<'tcx> {
     ) {
         // if symbol/byte symbol is predefined, emit tag and symbol index
         if Symbol::is_predefined(index) {
-            self.encoder.emit_u8(SYMBOL_PREDEFINED);
-            self.encoder.emit_u32(index);
+            self.emit_u8(SYMBOL_PREDEFINED);
+            self.emit_u32(index);
+        } else if let Some(inplace) = &self.inplace {
+            let pos = match inplace.symbols.get(&index) {
+                Some(&pos) => pos,
+                None => {
+                    self.begin_pool_item();
+                    emit_str_or_byte_str(self);
+                    let pos = self.end_pool_item();
+                    self.inplace.as_mut().unwrap().symbols.insert(index, pos);
+                    pos
+                }
+            };
+            self.emit_u8(SYMBOL_OFFSET);
+            self.emit_usize(pos);
         } else {
             // otherwise write it as string or as offset to it
             match self.symbol_index_table.entry(index) {
@@ -845,11 +1445,54 @@ impl<'tcx> CacheEncoder<'tcx> {
 
 impl<'tcx> SpanEncoder for CacheEncoder<'tcx> {
     fn encode_syntax_context(&mut self, syntax_context: SyntaxContext) {
+        if let Some(inplace) = &self.inplace {
+            // Zero is the root context, and no pool item is at position zero.
+            let pos = if syntax_context.is_root() {
+                0
+            } else if let Some(&pos) = inplace.ctxts.get(&syntax_context) {
+                pos
+            } else {
+                let key = rustc_span::hygiene::syntax_context_key(syntax_context);
+                self.begin_pool_item();
+                key.encode(self);
+                let pos = self.end_pool_item();
+                self.inplace.as_mut().unwrap().ctxts.insert(syntax_context, pos);
+                pos
+            };
+            return self.emit_usize(pos);
+        }
         self.hygiene_context.borrow_mut().enqueue_syntax_context_for_encoding(syntax_context);
         self.emit_u32(syntax_context.as_u32());
     }
 
     fn encode_expn_id(&mut self, expn_id: ExpnId) {
+        if let Some(inplace) = &self.inplace {
+            // Zero is the root expansion, and no pool item is at position zero.
+            let pos = if expn_id == ExpnId::root() {
+                0
+            } else if let Some(&pos) = inplace.expns.get(&expn_id) {
+                pos
+            } else {
+                if !self.inplace.as_mut().unwrap().expns_in_progress.insert(expn_id) {
+                    bug!("the data of expansion {expn_id:?} references the expansion itself");
+                }
+                self.begin_pool_item();
+                expn_id.expn_hash().encode(self);
+                if expn_id.krate == LOCAL_CRATE {
+                    self.emit_u8(1);
+                    expn_id.expn_data().encode(self);
+                } else {
+                    self.emit_u8(0);
+                    self.emit_u32(expn_id.local_id.as_u32());
+                }
+                let pos = self.end_pool_item();
+                let inplace = self.inplace.as_mut().unwrap();
+                inplace.expns_in_progress.remove(&expn_id);
+                inplace.expns.insert(expn_id, pos);
+                pos
+            };
+            return self.emit_usize(pos);
+        }
         self.hygiene_context.borrow_mut().schedule_expn_data_for_encoding(expn_id);
         expn_id.expn_hash().encode(self);
     }
@@ -928,7 +1571,10 @@ impl<'tcx> TyEncoder<'tcx> for CacheEncoder<'tcx> {
 
     #[inline]
     fn position(&self) -> usize {
-        self.encoder.position()
+        match self.inplace.as_ref().and_then(|inplace| inplace.stack.last()) {
+            Some(item) => item.position(),
+            None => self.encoder.position(),
+        }
     }
     #[inline]
     fn type_shorthands(&mut self) -> &mut FxHashMap<Ty<'tcx>, usize> {
@@ -944,6 +1590,18 @@ impl<'tcx> TyEncoder<'tcx> for CacheEncoder<'tcx> {
 
         index.encode(self);
     }
+
+    fn begin_full_encoding(&mut self) -> bool {
+        if self.inplace.is_none() {
+            return false;
+        }
+        self.begin_pool_item();
+        true
+    }
+
+    fn end_full_encoding(&mut self) -> usize {
+        self.end_pool_item()
+    }
 }
 
 macro_rules! encoder_methods {
@@ -951,7 +1609,10 @@ macro_rules! encoder_methods {
         $(
             #[inline]
             fn $name(&mut self, value: $ty) {
-                self.encoder.$name(value)
+                match self.top_item() {
+                    Some(item) => item.$name(value),
+                    None => self.encoder.$name(value),
+                }
             }
         )*
     }
@@ -982,6 +1643,9 @@ impl<'tcx> Encoder for CacheEncoder<'tcx> {
 // and the encoding traits currently work.
 impl<'tcx> Encodable<CacheEncoder<'tcx>> for [u8] {
     fn encode(&self, e: &mut CacheEncoder<'tcx>) {
-        self.encode(&mut e.encoder);
+        match e.top_item() {
+            Some(item) => self.encode(item),
+            None => self.encode(&mut e.encoder),
+        }
     }
 }

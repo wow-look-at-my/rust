@@ -46,6 +46,7 @@ use crate::rmeta::table::IsDefault;
 use crate::rmeta::*;
 
 mod cstore_impl;
+pub(super) mod prev_session;
 
 /// A reference to the raw binary version of crate metadata.
 /// This struct applies [`MemDecoder`]'s validation when constructed
@@ -1696,23 +1697,30 @@ impl CrateMetadata {
             // Slow path: We need to find out the new `DefIndex` of the provided
             // `DefPathHash`, if its still exists. This requires decoding every `DefPathHash`
             // stored in this crate.
-            let map = self.expn_hash_map.get_or_init(|| {
-                let end_id = self.root.expn_hashes.size() as u32;
-                let mut map =
-                    UnhashMap::with_capacity_and_hasher(end_id as usize, Default::default());
-                for i in 0..end_id {
-                    let i = ExpnIndex::from_u32(i);
-                    if let Some(hash) = self.root.expn_hashes.get(self, i) {
-                        map.insert(hash.decode((self, tcx)), i);
-                    }
-                }
-                map
-            });
-            map[&hash]
+            self.expn_hash_index_map(tcx)[&hash]
         };
 
         let data = self.root.expn_data.get(self, index).unwrap().decode((self, tcx));
         rustc_span::hygiene::register_expn_id(self.cnum, index, data, hash)
+    }
+
+    /// The index of the expansion with this hash, `None` when the crate no longer has it.
+    pub(crate) fn find_expn_index(&self, tcx: TyCtxt<'_>, hash: ExpnHash) -> Option<ExpnIndex> {
+        self.expn_hash_index_map(tcx).get(&hash).copied()
+    }
+
+    fn expn_hash_index_map(&self, tcx: TyCtxt<'_>) -> &UnhashMap<ExpnHash, ExpnIndex> {
+        self.expn_hash_map.get_or_init(|| {
+            let end_id = self.root.expn_hashes.size() as u32;
+            let mut map = UnhashMap::with_capacity_and_hasher(end_id as usize, Default::default());
+            for i in 0..end_id {
+                let i = ExpnIndex::from_u32(i);
+                if let Some(hash) = self.root.expn_hashes.get(self, i) {
+                    map.insert(hash.decode((self, tcx)), i);
+                }
+            }
+            map
+        })
     }
 
     /// Imports the source_map from an external crate into the source_map of the crate

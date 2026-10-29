@@ -500,7 +500,12 @@ fn mir_promoted(
 /// Compute the MIR that is used during CTFE (and thus has no optimizations run on it)
 fn mir_for_ctfe(tcx: TyCtxt<'_>, def_id: LocalDefId) -> &Body<'_> {
     debug_assert!(!tcx.is_trivial_const(def_id), "Tried to get mir_for_ctfe of a trivial const");
-    tcx.arena.alloc(inner_mir_for_ctfe(tcx, def_id))
+    if let Some(body) = tcx.prev_metadata_mir_for_ctfe(def_id) {
+        return body;
+    }
+    let mut body = inner_mir_for_ctfe(tcx, def_id);
+    clear_local_info(&mut body);
+    tcx.arena.alloc(body)
 }
 
 fn inner_mir_for_ctfe(tcx: TyCtxt<'_>, def: LocalDefId) -> Body<'_> {
@@ -686,10 +691,29 @@ fn run_runtime_cleanup_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
 
     pm::run_passes(tcx, body, passes, Some(MirPhase::Runtime(RuntimePhase::PostCleanup)));
 
-    // Clear this by anticipation. Optimizations and runtime MIR have no reason to look
-    // into this information, which is meant for borrowck diagnostics.
+    clear_local_info(body);
+}
+
+/// Drops the borrowck diagnostics data that metadata does not encode, so a body decoded from
+/// metadata hashes like the body built here.
+fn clear_local_info(body: &mut Body<'_>) {
     for decl in &mut body.local_decls {
         decl.local_info = ClearCrossCrate::Clear;
+    }
+    // `StateTransform` copies the coroutine drop bodies out of this body before this point.
+    if let Some(info) = &mut body.coroutine {
+        for drop_body in [
+            &mut info.coroutine_drop,
+            &mut info.coroutine_drop_async,
+            &mut info.coroutine_drop_proxy_async,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for decl in &mut drop_body.local_decls {
+                decl.local_info = ClearCrossCrate::Clear;
+            }
+        }
     }
 }
 
@@ -794,7 +818,15 @@ fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
         return tcx.mir_for_ctfe(did);
     }
 
-    tcx.arena.alloc(inner_optimized_mir(tcx, did))
+    if let Some(body) = tcx.prev_metadata_optimized_mir(did) {
+        return body;
+    }
+
+    let mut body = inner_optimized_mir(tcx, did);
+    // Optimization passes add locals after the runtime cleanup cleared the others.
+    clear_local_info(&mut body);
+    tcx.prev_metadata_explain_mismatch(did, &body);
+    tcx.arena.alloc(body)
 }
 
 fn inner_optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> Body<'_> {
@@ -839,6 +871,9 @@ fn promoted_mir(tcx: TyCtxt<'_>, def: LocalDefId) -> &IndexVec<Promoted, Body<'_
     if tcx.is_constructor(def.to_def_id()) {
         return tcx.arena.alloc(IndexVec::new());
     }
+    if let Some(promoted) = tcx.prev_metadata_promoted_mir(def) {
+        return promoted;
+    }
 
     if !tcx.is_synthetic_mir(def) {
         tcx.ensure_done().mir_borrowck(tcx.typeck_root_def_id_local(def));
@@ -847,6 +882,7 @@ fn promoted_mir(tcx: TyCtxt<'_>, def: LocalDefId) -> &IndexVec<Promoted, Body<'_
 
     for body in &mut promoted {
         run_analysis_to_runtime_passes(tcx, body);
+        clear_local_info(body);
     }
 
     tcx.arena.alloc(promoted)

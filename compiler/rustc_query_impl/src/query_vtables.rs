@@ -28,12 +28,14 @@ macro_rules! define_queries {
                 fn $name:ident($K:ty) -> $V:ty
                 {
                     // Search for (QMODLIST) to find all occurrences of this query modifier list.
+                    anon: $anon:literal,
                     arena_cache: $arena_cache:literal,
                     cache_on_disk: $cache_on_disk:literal,
                     depth_limit: $depth_limit:literal,
                     desc: $desc:expr,
                     eval_always: $eval_always:literal,
                     feedable: $feedable:literal,
+                    global_input: $global_input:literal,
                     handle_cycle_error: $handle_cycle_error:literal,
                     no_force: $no_force:literal,
                     no_hash: $no_hash:literal,
@@ -139,15 +141,20 @@ macro_rules! define_queries {
                     }
                 }
 
-                pub(crate) fn make_query_vtable<'tcx>(incremental: bool, track_present: bool)
-                    -> QueryVTable<'tcx, rustc_middle::queries::$name::Cache<'tcx>>
+                pub(crate) fn make_query_vtable<'tcx>(
+                    incremental: bool,
+                    track_present: bool,
+                    uncache: &[String],
+                ) -> QueryVTable<'tcx, rustc_middle::queries::$name::Cache<'tcx>>
                 {
                     use rustc_middle::queries::$name::Value;
                     QueryVTable {
                         name: stringify!($name),
+                        anon: $anon,
                         eval_always: $eval_always,
                         depth_limit: $depth_limit,
                         feedable: $feedable,
+                        global_input: $global_input,
                         dep_kind: rustc_middle::dep_graph::DepKind::$name,
                         state: Default::default(),
                         cache: if track_present {
@@ -155,7 +162,8 @@ macro_rules! define_queries {
                         } else {
                             QueryCache::without_track_present()
                         },
-                        cache_on_disk_local: $cache_on_disk,
+                        cache_on_disk_local: $cache_on_disk
+                            && !uncache.iter().any(|n| n == stringify!($name)),
                         separate_provide_extern: $separate_provide_extern,
 
                         invoke_provider_fn: self::invoke_provider_fn::__rust_begin_short_backtrace,
@@ -218,15 +226,26 @@ macro_rules! define_queries {
             }
         )*
 
-        pub(crate) fn make_query_vtables<'tcx>(incremental: bool, track_present: bool)
-            -> rustc_middle::queries::QueryVTables<'tcx>
-        {
+        pub(crate) fn make_query_vtables<'tcx>(
+            incremental: bool,
+            track_present: bool,
+            uncache: &[String],
+        ) -> rustc_middle::queries::QueryVTables<'tcx> {
             rustc_middle::queries::QueryVTables {
                 $(
-                    $name: crate::query_vtables::$name::make_query_vtable(incremental, track_present),
+                    $name: crate::query_vtables::$name::make_query_vtable(
+                        incremental,
+                        track_present,
+                        uncache,
+                    ),
                 )*
             }
         }
+
+        /// Each query name, paired with its static `cache_on_disk` modifier.
+        pub(crate) const QUERY_CACHE_ON_DISK: &[(&str, bool)] = &[
+            $( (stringify!($name), $cache_on_disk), )*
+        ];
 
         /// Given a filter condition (e.g. `ALL` or `CACHE_ON_DISK`), a `tcx`,
         /// and a closure expression that accepts `&QueryVTable`, this macro

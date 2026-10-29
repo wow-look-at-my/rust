@@ -19,7 +19,9 @@ use rustc_hir::{self as hir, ForeignItemId, ItemId, Node, PatKind, QPath};
 use rustc_lint_defs::builtin::{DEAD_CODE, DEAD_CODE_PUB_IN_BINARY};
 use rustc_lint_defs::{self as lint, Lint, StableLintExpectationId};
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
-use rustc_middle::middle::dead_code::{DeadCodeLivenessSnapshot, DeadCodeLivenessSummary};
+use rustc_middle::middle::dead_code::{
+    DeadCodeBodyUse, DeadCodeLivenessSnapshot, DeadCodeLivenessSummary,
+};
 use rustc_middle::middle::privacy::Level;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::{self, AssocTag, TyCtxt};
@@ -135,9 +137,34 @@ struct MarkSymbolVisitor<'tcx> {
     ignored_derived_traits: LocalDefIdMap<FxIndexSet<DefId>>,
     propagated_comes_from_allow_expect: ComesFromAllowExpect,
     unsolved_items: Vec<LocalDefId>,
+    /// `Some` inside `dead_code_body_uses`: the visitor records each use of one body here.
+    body_uses: Option<Vec<DeadCodeBodyUse>>,
 }
 
 impl<'tcx> MarkSymbolVisitor<'tcx> {
+    fn new(
+        tcx: TyCtxt<'tcx>,
+        worklist: Vec<WorkItem>,
+        unsolved_items: Vec<LocalDefId>,
+        body_uses: Option<Vec<DeadCodeBodyUse>>,
+    ) -> Self {
+        MarkSymbolVisitor {
+            worklist,
+            tcx,
+            maybe_typeck_results: None,
+            scanned: Default::default(),
+            live_symbols: Default::default(),
+            repr_unconditionally_treats_fields_as_live: false,
+            repr_has_repr_simd_or_scalable: false,
+            in_pat: false,
+            ignore_variant_stack: vec![],
+            ignored_derived_traits: Default::default(),
+            propagated_comes_from_allow_expect: ComesFromAllowExpect::No,
+            unsolved_items,
+            body_uses,
+        }
+    }
+
     /// Gets the type-checking results for the current body.
     /// As this will ICE if called outside bodies, only call when working with
     /// `Expr` or `Pat` nodes (they are guaranteed to be found only in bodies).
@@ -162,6 +189,10 @@ impl<'tcx> MarkSymbolVisitor<'tcx> {
     }
 
     fn check_def_id(&mut self, def_id: DefId) {
+        if let Some(uses) = &mut self.body_uses {
+            uses.push(DeadCodeBodyUse::Check(def_id));
+            return;
+        }
         if let Some(def_id) = def_id.as_local() {
             let own_comes_from_allow_expect = self.own_comes_from_allow_expect(def_id);
 
@@ -180,6 +211,10 @@ impl<'tcx> MarkSymbolVisitor<'tcx> {
     }
 
     fn insert_def_id(&mut self, def_id: DefId) {
+        if let Some(uses) = &mut self.body_uses {
+            uses.push(DeadCodeBodyUse::Insert(def_id));
+            return;
+        }
         if let Some(def_id) = def_id.as_local() {
             debug_assert!(!should_explore(self.tcx, def_id));
 
@@ -686,12 +721,8 @@ impl<'tcx> MarkSymbolVisitor<'tcx> {
 
         Ok(())
     }
-}
 
-impl<'tcx> Visitor<'tcx> for MarkSymbolVisitor<'tcx> {
-    type Result = ControlFlow<ErrorGuaranteed>;
-
-    fn visit_nested_body(&mut self, body: hir::BodyId) -> Self::Result {
+    fn visit_body_with_typeck(&mut self, body: hir::BodyId) -> ControlFlow<ErrorGuaranteed> {
         let typeck_results = self.tcx.typeck_body(body);
 
         // The result shouldn't be tainted, otherwise it will cause ICE.
@@ -705,6 +736,51 @@ impl<'tcx> Visitor<'tcx> for MarkSymbolVisitor<'tcx> {
         self.maybe_typeck_results = old_maybe_typeck_results;
 
         result
+    }
+
+    fn mark_live(&mut self, def_id: LocalDefId) {
+        match &mut self.body_uses {
+            Some(uses) => uses.push(DeadCodeBodyUse::Live(def_id)),
+            None => {
+                self.live_symbols.insert(def_id);
+            }
+        }
+    }
+
+    fn seed(&mut self, def_id: LocalDefId) {
+        match &mut self.body_uses {
+            Some(uses) => uses.push(DeadCodeBodyUse::Seed(def_id)),
+            None => self.worklist.push(WorkItem {
+                id: def_id,
+                propagated: ComesFromAllowExpect::No,
+                own: ComesFromAllowExpect::No,
+            }),
+        }
+    }
+}
+
+impl<'tcx> Visitor<'tcx> for MarkSymbolVisitor<'tcx> {
+    type Result = ControlFlow<ErrorGuaranteed>;
+
+    fn visit_nested_body(&mut self, body: hir::BodyId) -> Self::Result {
+        if self.body_uses.is_some() {
+            return self.visit_body_with_typeck(body);
+        }
+        // No body starts inside a pattern or an arm, so its uses never depend on the caller.
+        debug_assert!(!self.in_pat && self.ignore_variant_stack.is_empty());
+        let uses = match self.tcx.dead_code_body_uses(self.tcx.hir_body_owner_def_id(body)) {
+            Ok(uses) => uses,
+            Err(guar) => return ControlFlow::Break(guar),
+        };
+        for &body_use in uses {
+            match body_use {
+                DeadCodeBodyUse::Check(def_id) => self.check_def_id(def_id),
+                DeadCodeBodyUse::Insert(def_id) => self.insert_def_id(def_id),
+                DeadCodeBodyUse::Live(def_id) => self.mark_live(def_id),
+                DeadCodeBodyUse::Seed(def_id) => self.seed(def_id),
+            }
+        }
+        ControlFlow::Continue(())
     }
 
     fn visit_variant_data(&mut self, def: &'tcx hir::VariantData<'tcx>) -> Self::Result {
@@ -826,7 +902,7 @@ impl<'tcx> Visitor<'tcx> for MarkSymbolVisitor<'tcx> {
         // referenced by it should be considered as used.
         let in_pat = mem::replace(&mut self.in_pat, false);
 
-        self.live_symbols.insert(c.def_id);
+        self.mark_live(c.def_id);
         let result = intravisit::walk_anon_const(self, c);
 
         self.in_pat = in_pat;
@@ -839,7 +915,7 @@ impl<'tcx> Visitor<'tcx> for MarkSymbolVisitor<'tcx> {
         // referenced by it should be considered as used.
         let in_pat = mem::replace(&mut self.in_pat, false);
 
-        self.live_symbols.insert(c.def_id);
+        self.mark_live(c.def_id);
         let result = intravisit::walk_inline_const(self, c);
 
         self.in_pat = in_pat;
@@ -864,11 +940,7 @@ impl<'tcx> Visitor<'tcx> for MarkSymbolVisitor<'tcx> {
                     )
                     .and_then(|item| item.def_id.as_local())
                 {
-                    self.worklist.push(WorkItem {
-                        id: local_def_id,
-                        propagated: ComesFromAllowExpect::No,
-                        own: ComesFromAllowExpect::No,
-                    });
+                    self.seed(local_def_id);
                 }
             }
         }
@@ -1061,25 +1133,25 @@ fn create_and_seed_worklist(tcx: TyCtxt<'_>) -> SeedWorklists {
     SeedWorklists { worklist, deferred_seeds, unsolved_items }
 }
 
+fn dead_code_body_uses(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+) -> Result<&[DeadCodeBodyUse], ErrorGuaranteed> {
+    let mut visitor = MarkSymbolVisitor::new(tcx, vec![], vec![], Some(vec![]));
+    if let ControlFlow::Break(guar) =
+        visitor.visit_body_with_typeck(tcx.hir_body_owned_by(def_id).id())
+    {
+        return Err(guar);
+    }
+    Ok(tcx.arena.alloc_from_iter(visitor.body_uses.unwrap_or_default()))
+}
+
 fn live_symbols_and_ignored_derived_traits(
     tcx: TyCtxt<'_>,
     (): (),
 ) -> Result<DeadCodeLivenessSummary, ErrorGuaranteed> {
     let SeedWorklists { worklist, deferred_seeds, unsolved_items } = create_and_seed_worklist(tcx);
-    let mut symbol_visitor = MarkSymbolVisitor {
-        worklist,
-        tcx,
-        maybe_typeck_results: None,
-        scanned: Default::default(),
-        live_symbols: Default::default(),
-        repr_unconditionally_treats_fields_as_live: false,
-        repr_has_repr_simd_or_scalable: false,
-        in_pat: false,
-        ignore_variant_stack: vec![],
-        ignored_derived_traits: Default::default(),
-        propagated_comes_from_allow_expect: ComesFromAllowExpect::No,
-        unsolved_items,
-    };
+    let mut symbol_visitor = MarkSymbolVisitor::new(tcx, worklist, unsolved_items, None);
     symbol_visitor.mark_live_symbols_and_ignored_derived_traits(true)?;
     let pre_deferred_seeding = DeadCodeLivenessSnapshot {
         live_symbols: symbol_visitor.live_symbols.clone(),
@@ -1574,6 +1646,10 @@ fn lint_dead_codes<'tcx>(
 }
 
 pub(crate) fn provide(providers: &mut Providers) {
-    *providers =
-        Providers { live_symbols_and_ignored_derived_traits, check_mod_deathness, ..*providers };
+    *providers = Providers {
+        live_symbols_and_ignored_derived_traits,
+        dead_code_body_uses,
+        check_mod_deathness,
+        ..*providers
+    };
 }

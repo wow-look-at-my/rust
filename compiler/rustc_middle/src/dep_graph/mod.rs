@@ -10,7 +10,7 @@ pub use self::graph::{
 };
 use self::graph::{MarkFrame, print_markframe_trace};
 pub use self::retained::RetainedDepGraph;
-pub use self::serialized::{SerializedDepGraph, SerializedDepNodeIndex};
+pub use self::serialized::{SerializedDepGraph, SerializedDepNodeIndex, short_value_fingerprint};
 pub use crate::dep_graph::debug::{DepNodeFilter, EdgeFilter};
 pub use crate::ty::print::with_reduced_queries;
 use crate::ty::{self, TyCtxt};

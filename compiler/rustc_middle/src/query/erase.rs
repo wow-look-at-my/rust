@@ -141,6 +141,10 @@ impl<T> Erasable for Result<&'_ T, ErrorGuaranteed> {
     type Storage = [u8; size_of::<Result<&'_ (), ErrorGuaranteed>>()];
 }
 
+impl<T> Erasable for Result<&'_ [T], ErrorGuaranteed> {
+    type Storage = [u8; size_of::<Result<&'_ [()], ErrorGuaranteed>>()];
+}
+
 impl<T> Erasable for Option<&'_ T> {
     type Storage = [u8; size_of::<Option<&'_ ()>>()];
 }
