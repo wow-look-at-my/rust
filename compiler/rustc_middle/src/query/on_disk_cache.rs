@@ -229,12 +229,43 @@ fn map_checked(path: &Path, magic: &[u8; 8], id: u64, len: usize) -> Result<Mmap
     Ok(data)
 }
 
+/// The values of a session file, in file order.
+struct ValuesIndex(Vec<(SerializedDepNodeIndex, AbsoluteBytePos)>);
+
+impl<E: Encoder> Encodable<E> for ValuesIndex {
+    fn encode(&self, e: &mut E) {
+        e.emit_usize(self.0.len());
+        let mut prev = 0;
+        for &(index, pos) in &self.0 {
+            e.emit_u32(index.as_u32());
+            e.emit_u64(pos.0.checked_sub(prev).expect("query cache values out of file order"));
+            prev = pos.0;
+        }
+    }
+}
+
+impl<D: Decoder> Decodable<D> for ValuesIndex {
+    fn decode(d: &mut D) -> Self {
+        let n = d.read_usize();
+        let mut pos = 0;
+        ValuesIndex(
+            (0..n)
+                .map(|_| {
+                    let index = SerializedDepNodeIndex::from_u32(d.read_u32());
+                    pos += d.read_u64();
+                    (index, AbsoluteBytePos(pos))
+                })
+                .collect(),
+        )
+    }
+}
+
 // This type is used only for serialization and deserialization.
 #[derive(Encodable, Decodable)]
 struct Footer {
     file_index_to_stable_id: FxHashMap<SourceFileIndex, EncodedSourceFileId>,
-    query_values_index: Vec<(SerializedDepNodeIndex, AbsoluteBytePos)>,
-    side_effects_index: Vec<(SerializedDepNodeIndex, AbsoluteBytePos)>,
+    query_values_index: ValuesIndex,
+    side_effects_index: ValuesIndex,
     // The location of all allocations.
     // Most uses only need values up to u32::MAX, but benchmarking indicates that we can use a u64
     // without measurable overhead. This permits larger const allocations without ICEing.
@@ -321,8 +352,8 @@ impl OnDiskCache {
             serialized_data: RwLock::new(Some(data)),
             file_index_to_stable_id: footer.file_index_to_stable_id,
             file_index_to_file: Default::default(),
-            query_values_index: footer.query_values_index.into_iter().collect(),
-            side_effects_index: footer.side_effects_index.into_iter().collect(),
+            query_values_index: footer.query_values_index.0.into_iter().collect(),
+            side_effects_index: footer.side_effects_index.0.into_iter().collect(),
             alloc_decoding_state: AllocDecodingState::new(footer.interpret_alloc_index),
             syntax_contexts: footer.syntax_contexts,
             expn_data: footer.expn_data,
@@ -507,8 +538,8 @@ impl OnDiskCache {
 
             // Encode the file footer.
             let footer_pos = encoder.position() as u64;
-            let query_values_index = mem::take(&mut encoder.query_values_index);
-            let side_effects_index = mem::take(&mut encoder.side_effects_index);
+            let query_values_index = ValuesIndex(mem::take(&mut encoder.query_values_index));
+            let side_effects_index = ValuesIndex(mem::take(&mut encoder.side_effects_index));
             let def_path_hashes = mem::take(&mut encoder.def_path_hashes).into_iter().collect();
             encoder.encode_tagged(
                 TAG_FILE_FOOTER,
@@ -750,7 +781,7 @@ impl OnDiskCache {
         if self.inplace.is_some() {
             return Some(self.with_entry_decoder(tcx, pos, |decoder| T::decode(decoder)));
         }
-        let value = self.with_decoder(tcx, pos, |decoder| decode_tagged(decoder, dep_node_index));
+        let value = self.with_decoder(tcx, pos, |decoder| decode_value(decoder));
         Some(value)
     }
 
@@ -952,6 +983,17 @@ where
     let expected_len: u64 = Decodable::decode(decoder);
     assert_eq!((end_pos - start_pos) as u64, expected_len);
 
+    value
+}
+
+/// Decodes a value that `encode_value` wrote. The index names the value, so it carries no
+/// tag. The length still catches a decoder that reads more or less than the encoder wrote.
+fn decode_value<D: Decoder, V: Decodable<D>>(decoder: &mut D) -> V {
+    let start_pos = decoder.position();
+    let value = V::decode(decoder);
+    let end_pos = decoder.position();
+    let expected_len: u64 = Decodable::decode(decoder);
+    assert_eq!((end_pos - start_pos) as u64, expected_len);
     value
 }
 
@@ -1459,6 +1501,15 @@ impl<'tcx> CacheEncoder<'tcx> {
         ((end_pos - start_pos) as u64).encode(self);
     }
 
+    /// Writes `value` and then its length, for `decode_value`.
+    fn encode_value<V: Encodable<Self>>(&mut self, value: &V) {
+        let start_pos = self.position();
+        self.prev_span = PrevSpan::default();
+        value.encode(self);
+        let end_pos = self.position();
+        ((end_pos - start_pos) as u64).encode(self);
+    }
+
     pub fn encode_query_value<V: Encodable<Self>>(&mut self, index: DepNodeIndex, value: &V) {
         if self.inplace.as_ref().is_some_and(|i| i.carried_values.contains(&index)) {
             return;
@@ -1471,7 +1522,7 @@ impl<'tcx> CacheEncoder<'tcx> {
         }
 
         self.query_values_index.push((index, AbsoluteBytePos::new(self.position())));
-        self.encode_tagged(index, value);
+        self.encode_value(value);
     }
 
     fn encode_side_effect(&mut self, index: DepNodeIndex, side_effect: &QuerySideEffect) {
@@ -1486,7 +1537,7 @@ impl<'tcx> CacheEncoder<'tcx> {
         }
 
         self.side_effects_index.push((index, AbsoluteBytePos::new(self.position())));
-        self.encode_tagged(index, side_effect);
+        self.encode_value(side_effect);
     }
 
     // copy&paste impl from rustc_metadata
