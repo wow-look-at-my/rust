@@ -43,6 +43,8 @@ pub(crate) fn encode_query_values<'tcx>(tcx: TyCtxt<'tcx>, encoder: &mut CacheEn
         for (bytes, count, name, spans) in sizes.into_iter().take(20).filter(|s| s.0 > 0) {
             eprintln!("[incremental] query cache bytes: {name} {count} {bytes} {spans}");
         }
+        let (refs, ref_bytes) = encoder.shorthand_refs();
+        eprintln!("[incremental] query cache shorthand refs: {refs} {ref_bytes}");
     }
 }
 

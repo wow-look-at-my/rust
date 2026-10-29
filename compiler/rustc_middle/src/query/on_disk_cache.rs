@@ -420,6 +420,8 @@ impl OnDiskCache {
                 side_effects_index: Default::default(),
                 def_path_hashes: Default::default(),
                 span_bytes: 0,
+                shorthand_refs: 0,
+                shorthand_ref_bytes: 0,
                 inplace: None,
             };
 
@@ -652,6 +654,8 @@ impl OnDiskCache {
                 side_effects_index: Default::default(),
                 def_path_hashes: Default::default(),
                 span_bytes: 0,
+                shorthand_refs: 0,
+                shorthand_ref_bytes: 0,
                 inplace: Some(Box::new(inplace)),
             };
             tcx.sess.time("encode_query_values", || tcx.encode_query_values(&mut cache_encoder));
@@ -1245,6 +1249,9 @@ pub struct CacheEncoder<'tcx> {
     def_path_hashes: FxIndexSet<DefPathHash>,
     /// The bytes that spans took, for `-Zincremental-info`.
     span_bytes: usize,
+    /// The type and predicate shorthand references, and their bytes, for `-Zincremental-info`.
+    shorthand_refs: usize,
+    shorthand_ref_bytes: usize,
 
     inplace: Option<Box<InplaceEncode>>,
 }
@@ -1282,6 +1289,11 @@ impl<'tcx> CacheEncoder<'tcx> {
     /// The bytes that spans took so far.
     pub fn span_bytes(&self) -> usize {
         self.span_bytes
+    }
+
+    /// The type and predicate shorthand references so far, and their bytes.
+    pub fn shorthand_refs(&self) -> (usize, usize) {
+        (self.shorthand_refs, self.shorthand_ref_bytes)
     }
 
     /// The start is a zigzag offset from `parent_lo`, since a span can start before its parent.
@@ -1625,6 +1637,11 @@ impl<'tcx> TyEncoder<'tcx> for CacheEncoder<'tcx> {
     #[inline]
     fn predicate_shorthands(&mut self) -> &mut FxHashMap<ty::PredicateKind<'tcx>, usize> {
         &mut self.predicate_shorthands
+    }
+    #[inline]
+    fn note_shorthand_ref(&mut self, bytes: usize) {
+        self.shorthand_refs += 1;
+        self.shorthand_ref_bytes += bytes;
     }
     #[inline]
     fn encode_alloc_id(&mut self, alloc_id: &interpret::AllocId) {

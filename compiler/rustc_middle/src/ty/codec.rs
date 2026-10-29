@@ -38,6 +38,9 @@ pub trait TyEncoder<'tcx>: SpanEncoder {
 
     fn encode_alloc_id(&mut self, alloc_id: &AllocId);
 
+    /// Counts a shorthand reference that took `bytes`, for an encoder that reports its sizes.
+    fn note_shorthand_ref(&mut self, _bytes: usize) {}
+
     /// Starts the full encoding of a value that has no shorthand yet. An encoder that
     /// writes full encodings to a separate stream returns true. The value is then
     /// always referenced by the shorthand that `end_full_encoding` returns.
@@ -106,7 +109,9 @@ where
 {
     let existing_shorthand = cache(encoder).get(value).copied();
     if let Some(shorthand) = existing_shorthand {
+        let start = encoder.position();
         encoder.emit_usize(shorthand);
+        encoder.note_shorthand_ref(encoder.position() - start);
         return;
     }
 
