@@ -6,10 +6,17 @@ fn entry(index: u32, pos: u64, len: u32) -> IndexEntry {
     IndexEntry { index: SerializedDepNodeIndex::from_u32(index), pos: AbsoluteBytePos(pos), len }
 }
 
-fn round_trip_index(entries: Vec<IndexEntry>) {
+/// The bytes `value` encodes to, with the end marker that `MemDecoder::new` checks.
+fn encoded(value: &impl Encodable<MemEncoder>) -> Vec<u8> {
     let mut e = MemEncoder::new();
-    ValuesIndex(entries.clone()).encode(&mut e);
-    let bytes = e.finish();
+    value.encode(&mut e);
+    let mut bytes = e.finish();
+    bytes.extend_from_slice(rustc_serialize::opaque::MAGIC_END_BYTES);
+    bytes
+}
+
+fn round_trip_index(entries: Vec<IndexEntry>) {
+    let bytes = encoded(&ValuesIndex(entries.clone()));
     let mut d = MemDecoder::new(&bytes, 0).unwrap();
     let decoded = ValuesIndex::decode(&mut d).0;
     assert_eq!(decoded.len(), entries.len());
@@ -46,9 +53,7 @@ fn def_path_hashes_round_trip() {
         .into_iter()
         .map(|(krate, local)| DefPathHash(Fingerprint::new(krate, local)))
         .collect();
-    let mut e = MemEncoder::new();
-    DefPathHashes(hashes.clone()).encode(&mut e);
-    let bytes = e.finish();
+    let bytes = encoded(&DefPathHashes(hashes.clone()));
     let mut d = MemDecoder::new(&bytes, 0).unwrap();
     assert_eq!(DefPathHashes::decode(&mut d).0, hashes);
 }
