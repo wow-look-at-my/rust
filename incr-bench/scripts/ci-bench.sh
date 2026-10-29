@@ -154,6 +154,10 @@ build() {
 		echo "dep graph nodes no edge points at $mode $step (bytes, nodes, kind):"
 		{ grep -oE '^\[incremental\] unread nodes: [A-Za-z_0-9]+ [0-9]+ [0-9]+' "$log" || true; } |
 			awk '{n[$4] += $5; b[$4] += $6} END {for (k in b) printf "%d\t%d\t%s\n", b[k], n[k], k}' | sort -rn | sed -n 1,40p
+		# A node keyed by a DefPathHash of another crate's item is a lookup into that crate.
+		echo "dep graph nodes keyed by an item of the crate $mode $step (bytes, nodes, local bytes, local nodes, kind):"
+		{ grep -oE '^\[incremental\] local-keyed nodes: [A-Za-z_0-9]+ [0-9]+ [0-9]+ [0-9]+ [0-9]+' "$log" || true; } |
+			awk '{n[$4] += $5; b[$4] += $6; ln[$4] += $7; lb[$4] += $8} END {for (k in b) printf "%d\t%d\t%d\t%d\t%s\n", b[k], n[k], lb[k], ln[k], k}' | sort -rn | sed -n 1,40p
 	fi
 	# An -Zincremental-info run prints what happened to each node, summed here over the crates this step compiled.
 	local seen=$target_root/$mode.fates-seen

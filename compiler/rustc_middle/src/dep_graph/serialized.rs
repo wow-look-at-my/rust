@@ -46,6 +46,7 @@ use rustc_serialize::opaque::mem_encoder::MemEncoder;
 use rustc_serialize::opaque::{FileEncodeResult, FileEncoder, IntEncodedWithFixedSize, MemDecoder};
 use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 use rustc_session::Session;
+use rustc_span::def_id::StableCrateId;
 use tracing::{debug, instrument};
 
 use super::graph::{CurrentDepGraph, DepNodeColorMap, DesiredColor, TrySetColorResult};
@@ -842,6 +843,9 @@ struct Stat {
     node_counter: u64,
     edge_counter: u64,
     bytes: NodeBytes,
+    /// The nodes whose key starts with this crate's id, as a `DefPathHash` of a local item does.
+    local_nodes: u64,
+    local_bytes: u64,
 }
 
 /// What happened to each node this session, for `-Zincremental-info`.
@@ -895,6 +899,8 @@ struct EncoderState {
     file: Lock<Option<FileEncoder<'static>>>,
     local: WorkerLocal<RefCell<LocalEncoderState>>,
     stats: Option<Lock<FxHashMap<DepKind, Stat>>>,
+    /// The first key half of a node keyed by a local item.
+    local_key_high: u64,
     /// For `-Zincremental-info`: which nodes some edge of this session points at.
     readers: Option<Lock<ReadStats>>,
 }
@@ -922,11 +928,13 @@ impl EncoderState {
         encoder: FileEncoder<'static>,
         record_stats: bool,
         previous: Arc<SerializedDepGraph>,
+        stable_crate_id: StableCrateId,
     ) -> Self {
         Self {
             previous,
             next_node_index: AtomicU64::new(0),
             stats: record_stats.then(|| Lock::new(FxHashMap::default())),
+            local_key_high: stable_crate_id.as_u64(),
             readers: record_stats.then(|| Lock::new(ReadStats::default())),
             file: Lock::new(Some(encoder)),
             local: WorkerLocal::new(|_| {
@@ -1000,6 +1008,8 @@ impl EncoderState {
 
         if let Some(stats) = &self.stats {
             let kind = node.kind;
+            let key: Fingerprint = node.key_fingerprint.into();
+            let is_local = key.split().0.as_u64() == self.local_key_high;
 
             // Outline the stats code as it's typically disabled and cold.
             outline(move || {
@@ -1009,10 +1019,16 @@ impl EncoderState {
                     node_counter: 0,
                     edge_counter: 0,
                     bytes: NodeBytes::default(),
+                    local_nodes: 0,
+                    local_bytes: 0,
                 });
                 stat.node_counter += 1;
                 stat.edge_counter += edge_count as u64;
                 stat.bytes.add(bytes);
+                if is_local {
+                    stat.local_nodes += 1;
+                    stat.local_bytes += bytes.total();
+                }
             });
         }
 
@@ -1221,7 +1237,7 @@ impl EncoderState {
             );
             eprintln!("{SEPARATOR}");
 
-            for stat in stats {
+            for stat in &stats {
                 let node_kind_ratio =
                     (100.0 * (stat.node_counter as f64)) / (total_node_count as f64);
                 let node_kind_avg_edges = (stat.edge_counter as f64) / (stat.node_counter as f64);
@@ -1240,6 +1256,16 @@ impl EncoderState {
 
             eprintln!("{SEPARATOR}");
             eprintln!("[incremental]");
+            for stat in &stats {
+                eprintln!(
+                    "[incremental] local-keyed nodes: {:?} {} {} {} {}",
+                    stat.kind,
+                    stat.node_counter,
+                    stat.bytes.total(),
+                    stat.local_nodes,
+                    stat.local_bytes,
+                );
+            }
         }
 
         if let Some(readers) = &self.readers {
@@ -1280,13 +1306,19 @@ impl GraphEncoder {
         encoder: FileEncoder<'static>,
         prev_index_space_len: usize,
         previous: Arc<SerializedDepGraph>,
+        stable_crate_id: StableCrateId,
     ) -> Self {
         let retained_graph = sess
             .opts
             .unstable_opts
             .query_dep_graph
             .then(|| Lock::new(RetainedDepGraph::new(prev_index_space_len)));
-        let status = EncoderState::new(encoder, sess.opts.unstable_opts.incremental_info, previous);
+        let status = EncoderState::new(
+            encoder,
+            sess.opts.unstable_opts.incremental_info,
+            previous,
+            stable_crate_id,
+        );
         GraphEncoder { status, retained_graph, profiler: sess.prof.clone() }
     }
 

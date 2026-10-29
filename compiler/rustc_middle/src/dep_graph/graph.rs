@@ -18,6 +18,7 @@ use rustc_macros::{Decodable, Encodable};
 use rustc_serialize::opaque::{FileEncodeResult, FileEncoder};
 use rustc_session::Session;
 use rustc_span::Symbol;
+use rustc_span::def_id::StableCrateId;
 use smallvec::SmallVec;
 use tracing::instrument;
 #[cfg(debug_assertions)]
@@ -199,11 +200,17 @@ impl DepGraph {
         prev_graph: Arc<SerializedDepGraph>,
         prev_work_products: WorkProductMap,
         encoder: FileEncoder<'static>,
+        stable_crate_id: StableCrateId,
     ) -> DepGraph {
         let prev_index_space_len = prev_graph.index_space_len();
 
-        let current =
-            CurrentDepGraph::new(session, prev_index_space_len, encoder, Arc::clone(&prev_graph));
+        let current = CurrentDepGraph::new(
+            session,
+            prev_index_space_len,
+            encoder,
+            Arc::clone(&prev_graph),
+            stable_crate_id,
+        );
 
         let colors = DepNodeColorMap::new(prev_index_space_len);
 
@@ -1312,6 +1319,7 @@ impl CurrentDepGraph {
         prev_index_space_len: usize,
         encoder: FileEncoder<'static>,
         previous: Arc<SerializedDepGraph>,
+        stable_crate_id: StableCrateId,
     ) -> Self {
         let mut stable_hasher = StableHasher::new();
         previous.session_count().hash(&mut stable_hasher);
@@ -1339,7 +1347,13 @@ impl CurrentDepGraph {
         }
 
         CurrentDepGraph {
-            encoder: GraphEncoder::new(session, encoder, prev_index_space_len, previous),
+            encoder: GraphEncoder::new(
+                session,
+                encoder,
+                prev_index_space_len,
+                previous,
+                stable_crate_id,
+            ),
             anon_node_to_index: ShardedHashMap::with_capacity(
                 3 * new_node_count_estimate / 100, // Reserve capacity for 3% anon nodes
             ),
