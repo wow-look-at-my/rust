@@ -107,6 +107,8 @@ pub struct OnDiskCache {
     // we try to map an `ExpnHash` to its value in the current
     // compilation session.
     foreign_expn_data: UnhashMap<ExpnHash, u32>,
+    /// The `DefPathHash` of each `DefId` index in the file. Empty in the inplace format, which writes the hash itself.
+    def_path_hashes: Vec<DefPathHash>,
 
     /// Set when the loaded `query-cache.bin` indexes the shared values file.
     inplace: Option<InplaceState>,
@@ -224,6 +226,8 @@ struct Footer {
     // See `OnDiskCache.expn_data`
     expn_data: UnhashMap<ExpnHash, AbsoluteBytePos>,
     foreign_expn_data: UnhashMap<ExpnHash, u32>,
+    // Each `DefId` in the file is an index into this table.
+    def_path_hashes: Vec<DefPathHash>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Encodable, Decodable)]
@@ -305,6 +309,7 @@ impl OnDiskCache {
             syntax_contexts: footer.syntax_contexts,
             expn_data: footer.expn_data,
             foreign_expn_data: footer.foreign_expn_data,
+            def_path_hashes: footer.def_path_hashes,
             hygiene_context: Default::default(),
             inplace: None,
             pool_data: RwLock::new(None),
@@ -361,6 +366,7 @@ impl OnDiskCache {
             syntax_contexts: FxHashMap::default(),
             expn_data: UnhashMap::default(),
             foreign_expn_data: UnhashMap::default(),
+            def_path_hashes: Vec::new(),
             hygiene_context: Default::default(),
             inplace: None,
             pool_data: RwLock::new(None),
@@ -412,6 +418,7 @@ impl OnDiskCache {
                 source_span_cache: Default::default(),
                 query_values_index: Default::default(),
                 side_effects_index: Default::default(),
+                def_path_hashes: Default::default(),
                 inplace: None,
             };
 
@@ -477,6 +484,7 @@ impl OnDiskCache {
             let footer_pos = encoder.position() as u64;
             let query_values_index = mem::take(&mut encoder.query_values_index);
             let side_effects_index = mem::take(&mut encoder.side_effects_index);
+            let def_path_hashes = mem::take(&mut encoder.def_path_hashes).into_iter().collect();
             encoder.encode_tagged(
                 TAG_FILE_FOOTER,
                 &Footer {
@@ -487,6 +495,7 @@ impl OnDiskCache {
                     syntax_contexts,
                     expn_data,
                     foreign_expn_data,
+                    def_path_hashes,
                 },
             );
 
@@ -640,6 +649,7 @@ impl OnDiskCache {
                 source_span_cache: Default::default(),
                 query_values_index: Default::default(),
                 side_effects_index: Default::default(),
+                def_path_hashes: Default::default(),
                 inplace: Some(Box::new(inplace)),
             };
             tcx.sess.time("encode_query_values", || tcx.encode_query_values(&mut cache_encoder));
@@ -742,6 +752,7 @@ impl OnDiskCache {
             foreign_expn_data: &self.foreign_expn_data,
             hygiene_context: &self.hygiene_context,
             source_span_cache: SourceSpanCache::default(),
+            def_path_hashes: None,
         };
         f(&mut decoder)
     }
@@ -770,6 +781,7 @@ impl OnDiskCache {
             foreign_expn_data: &self.foreign_expn_data,
             hygiene_context: &self.hygiene_context,
             source_span_cache: SourceSpanCache::default(),
+            def_path_hashes: self.inplace.is_none().then_some(&self.def_path_hashes[..]),
         };
         f(&mut decoder)
     }
@@ -793,6 +805,8 @@ pub struct CacheDecoder<'a, 'tcx> {
     expn_data: &'a UnhashMap<ExpnHash, AbsoluteBytePos>,
     foreign_expn_data: &'a UnhashMap<ExpnHash, u32>,
     hygiene_context: &'a HygieneDecodeContext,
+    /// The table that a `DefId` index refers to, or `None` when the bytes hold the hash itself.
+    def_path_hashes: Option<&'a [DefPathHash]>,
     source_span_cache: SourceSpanCache,
 }
 
@@ -1113,7 +1127,10 @@ impl<'a, 'tcx> SpanDecoder for CacheDecoder<'a, 'tcx> {
     // sessions, to map the old `DefId` to the new one.
     fn decode_def_id(&mut self) -> DefId {
         // Load the `DefPathHash` which is was we encoded the `DefId` as.
-        let def_path_hash = DefPathHash::decode(self);
+        let def_path_hash = match self.def_path_hashes {
+            Some(table) => table[self.read_usize()],
+            None => DefPathHash::decode(self),
+        };
 
         // Using the `DefPathHash`, we can lookup the new `DefId`.
         // Subtle: We only encode a `DefId` as part of a query result.
@@ -1223,6 +1240,8 @@ pub struct CacheEncoder<'tcx> {
 
     query_values_index: Vec<(SerializedDepNodeIndex, AbsoluteBytePos)>,
     side_effects_index: Vec<(SerializedDepNodeIndex, AbsoluteBytePos)>,
+    /// The `DefPathHash` of each `DefId` index written so far, outside the inplace format.
+    def_path_hashes: FxIndexSet<DefPathHash>,
 
     inplace: Option<Box<InplaceEncode>>,
 }
@@ -1558,7 +1577,14 @@ impl<'tcx> SpanEncoder for CacheEncoder<'tcx> {
     }
 
     fn encode_def_id(&mut self, def_id: DefId) {
-        self.tcx.def_path_hash(def_id).encode(self);
+        let hash = self.tcx.def_path_hash(def_id);
+        if self.inplace.is_some() {
+            // An inplace entry outlives this session's footer, so it carries the hash itself.
+            hash.encode(self);
+            return;
+        }
+        let (index, _) = self.def_path_hashes.insert_full(hash);
+        self.emit_usize(index);
     }
 
     fn encode_def_index(&mut self, _def_index: DefIndex) {
