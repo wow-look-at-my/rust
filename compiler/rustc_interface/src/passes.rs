@@ -1014,7 +1014,7 @@ pub fn create_and_enter_global_ctxt<T, F: for<'tcx> FnOnce(TyCtxt<'tcx>) -> T>(
     let unknown = rustc_query_impl::unknown_uncache_names(&uncache);
     if !unknown.is_empty() {
         sess.dcx().fatal(format!(
-            "-Z incremental-uncache: not a cache_on_disk query: {}",
+            "-Z incremental-uncache: not a cache_on_disk query, or a fed query: {}",
             unknown.join(", ")
         ));
     }
