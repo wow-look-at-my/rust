@@ -99,7 +99,12 @@ struct TransparentReads {
 impl From<DepNodeIndex> for QueryInvocationId {
     #[inline(always)]
     fn from(dep_node_index: DepNodeIndex) -> Self {
-        QueryInvocationId(dep_node_index.as_u32())
+        // The self-profiler refuses an id past its virtual limit, and no real node gets this far.
+        const TRANSPARENT_IDS: u32 = 50_000_000;
+        match dep_node_index.transparent_slot() {
+            Some(slot) => QueryInvocationId(TRANSPARENT_IDS + (slot as u32 % TRANSPARENT_IDS)),
+            None => QueryInvocationId(dep_node_index.as_u32()),
+        }
     }
 }
 
