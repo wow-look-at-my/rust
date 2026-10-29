@@ -42,16 +42,34 @@ const TAG_FILE_FOOTER: u128 = 0xC0FFEE_C0FFEE_C0FFEE_C0FFEE_C0FFEE;
 const TAG_FILE_FOOTER_INPLACE: u128 = 0xC0FFEE_C0FFEE_C0FFEE_C0FFEE_1F1AC2;
 
 /// The first bytes of a values file and of a pool file. An 8-byte id follows each.
-const VALUES_MAGIC: &[u8; 8] = b"RSQVALS2";
-const POOL_MAGIC: &[u8; 8] = b"RSQPOOL2";
+const VALUES_MAGIC: &[u8; 8] = b"RSQVALS3";
+const POOL_MAGIC: &[u8; 8] = b"RSQPOOL3";
 const HEADER_LEN: usize = 16;
 const POOL_FILENAME: &str = "query-pool.bin";
 
-// A normal span encoded with both location information and a `SyntaxContext`
+// A span starts with a head byte. `SPAN_KIND_MASK` picks its kind out of it.
 const TAG_FULL_SPAN: u8 = 0;
 // A partial span with no location information, encoded only with a `SyntaxContext`
 const TAG_PARTIAL_SPAN: u8 = 1;
+// The start is an offset from the start of the parent.
 const TAG_RELATIVE_SPAN: u8 = 2;
+// The start is an offset from the start of the span before, which has the same parent.
+const TAG_PREVIOUS_SPAN: u8 = 3;
+const SPAN_KIND_MASK: u8 = 0b11;
+// The context is the context of the span before, and is not stored.
+const SPAN_SAME_CTXT: u8 = 1 << 2;
+// The parent is the parent of the span before, and is not stored.
+const SPAN_SAME_PARENT: u8 = 1 << 3;
+
+/// What a span can take from the span before it. The encoder and the decoder
+/// see the spans of one value in the same order.
+#[derive(Clone, Copy, Default)]
+struct PrevSpan {
+    ctxt: Option<SyntaxContext>,
+    parent: Option<Option<LocalDefId>>,
+    /// The start of the span before, when its start was relative to `parent`.
+    lo: Option<BytePos>,
+}
 
 const TAG_SYNTAX_CONTEXT: u8 = 0;
 const TAG_EXPN_DATA: u8 = 1;
@@ -422,6 +440,8 @@ impl OnDiskCache {
                 span_bytes: 0,
                 shorthand_refs: 0,
                 shorthand_ref_bytes: 0,
+                prev_span: PrevSpan::default(),
+                prev_span_saved: Vec::new(),
                 inplace: None,
             };
 
@@ -450,6 +470,8 @@ impl OnDiskCache {
                         let id = encoder.interpret_allocs[idx];
                         let pos: u64 = encoder.position().try_into().unwrap();
                         interpret_alloc_index.push(pos);
+                        // The decoder reads each allocation from a jump, with fresh span state.
+                        encoder.prev_span = PrevSpan::default();
                         interpret::specialized_encode_alloc_id(&mut encoder, tcx, id);
                     }
                     n = new_n;
@@ -656,6 +678,8 @@ impl OnDiskCache {
                 span_bytes: 0,
                 shorthand_refs: 0,
                 shorthand_ref_bytes: 0,
+                prev_span: PrevSpan::default(),
+                prev_span_saved: Vec::new(),
                 inplace: Some(Box::new(inplace)),
             };
             tcx.sess.time("encode_query_values", || tcx.encode_query_values(&mut cache_encoder));
@@ -759,6 +783,7 @@ impl OnDiskCache {
             hygiene_context: &self.hygiene_context,
             source_span_cache: SourceSpanCache::default(),
             def_path_hashes: None,
+            prev_span: PrevSpan::default(),
         };
         f(&mut decoder)
     }
@@ -788,6 +813,7 @@ impl OnDiskCache {
             hygiene_context: &self.hygiene_context,
             source_span_cache: SourceSpanCache::default(),
             def_path_hashes: self.inplace.is_none().then_some(&self.def_path_hashes[..]),
+            prev_span: PrevSpan::default(),
         };
         f(&mut decoder)
     }
@@ -814,6 +840,7 @@ pub struct CacheDecoder<'a, 'tcx> {
     /// The table that a `DefId` index refers to, or `None` when the bytes hold the hash itself.
     def_path_hashes: Option<&'a [DefPathHash]>,
     source_span_cache: SourceSpanCache,
+    prev_span: PrevSpan,
 }
 
 impl<'a, 'tcx> CacheDecoder<'a, 'tcx> {
@@ -961,8 +988,10 @@ impl<'a, 'tcx> TyDecoder<'tcx> for CacheDecoder<'a, 'tcx> {
             }
         };
         let old_opaque = mem::replace(&mut self.opaque, new_opaque);
+        let old_prev_span = mem::take(&mut self.prev_span);
         let r = f(self);
         self.opaque = old_opaque;
+        self.prev_span = old_prev_span;
         r
     }
 
@@ -1082,21 +1111,35 @@ impl<'a, 'tcx> SpanDecoder for CacheDecoder<'a, 'tcx> {
     }
 
     fn decode_span(&mut self) -> Span {
-        let ctxt = SyntaxContext::decode(self);
-        let parent = Option::<LocalDefId>::decode(self);
-        let tag: u8 = Decodable::decode(self);
+        let head = self.read_u8();
+        let prev = self.prev_span;
+        let ctxt = if head & SPAN_SAME_CTXT != 0 {
+            prev.ctxt.expect("span repeats the context of no earlier span")
+        } else {
+            SyntaxContext::decode(self)
+        };
+        let parent = if head & SPAN_SAME_PARENT != 0 {
+            prev.parent.expect("span repeats the parent of no earlier span")
+        } else {
+            Option::<LocalDefId>::decode(self)
+        };
+        let kind = head & SPAN_KIND_MASK;
 
-        let (lo, hi) = match tag {
+        let (lo, hi) = match kind {
             TAG_PARTIAL_SPAN => (BytePos(0), BytePos(0)),
-            TAG_RELATIVE_SPAN => {
+            TAG_RELATIVE_SPAN | TAG_PREVIOUS_SPAN => {
                 let zigzag = u32::decode(self);
                 let dlo = ((zigzag >> 1) as i32 ^ -((zigzag & 1) as i32)) as u32;
                 let len = u32::decode(self);
 
-                let enclosing = self
-                    .source_span_cache
-                    .lookup(parent.unwrap(), &self.tcx.untracked().source_span);
-                let lo = enclosing.lo.0.wrapping_add(dlo);
+                let base = if kind == TAG_PREVIOUS_SPAN {
+                    prev.lo.expect("span is relative to no earlier span")
+                } else {
+                    self.source_span_cache
+                        .lookup(parent.unwrap(), &self.tcx.untracked().source_span)
+                        .lo
+                };
+                let lo = base.0.wrapping_add(dlo);
                 (BytePos(lo), BytePos(lo.wrapping_add(len)))
             }
             TAG_FULL_SPAN => {
@@ -1118,6 +1161,9 @@ impl<'a, 'tcx> SpanDecoder for CacheDecoder<'a, 'tcx> {
             _ => unreachable!(),
         };
 
+        let relative = matches!(kind, TAG_RELATIVE_SPAN | TAG_PREVIOUS_SPAN);
+        self.prev_span =
+            PrevSpan { ctxt: Some(ctxt), parent: Some(parent), lo: relative.then_some(lo) };
         Span::new(lo, hi, ctxt, parent)
     }
 
@@ -1252,6 +1298,9 @@ pub struct CacheEncoder<'tcx> {
     /// The type and predicate shorthand references, and their bytes, for `-Zincremental-info`.
     shorthand_refs: usize,
     shorthand_ref_bytes: usize,
+    prev_span: PrevSpan,
+    /// The span state of each pool item under construction, outermost first.
+    prev_span_saved: Vec<PrevSpan>,
 
     inplace: Option<Box<InplaceEncode>>,
 }
@@ -1294,15 +1343,6 @@ impl<'tcx> CacheEncoder<'tcx> {
     /// The type and predicate shorthand references so far, and their bytes.
     pub fn shorthand_refs(&self) -> (usize, usize) {
         (self.shorthand_refs, self.shorthand_ref_bytes)
-    }
-
-    /// The start is a zigzag offset from `parent_lo`, since a span can start before its parent.
-    /// The end is a length, which is short where an offset from the parent is not.
-    fn encode_relative_span(&mut self, lo: BytePos, hi: BytePos, parent_lo: BytePos) {
-        TAG_RELATIVE_SPAN.encode(self);
-        let dlo = lo.0.wrapping_sub(parent_lo.0) as i32;
-        (((dlo << 1) ^ (dlo >> 31)) as u32).encode(self);
-        hi.0.wrapping_sub(lo.0).encode(self);
     }
 
     #[inline]
@@ -1354,11 +1394,14 @@ impl<'tcx> CacheEncoder<'tcx> {
 
     /// Starts a pool item. Writes go to it until `end_pool_item`.
     fn begin_pool_item(&mut self) {
+        let prev_span = mem::take(&mut self.prev_span);
+        self.prev_span_saved.push(prev_span);
         self.inplace.as_mut().unwrap().stack.push(MemEncoder::new());
     }
 
     /// Writes the innermost pool item to the pool and returns its pool position.
     fn end_pool_item(&mut self) -> usize {
+        self.prev_span = self.prev_span_saved.pop().unwrap();
         let inplace = self.inplace.as_mut().unwrap();
         let bytes = inplace.stack.pop().unwrap().finish();
         let pos = inplace.pool.position();
@@ -1380,6 +1423,7 @@ impl<'tcx> CacheEncoder<'tcx> {
         }
         let start = self.encoder.position();
         self.interpret_allocs.clear();
+        self.prev_span = PrevSpan::default();
         value.encode(self);
         let mut interpret_alloc_index = Vec::new();
         let mut idx = 0;
@@ -1406,6 +1450,7 @@ impl<'tcx> CacheEncoder<'tcx> {
     /// we get the expected tag and read the expected number of bytes.
     fn encode_tagged<T: Encodable<Self>, V: Encodable<Self>>(&mut self, tag: T, value: &V) {
         let start_pos = self.position();
+        self.prev_span = PrevSpan::default();
 
         tag.encode(self);
         value.encode(self);
@@ -1546,47 +1591,86 @@ impl<'tcx> SpanEncoder for CacheEncoder<'tcx> {
     }
 
     fn encode_span(&mut self, span: Span) {
+        enum Pos {
+            Partial,
+            /// The start of the parent.
+            Relative(BytePos),
+            Full(SourceFileIndex, usize, RelativeBytePos),
+        }
+
         let start = self.position();
-        let encode = |this: &mut Self| {
-            let span_data = span.data_untracked();
-            span_data.ctxt.encode(this);
-            span_data.parent.encode(this);
-
-            if span_data.is_dummy() {
-                return TAG_PARTIAL_SPAN.encode(this);
+        let span_data = span.data_untracked();
+        let prev = self.prev_span;
+        let parent = span_data
+            .parent
+            .map(|parent| self.source_span_cache.lookup(parent, &self.tcx.untracked().source_span));
+        let pos = if span_data.is_dummy() {
+            Pos::Partial
+        } else if let Some(parent) = parent
+            && parent.contains(span_data)
+        {
+            Pos::Relative(parent.lo)
+        } else {
+            match self.caching_source_map_view.byte_pos_to_line_and_col(span_data.lo) {
+                None => Pos::Partial,
+                Some((file_lo, ..)) if parent.is_some_and(|parent| file_lo.contains(parent.lo)) => {
+                    Pos::Relative(parent.unwrap().lo)
+                }
+                Some((file_lo, line_lo, col_lo)) => {
+                    Pos::Full(self.source_file_index(file_lo), line_lo, col_lo)
+                }
             }
-
-            let parent = span_data.parent.map(|parent| {
-                this.source_span_cache.lookup(parent, &this.tcx.untracked().source_span)
-            });
-            if let Some(parent) = parent
-                && parent.contains(span_data)
-            {
-                return this.encode_relative_span(span_data.lo, span_data.hi, parent.lo);
-            }
-
-            let Some((file_lo, line_lo, col_lo)) =
-                this.caching_source_map_view.byte_pos_to_line_and_col(span_data.lo)
-            else {
-                return TAG_PARTIAL_SPAN.encode(this);
-            };
-
-            if let Some(parent) = parent
-                && file_lo.contains(parent.lo)
-            {
-                return this.encode_relative_span(span_data.lo, span_data.hi, parent.lo);
-            }
-
-            let len = span_data.hi - span_data.lo;
-            let source_file_index = this.source_file_index(file_lo);
-
-            TAG_FULL_SPAN.encode(this);
-            source_file_index.encode(this);
-            line_lo.encode(this);
-            col_lo.encode(this);
-            len.encode(this);
         };
-        encode(self);
+
+        let same_ctxt = prev.ctxt == Some(span_data.ctxt);
+        let same_parent = prev.parent == Some(span_data.parent);
+        let (kind, base) = match pos {
+            Pos::Partial => (TAG_PARTIAL_SPAN, None),
+            Pos::Full(..) => (TAG_FULL_SPAN, None),
+            Pos::Relative(parent_lo) => match prev.lo.filter(|_| same_parent) {
+                Some(prev_lo)
+                    if prev_lo.0.abs_diff(span_data.lo.0)
+                        < parent_lo.0.abs_diff(span_data.lo.0) =>
+                {
+                    (TAG_PREVIOUS_SPAN, Some(prev_lo))
+                }
+                _ => (TAG_RELATIVE_SPAN, Some(parent_lo)),
+            },
+        };
+        let mut head = kind;
+        if same_ctxt {
+            head |= SPAN_SAME_CTXT;
+        }
+        if same_parent {
+            head |= SPAN_SAME_PARENT;
+        }
+        head.encode(self);
+        if !same_ctxt {
+            span_data.ctxt.encode(self);
+        }
+        if !same_parent {
+            span_data.parent.encode(self);
+        }
+        match pos {
+            Pos::Partial => {}
+            // A span can start before its base, so the offset is zigzag. The end is a length.
+            Pos::Relative(_) => {
+                let dlo = span_data.lo.0.wrapping_sub(base.unwrap().0) as i32;
+                (((dlo << 1) ^ (dlo >> 31)) as u32).encode(self);
+                span_data.hi.0.wrapping_sub(span_data.lo.0).encode(self);
+            }
+            Pos::Full(source_file_index, line_lo, col_lo) => {
+                source_file_index.encode(self);
+                line_lo.encode(self);
+                col_lo.encode(self);
+                (span_data.hi - span_data.lo).encode(self);
+            }
+        }
+        self.prev_span = PrevSpan {
+            ctxt: Some(span_data.ctxt),
+            parent: Some(span_data.parent),
+            lo: base.map(|_| span_data.lo),
+        };
         self.span_bytes += self.position().saturating_sub(start);
     }
 
