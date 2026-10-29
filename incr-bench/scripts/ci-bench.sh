@@ -140,6 +140,8 @@ build() {
 	if [[ $graph != $'0\t0\t0\t0\t0' ]]; then
 		printf '%s\t%s\t%s\t%s\n' "$config" "$mode" "$step" "$graph" >> "${results%.tsv}.graph.tsv"
 		echo "dep graph bytes $mode $step: $graph (total, heads, keys, values, edges)"
+		runs=$({ grep -oE 'dep graph edges that a run copies: [0-9]+' "$log" || true; } | awk '{s += $8} END {printf "%d", s}')
+		echo "dep graph edges that a run copies $mode $step: $runs"
 	fi
 	if [[ $step == cold ]]; then
 		echo "query cache bytes by query $mode $step (bytes, values, span bytes, query):"

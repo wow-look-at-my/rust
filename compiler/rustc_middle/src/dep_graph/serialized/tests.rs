@@ -118,6 +118,35 @@ fn edge_back_references_restart_at_a_flush() {
 }
 
 #[test]
+fn a_repeated_run_of_edges_is_one_code() {
+    let far = 0x0100_0000;
+    let run: Vec<u32> = (0..40).map(|k| far + k * 977).collect();
+    let mut repeated = run.clone();
+    repeated.insert(0, 5);
+    repeated.extend([far + 1, 3]);
+    let entries = vec![
+        (0, node(1, 1), val(1), vec![]),
+        (1, node(1, 2), val(2), run.clone()),
+        // The run again after another target, then a part of it, then the run at its end.
+        (2, node(1, 3), val(3), repeated),
+        (3, node(1, 4), val(4), run[10..20].to_vec()),
+        (4, node(1, 5), val(5), [&[0][..], &run[30..], &run[..3]].concat()),
+    ];
+    let with_runs = round_trip(&entries, &[]);
+    let fresh: Vec<u32> = (0..40).map(|k| far + 1_000_000 + k * 977).collect();
+    let without_runs = round_trip(
+        &[
+            (0, node(1, 1), val(1), vec![]),
+            (1, node(1, 2), val(2), run),
+            (2, node(1, 3), val(3), fresh),
+        ],
+        &[],
+    );
+    // More nodes and more edges, and still fewer bytes.
+    assert!(with_runs < without_runs, "{with_runs} vs {without_runs} bytes");
+}
+
+#[test]
 fn round_trip_long_edge_list() {
     let edges: Vec<u32> = (0..(NodeHead::MAX_INLINE_LEN as u32 + 10)).collect();
     let entries = vec![(0, node(1, 1), val(1), vec![]), (1, node(2, 2), val(2), edges)];

@@ -529,6 +529,9 @@ struct NodeRecord {
     edges_restart: bool,
 }
 
+/// The shortest run of edges that one back reference copies. Edges cost no more as multiple codes.
+const MIN_EDGE_RUN: usize = 3;
+
 fn leb_len(x: u64) -> u32 {
     (64 - x.leading_zeros()).max(1).div_ceil(7)
 }
@@ -604,24 +607,31 @@ impl NodeRecord {
             history.clear();
         }
         let first = history.len();
+        let end = first + self.num_edges as usize;
         let mut prev = self.index.as_u32() as i64;
-        for _ in 0..self.num_edges {
+        while history.len() < end {
             let code = d.read_u64();
-            let target = if code & 1 != 0 {
+            if code & 1 != 0 {
                 let zigzag = code >> 1;
-                prev + ((zigzag >> 1) as i64 ^ -((zigzag & 1) as i64))
-            } else {
-                let distance = (code >> 1) as usize;
-                let at = history
-                    .len()
-                    .checked_sub(distance)
-                    .filter(|_| distance != 0)
-                    .expect("dep graph edge back-reference does not point at an earlier edge");
-                i64::from(history[at])
-            };
-            let target = u32::try_from(target).expect("dep graph edge target out of range");
-            history.push(target);
-            prev = i64::from(target);
+                let target = prev + ((zigzag >> 1) as i64 ^ -((zigzag & 1) as i64));
+                let target = u32::try_from(target).expect("dep graph edge target out of range");
+                history.push(target);
+                prev = i64::from(target);
+                continue;
+            }
+            let distance = (code >> 2) as usize;
+            let at = history
+                .len()
+                .checked_sub(distance)
+                .filter(|_| distance != 0)
+                .expect("dep graph edge back-reference does not point at an earlier edge");
+            let len = if code & 0b10 != 0 { d.read_usize() + MIN_EDGE_RUN } else { 1 };
+            assert!(history.len() + len <= end, "dep graph edge run passes the end of its node");
+            for k in 0..len {
+                let target = history[at + k];
+                history.push(target);
+            }
+            prev = i64::from(*history.last().unwrap());
         }
         let targets = &history[first..];
         let width = edge_width(targets);
@@ -685,6 +695,8 @@ struct EncoderRefs {
     edge_positions: FxHashMap<u32, u32>,
     /// The number of edges in the unflushed buffer.
     edge_count: u32,
+    /// The targets of the edges in the unflushed buffer, in order.
+    edge_history: Vec<u32>,
     kind_flags: KindFlags,
 }
 
@@ -697,6 +709,7 @@ impl EncoderRefs {
             values: FingerprintRefs::new(),
             edge_positions: FxHashMap::default(),
             edge_count: 0,
+            edge_history: Vec::new(),
             kind_flags: KindFlags::new(),
         }
     }
@@ -716,6 +729,8 @@ struct NodeBytes {
     key: u64,
     value: u64,
     edges: u64,
+    /// The edges that a run copies, which cost no bytes of their own. Not a byte count.
+    run_edges: u64,
 }
 
 impl NodeBytes {
@@ -724,6 +739,7 @@ impl NodeBytes {
         self.key += other.key;
         self.value += other.value;
         self.edges += other.edges;
+        self.run_edges += other.run_edges;
     }
 
     fn total(&self) -> u64 {
@@ -763,6 +779,7 @@ impl NodeInfo<'_> {
             flags |= FLAG_EDGES_RESTART;
             refs.edge_positions.clear();
             refs.edge_count = 0;
+            refs.edge_history.clear();
             refs.kind_flags.clear();
         }
         if key_is_absent {
@@ -813,27 +830,53 @@ impl NodeInfo<'_> {
             e.emit_u32(edges.len().try_into().unwrap());
         }
 
-        // Each target is the shorter of leb128 codes.
+        // Each target is the shorter of a delta from the target before and a back reference to an earlier edge of the block.
         let mut prev = index as i64;
-        for node_index in edges.iter() {
-            let target = node_index.as_u32();
+        let mut run_edges = 0;
+        let mut i = 0;
+        while i < edges.len() {
+            let target = edges[i].as_u32();
             let delta = i64::from(target) - prev;
             let delta_code = ((((delta << 1) ^ (delta >> 63)) as u64) << 1) | 1;
-            let code = match refs.edge_positions.insert(target, refs.edge_count) {
-                Some(at) if leb_len(u64::from(refs.edge_count - at) << 1) < leb_len(delta_code) => {
-                    u64::from(refs.edge_count - at) << 1
+            let at = refs.edge_positions.get(&target).copied();
+            let mut len = 1;
+            if let Some(at) = at {
+                while i + len < edges.len()
+                    && refs.edge_history.get(at as usize + len) == Some(&edges[i + len].as_u32())
+                {
+                    len += 1;
                 }
-                _ => delta_code,
-            };
-            e.emit_u64(code);
-            refs.edge_count += 1;
-            prev = i64::from(target);
+            }
+            match at {
+                Some(at) if len >= MIN_EDGE_RUN => {
+                    let distance = u64::from(refs.edge_count - at);
+                    e.emit_u64(distance << 2 | 0b10);
+                    e.emit_usize(len - MIN_EDGE_RUN);
+                    run_edges += len as u64;
+                }
+                Some(at) if leb_len(u64::from(refs.edge_count - at) << 2) < leb_len(delta_code) => {
+                    len = 1;
+                    e.emit_u64(u64::from(refs.edge_count - at) << 2);
+                }
+                _ => {
+                    len = 1;
+                    e.emit_u64(delta_code);
+                }
+            }
+            for edge in &edges[i..i + len] {
+                refs.edge_positions.insert(edge.as_u32(), refs.edge_count);
+                refs.edge_history.push(edge.as_u32());
+                refs.edge_count += 1;
+            }
+            prev = i64::from(edges[i + len - 1].as_u32());
+            i += len;
         }
         NodeBytes {
             head: (key_start - start) as u64,
             key: (value_start - key_start) as u64,
             value: (edges_start - value_start) as u64,
             edges: (e.position() - edges_start) as u64,
+            run_edges,
         }
     }
 }
@@ -1220,6 +1263,7 @@ impl EncoderState {
                 bytes.value,
                 bytes.edges,
             );
+            eprintln!("[incremental] dep graph edges that a run copies: {}", bytes.run_edges);
 
             if cfg!(debug_assertions) {
                 let total_read_count = current.total_read_count.load(Ordering::Relaxed);
