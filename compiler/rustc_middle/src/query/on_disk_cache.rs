@@ -1025,6 +1025,11 @@ fn decode_value<D: Decoder, V: Decodable<D>>(decoder: &mut D) -> V {
 impl<'a, 'tcx> TyDecoder<'tcx> for CacheDecoder<'a, 'tcx> {
     const CLEAR_CROSS_CRATE: bool = false;
 
+    #[inline]
+    fn relative_shorthands(&self) -> bool {
+        self.pool.is_none()
+    }
+
     fn cached_ty_for_shorthand<F>(&mut self, shorthand: usize, or_insert_with: F) -> Ty<'tcx>
     where
         F: FnOnce(&mut Self) -> Ty<'tcx>,
@@ -1802,6 +1807,12 @@ impl<'tcx> TyEncoder<'tcx> for CacheEncoder<'tcx> {
     fn note_shorthand_ref(&mut self, bytes: usize) {
         self.shorthand_refs += 1;
         self.shorthand_ref_bytes += bytes;
+    }
+    /// A shorthand of the inplace format points into the pool, where a distance from the
+    /// value stream means nothing.
+    #[inline]
+    fn relative_shorthands(&self) -> bool {
+        self.inplace.is_none()
     }
     #[inline]
     fn encode_alloc_id(&mut self, alloc_id: &interpret::AllocId) {
