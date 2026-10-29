@@ -2827,12 +2827,16 @@ rustc_queries! {
     query items_of_instance(key: (ty::Instance<'tcx>, CollectionMode)) -> Result<(&'tcx [Spanned<MonoItem<'tcx>>], &'tcx [Spanned<MonoItem<'tcx>>]), NormalizationErrorInMono> {
         desc { "collecting items used by `{}`", key.0 }
         cache_on_disk
+        // Only the `eval_always` mono item collection reads it, and an `eval_always` task records no edges.
+        no_hash
     }
 
     /// The estimate counts the statements of the MIR of `key`.
     query size_estimate(key: ty::InstanceKind<'tcx>) -> usize {
         desc { "estimating codegen size of `{}`", tcx.def_path_str(key.def_id()) }
         cache_on_disk
+        // Only the `eval_always` partitioning reads it, so a hash of it is never compared.
+        no_hash
     }
 
     query anon_const_kind(def_id: DefId) -> ty::AnonConstKind {
