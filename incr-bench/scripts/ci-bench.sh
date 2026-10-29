@@ -154,6 +154,9 @@ build() {
 		echo "dep graph nodes no edge points at $mode $step (bytes, nodes, kind):"
 		{ grep -oE '^\[incremental\] unread nodes: [A-Za-z_0-9]+ [0-9]+ [0-9]+' "$log" || true; } |
 			awk '{n[$4] += $5; b[$4] += $6} END {for (k in b) printf "%d\t%d\t%s\n", b[k], n[k], k}' | sort -rn | sed -n 1,40p
+		echo "dep graph edges by reader and target kind $mode $step (edges, reader, target):"
+		{ grep -oE '^\[incremental\] edges by kind: [A-Za-z_0-9]+ [A-Za-z_0-9]+ [0-9]+' "$log" || true; } |
+			awk '{e[$5 " " $6] += $7} END {for (k in e) printf "%d\t%s\n", e[k], k}' | sort -rn | sed -n 1,50p
 		# A node keyed by a DefPathHash of another crate's item is a lookup into that crate.
 		echo "dep graph nodes keyed by an item of the crate $mode $step (bytes, nodes, local bytes, local nodes, kind):"
 		{ grep -oE '^\[incremental\] local-keyed nodes: [A-Za-z_0-9]+ [0-9]+ [0-9]+ [0-9]+ [0-9]+' "$log" || true; } |

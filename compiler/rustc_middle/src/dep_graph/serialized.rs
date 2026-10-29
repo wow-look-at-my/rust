@@ -911,6 +911,8 @@ struct ReadStats {
     kinds: Vec<Option<DepKind>>,
     bytes: Vec<u32>,
     read: Vec<bool>,
+    /// Edges by the kind of their reader and the kind of their target.
+    pairs: FxHashMap<(DepKind, Option<DepKind>), u64>,
 }
 
 impl ReadStats {
@@ -1042,6 +1044,9 @@ impl EncoderState {
                 for edge in edges {
                     readers.grow(edge.as_usize());
                     readers.read[edge.as_usize()] = true;
+                    // A target is encoded before its reader, so its kind is known here.
+                    let target = readers.kinds[edge.as_usize()];
+                    *readers.pairs.entry((node.kind, target)).or_default() += 1;
                 }
             });
         }
@@ -1288,6 +1293,16 @@ impl EncoderState {
             unread.sort_by_key(|&(kind, (_, bytes))| (std::cmp::Reverse(bytes), kind.as_u16()));
             for (kind, (nodes, bytes)) in unread {
                 eprintln!("[incremental] unread nodes: {kind:?} {nodes} {bytes}");
+            }
+            // Sorted below.
+            #[allow(rustc::potential_query_instability)]
+            let mut pairs: Vec<_> = readers.pairs.iter().collect();
+            pairs.sort_by_key(|&(&(reader, target), &edges)| {
+                (std::cmp::Reverse(edges), reader.as_u16(), target.map(|k| k.as_u16()))
+            });
+            for (&(reader, target), edges) in pairs.into_iter().take(60) {
+                let target = target.map_or_else(|| "Unknown".to_string(), |k| format!("{k:?}"));
+                eprintln!("[incremental] edges by kind: {reader:?} {target} {edges}");
             }
         }
     }
