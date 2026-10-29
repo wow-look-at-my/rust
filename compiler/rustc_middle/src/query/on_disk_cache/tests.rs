@@ -35,7 +35,7 @@ fn values_index_round_trips() {
         entry(6, 43, 200),
         entry(4_000_000, 243, 1),
         entry(2, 244, 70_000),
-        entry(u32::MAX, 70_244, 9),
+        entry(SerializedDepNodeIndex::MAX_AS_U32, 70_244, 9),
         entry(0, 70_253, 1),
     ]);
 }
