@@ -14,10 +14,10 @@ use rustc_ast::tokenstream::TokenStream;
 use rustc_data_structures::steal::Steal;
 use rustc_data_structures::sync::{DynSend, DynSync};
 use rustc_index::{Idx, IndexSlice};
+use rustc_span::ErrorGuaranteed;
 use rustc_span::def_id::ModId;
-use rustc_span::{ErrorGuaranteed, Spanned};
 
-use crate::mono::{MonoItem, NormalizationErrorInMono};
+use crate::mono::{MonoItemUse, NormalizationErrorInMono};
 use crate::ty::{self, Ty, TyCtxt};
 use crate::{mir, thir, traits};
 
@@ -213,7 +213,7 @@ impl_erasable_for_types_with_no_type_params! {
     Result<&'_ traits::ImplSource<'_, ()>, traits::CodegenObligationError>,
     Result<&'_ ty::List<Ty<'_>>, ty::util::AlwaysRequiresDrop>,
     Result<(&'_ Steal<thir::Thir<'_>>, thir::ExprId), ErrorGuaranteed>,
-    Result<(&'_ [Spanned<MonoItem<'_>>], &'_ [Spanned<MonoItem<'_>>]), NormalizationErrorInMono>,
+    Result<(&'_ [MonoItemUse<'_>], &'_ [MonoItemUse<'_>]), NormalizationErrorInMono>,
     Result<(), ErrorGuaranteed>,
     Result<Option<ty::EarlyBinder<'_, ty::Const<'_>>>, ErrorGuaranteed>,
     Result<Option<ty::Instance<'_>>, ErrorGuaranteed>,

@@ -76,7 +76,7 @@ use rustc_middle::middle::resolve::TypeRelativeDelegationRes;
 use rustc_session::Limits;
 use rustc_session::config::{EntryFnType, OptLevel, OutputFilenames, SymbolManglingVersion};
 use rustc_span::def_id::{LOCAL_CRATE, ModId};
-use rustc_span::{DUMMY_SP, LocalExpnId, Span, Spanned, Symbol};
+use rustc_span::{DUMMY_SP, LocalExpnId, Span, Symbol};
 use rustc_target::spec::PanicStrategy;
 
 use crate::infer::canonical::{self, Canonical};
@@ -98,7 +98,7 @@ use crate::mir::interpret::{
     EvalToValTreeResult, GlobalId,
 };
 use crate::mono::{
-    CodegenUnit, CollectionMode, MonoItem, MonoItemPartitions, NormalizationErrorInMono,
+    CodegenUnit, CollectionMode, MonoItemPartitions, MonoItemUse, NormalizationErrorInMono,
 };
 use crate::query::query_api::{define_query_api, maybe_into_query_key};
 use crate::traits::query::{
@@ -2834,7 +2834,7 @@ rustc_queries! {
         separate_provide_extern
     }
 
-    query items_of_instance(key: (ty::Instance<'tcx>, CollectionMode)) -> Result<(&'tcx [Spanned<MonoItem<'tcx>>], &'tcx [Spanned<MonoItem<'tcx>>]), NormalizationErrorInMono> {
+    query items_of_instance(key: (ty::Instance<'tcx>, CollectionMode)) -> Result<(&'tcx [MonoItemUse<'tcx>], &'tcx [MonoItemUse<'tcx>]), NormalizationErrorInMono> {
         desc { "collecting items used by `{}`", key.0 }
         cache_on_disk
         // Only the `eval_always` mono item collection reads it, and an `eval_always` task records no edges.

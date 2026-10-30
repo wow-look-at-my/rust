@@ -15,14 +15,16 @@ use rustc_hashes::Hash128;
 use rustc_hir::ItemId;
 use rustc_hir::def_id::{CrateNum, DefId, DefIdSet, LOCAL_CRATE};
 use rustc_macros::{StableHash, TyDecodable, TyEncodable};
+use rustc_serialize::{Decodable, Encodable};
 use rustc_session::config::OptLevel;
-use rustc_span::{OrdSpan, Span, Symbol};
+use rustc_span::{DUMMY_SP, OrdSpan, Span, Symbol};
 use rustc_target::spec::SymbolVisibility;
 use tracing::debug;
 
 use crate::dep_graph::dep_node::{make_compile_codegen_unit, make_compile_mono_item};
 use crate::dep_graph::{DepNode, WorkProduct, WorkProductId};
 use crate::middle::codegen_fn_attrs::CodegenFnAttrFlags;
+use crate::ty::codec::{TyDecoder, TyEncoder};
 use crate::ty::{self, GenericArgs, Instance, InstanceKind, ShimKind, SymbolName, Ty, TyCtxt};
 
 /// Describes how a monomorphization will be instantiated in object files.
@@ -76,6 +78,26 @@ pub enum MonoItem<'tcx> {
     Fn(Instance<'tcx>),
     Static(DefId),
     GlobalAsm(ItemId),
+}
+
+/// A mono item that an instance uses, and the span of the use.
+#[derive(Clone, Copy, Debug, StableHash)]
+pub struct MonoItemUse<'tcx> {
+    pub item: MonoItem<'tcx>,
+    pub span: Span,
+}
+
+// Only a diagnostic reads the span, and the collector finds it again from the user.
+impl<'tcx, E: TyEncoder<'tcx>> Encodable<E> for MonoItemUse<'tcx> {
+    fn encode(&self, e: &mut E) {
+        self.item.encode(e);
+    }
+}
+
+impl<'tcx, D: TyDecoder<'tcx>> Decodable<D> for MonoItemUse<'tcx> {
+    fn decode(d: &mut D) -> Self {
+        MonoItemUse { item: MonoItem::decode(d), span: DUMMY_SP }
+    }
 }
 
 fn opt_incr_drop_glue_mode<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> InstantiationMode {

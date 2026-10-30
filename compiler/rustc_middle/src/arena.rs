@@ -2,9 +2,9 @@
 //! `Copy` type, and any `!Copy` type explicitly listed below.
 
 use rustc_serialize::Decodable;
-use rustc_span::{Span, Spanned};
+use rustc_span::Span;
 
-use crate::mono::MonoItem;
+use crate::mono::MonoItemUse;
 use crate::ty::codec::{RefDecodable, TyDecoder};
 use crate::ty::{self, Ty, TyCtxt};
 
@@ -201,7 +201,7 @@ impl_ref_decodable_into_arena! {
     (rustc_middle::middle::exported_symbols::ExportedSymbol<'tcx>, rustc_middle::middle::exported_symbols::SymbolExportInfo),
     (ty::Clause<'tcx>, Span),
     (ty::PolyTraitRef<'tcx>, Span),
-    Spanned<MonoItem<'tcx>>,
+    MonoItemUse<'tcx>,
     rustc_ast::InlineAsmTemplatePiece,
     rustc_ast::tokenstream::TokenStream,
     rustc_attr_ir::Attribute,

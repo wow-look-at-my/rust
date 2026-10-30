@@ -25,14 +25,14 @@ use rustc_span::hygiene::{
 };
 use rustc_span::{
     BlobDecoder, BytePos, ByteSymbol, CachingSourceMapView, ExpnData, ExpnHash, RelativeBytePos,
-    SourceFile, Span, SpanDecoder, SpanEncoder, Spanned, StableSourceFileId, Symbol, bug,
+    SourceFile, Span, SpanDecoder, SpanEncoder, StableSourceFileId, Symbol, bug,
 };
 
 use crate::dep_graph::{DepNodeIndex, QuerySideEffect, SerializedDepNodeIndex};
 use crate::ich::SourceSpanCache;
 use crate::mir::interpret::{AllocDecodingSession, AllocDecodingState};
 use crate::mir::{self, interpret};
-use crate::mono::MonoItem;
+use crate::mono::MonoItemUse;
 use crate::ty::codec::{
     RefDecodable, SHORTHAND_OFFSET, TyDecoder, TyEncoder, forward_all_decoder_methods_to,
 };
@@ -1435,7 +1435,7 @@ impl_decodable_via_ref_decodable_for_foreign_types! {
     )],
     &'tcx [(ty::Clause<'tcx>, Span)],
     &'tcx [DefId],
-    &'tcx [Spanned<MonoItem<'tcx>>],
+    &'tcx [MonoItemUse<'tcx>],
     &'tcx [rustc_middle::middle::dead_code::DeadCodeBodyUse],
     &'tcx [rustc_middle::middle::reachable::ReachableBodyRef],
     &'tcx [ty::Variance],

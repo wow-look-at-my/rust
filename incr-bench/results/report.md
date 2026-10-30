@@ -59,7 +59,7 @@ The last two cost more time than they save in bytes, so the branch does not use 
 
 ## The format version
 
-`HEADER_FORMAT_VERSION` in `compiler/rustc_incremental/src/persist/file_format.rs` moved from 0 to 19. A cache with another version is ignored and built again, not read. Each bump costs one cold build of each crate, which is the `cold` step in the tables of `results/ci/`.
+`HEADER_FORMAT_VERSION` in `compiler/rustc_incremental/src/persist/file_format.rs` moved from 0 to 20. A cache with another version is ignored and built again, not read. Each bump costs one cold build of each crate, which is the `cold` step in the tables of `results/ci/`.
 
 ## Gates
 
