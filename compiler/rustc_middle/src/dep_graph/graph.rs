@@ -475,7 +475,8 @@ impl DepGraphData {
                 // When there is only one dependency, don't bother creating a node.
                 reads[0]
             }
-            _ if self.current.is_transparent(dep_kind) => self.current.alloc_transparent(reads),
+            // A kind that is not anon gets here only as a transparent task.
+            _ if !dep_kind.is_anon() => self.current.alloc_transparent(reads),
             _ => {
                 // The dep node indices are hashed here instead of hashing the dep nodes of the
                 // dependencies. These indices may refer to different nodes per session, but this
@@ -744,6 +745,13 @@ impl DepGraphData {
     #[inline]
     pub fn is_transparent(&self, kind: DepKind) -> bool {
         self.current.is_transparent(kind)
+    }
+
+    /// True if a lookup of `kind` of an item of another crate gets no node. It reads the
+    /// `extern_item_fingerprint` node of that item instead.
+    #[inline]
+    pub fn is_extern_item_transparent(&self, kind: DepKind) -> bool {
+        self.current.extern_items && super::reads_extern_item_entry(kind)
     }
 
     /// Returns true if the given node has been marked as green during the
@@ -1306,6 +1314,8 @@ pub(super) struct CurrentDepGraph {
     /// The kinds that `-Zincremental-transparent` names.
     transparent_kinds: [bool; DepKind::NUM_VARIANTS],
     transparent_reads: Lock<TransparentReads>,
+    /// `-Zincremental-extern-items`.
+    extern_items: bool,
 
     /// These are simple counters that are for profiling and
     /// debugging and only active with `debug_assertions`.
@@ -1360,6 +1370,7 @@ impl CurrentDepGraph {
             anon_id_seed,
             transparent_kinds,
             transparent_reads: Default::default(),
+            extern_items: session.opts.unstable_opts.incremental_extern_items,
             #[cfg(debug_assertions)]
             forbidden_edge,
             #[cfg(debug_assertions)]

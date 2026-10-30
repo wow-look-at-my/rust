@@ -2583,6 +2583,9 @@ options! {
     incremental_explain_red: Option<Vec<String>> = (None, parse_opt_comma_list, [UNTRACKED],
         "comma-separated dep kinds: for each node of these kinds that cannot be marked green, \
         print the chain of red dependencies down to the input that changed (default: none)"),
+    incremental_extern_items: bool = (false, parse_bool, [TRACKED],
+        "write a fingerprint of each item into the crate metadata, and give each item of another \
+        crate one dep node that its metadata lookups read (default: no)"),
     incremental_ignore_spans: bool = (false, parse_bool, [TRACKED],
         "ignore spans during ICH computation -- used for testing (default: no)"),
     incremental_info: bool = (false, parse_bool, [UNTRACKED],

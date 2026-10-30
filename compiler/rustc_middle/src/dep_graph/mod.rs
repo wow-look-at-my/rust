@@ -55,6 +55,27 @@ impl KeyFingerprintStyle {
     }
 }
 
+/// The lookups of an item of another crate whose metadata entries `extern_item_fingerprint`
+/// covers. The metadata encoder hashes the value of each of them into the item's fingerprint.
+pub fn reads_extern_item_entry(kind: DepKind) -> bool {
+    matches!(
+        kind,
+        DepKind::def_kind
+            | DepKind::def_span
+            | DepKind::def_ident_span
+            | DepKind::type_of
+            | DepKind::generics_of
+            | DepKind::fn_sig
+            | DepKind::explicit_clauses_of
+            | DepKind::inferred_outlives_of
+            | DepKind::impl_trait_header
+            | DepKind::codegen_fn_attrs
+            | DepKind::lookup_stability
+            | DepKind::lookup_deprecation_entry
+            | DepKind::associated_item
+    )
+}
+
 /// Execute the operation with provided dependencies.
 fn with_deps<OP, R>(task_deps: TaskDepsRef<'_>, op: OP) -> R
 where

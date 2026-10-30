@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::mem;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -95,6 +96,8 @@ pub(super) struct EncodeContext<'a, 'tcx> {
     prev_session: Option<PrevSession<'tcx>>,
     /// Each foreign reference this metadata writes by position.
     foreign_refs: Option<ForeignRefsBuilder>,
+    /// Under `-Zincremental-extern-items`, the sum of the fingerprints of the entries of each item that `reads_extern_item_entry` names.
+    item_fingerprints: FxIndexMap<LocalDefId, u64>,
 }
 
 #[derive(Default)]
@@ -787,6 +790,11 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         // encode the tables. This overwrites def_keys, so it must happen after
         // encode_def_path_table.
         let proc_macro_data = stat!("proc-macro-data", || self.encode_proc_macros());
+
+        for (id, fingerprint) in mem::take(&mut self.item_fingerprints) {
+            // Zero means that the crate wrote no fingerprints.
+            self.table_writer().item_fingerprint(id, fingerprint.max(1));
+        }
 
         let tables = stat!("tables", || self.tables.encode(&mut self.opaque));
 
@@ -1563,6 +1571,21 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         super::TableWriter { encoder: self }
     }
 
+    /// Under `-Zincremental-extern-items`, adds `value`, the entry of `kind` of `id`, to the
+    /// fingerprint of `id`. Call it at each write of an entry that `reads_extern_item_entry`
+    /// names, or another crate reuses a stale value of that entry.
+    fn fingerprint_entry<V: StableHash>(&mut self, id: LocalDefId, kind: DepKind, value: &V) {
+        if !self.tcx.sess.opts.unstable_opts.incremental_extern_items {
+            return;
+        }
+        let fingerprint = self.tcx.with_stable_hashing_context(|mut hcx| {
+            hash_result(&mut hcx, &(kind.as_usize(), value))
+        });
+        // A sum, so the order of the writes does not change it.
+        let sum = self.item_fingerprints.entry(id).or_insert(0);
+        *sum = sum.wrapping_add(fingerprint.to_smaller_hash().as_u64());
+    }
+
     fn encode_def_ids(&mut self) {
         self.encode_info_for_mod(CRATE_DEF_ID);
 
@@ -1576,6 +1599,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         for local_id in self.local_defs_remapping.iter_sorted_local_ids() {
             let def_id = local_id.to_def_id();
             let def_kind = tcx.def_kind(local_id);
+            self.fingerprint_entry(local_id, DepKind::def_kind, &def_kind);
             self.table_writer().def_kind(local_id, def_kind);
 
             // The `DefCollector` will sometimes create unnecessary `DefId`s
@@ -1602,6 +1626,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
 
             if should_encode_span(def_kind) {
                 let def_span = tcx.def_span(local_id);
+                self.fingerprint_entry(local_id, DepKind::def_span, &def_span);
                 self.table_writer().def_span(local_id, def_span);
             }
             if should_encode_attrs(def_kind) {
@@ -1613,10 +1638,13 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             if should_encode_span(def_kind)
                 && let Some(ident_span) = tcx.def_ident_span(def_id)
             {
+                self.fingerprint_entry(local_id, DepKind::def_ident_span, &ident_span);
                 self.table_writer().def_ident_span(local_id, ident_span);
             }
             if def_kind.has_codegen_attrs() {
-                self.table_writer().codegen_fn_attrs(local_id, tcx.codegen_fn_attrs(def_id));
+                let attrs = tcx.codegen_fn_attrs(def_id);
+                self.fingerprint_entry(local_id, DepKind::codegen_fn_attrs, attrs);
+                self.table_writer().codegen_fn_attrs(local_id, attrs);
             }
             if should_encode_visibility(def_kind) {
                 let vis = tcx.local_visibility(local_id).map_id(|mod_id| mod_id.to_local_def_id());
@@ -1633,13 +1661,19 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 self.table_writer().variances_of(local_id, v);
             }
             if should_encode_fn_sig(def_kind) {
-                self.table_writer().fn_sig(local_id, tcx.fn_sig(def_id));
+                let fn_sig = tcx.fn_sig(def_id);
+                self.fingerprint_entry(local_id, DepKind::fn_sig, &fn_sig);
+                self.table_writer().fn_sig(local_id, fn_sig);
             }
             if should_encode_generics(def_kind) {
                 let g = tcx.generics_of(def_id);
+                self.fingerprint_entry(local_id, DepKind::generics_of, g);
                 self.table_writer().generics_of(local_id, g);
-                self.table_writer().explicit_clauses_of(local_id, tcx.explicit_clauses_of(def_id));
+                let clauses = tcx.explicit_clauses_of(def_id);
+                self.fingerprint_entry(local_id, DepKind::explicit_clauses_of, &clauses);
+                self.table_writer().explicit_clauses_of(local_id, clauses);
                 let inferred_outlives = tcx.inferred_outlives_of(def_id);
+                self.fingerprint_entry(local_id, DepKind::inferred_outlives_of, &inferred_outlives);
                 self.table_writer().inferred_outlives_of(local_id, inferred_outlives);
 
                 for param in &g.own_params {
@@ -1654,7 +1688,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 self.table_writer().const_conditions(local_id, tcx.const_conditions(def_id));
             }
             if should_encode_type(tcx, local_id, def_kind) {
-                self.table_writer().type_of(local_id, tcx.type_of(def_id));
+                let ty = tcx.type_of(def_id);
+                self.fingerprint_entry(local_id, DepKind::type_of, &ty);
+                self.table_writer().type_of(local_id, ty);
             }
             if should_encode_constness(def_kind) {
                 let constness = tcx.constness(def_id);
@@ -1904,6 +1940,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             if let Some((CtorKind::Fn, ctor_def_id)) = variant.ctor {
                 let fn_sig = tcx.fn_sig(ctor_def_id);
                 // FIXME only encode signature for ctor_def_id
+                self.fingerprint_entry(variant_id, DepKind::fn_sig, &fn_sig);
                 self.table_writer().fn_sig(variant_id, fn_sig);
             }
         }
@@ -1971,6 +2008,8 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
     fn encode_info_for_assoc_item(&mut self, def_id: LocalDefId) {
         let tcx = self.tcx;
         let item = tcx.associated_item(def_id);
+        // Another crate decodes the item from several tables. Each of them holds a part of it.
+        self.fingerprint_entry(def_id, DepKind::associated_item, &item);
 
         if matches!(item.container, AssocContainer::Trait | AssocContainer::TraitImpl(_)) {
             self.table_writer().defaultness(def_id, item.defaultness(tcx));
@@ -2183,6 +2222,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         // the stability attributes are even enabled before using their queries.
         if self.feat.staged_api() || self.tcx.sess.opts.unstable_opts.force_unstable_if_unmarked {
             if let Some(stab) = self.tcx.lookup_stability(def_id) {
+                self.fingerprint_entry(def_id, DepKind::lookup_stability, &stab);
                 self.table_writer().lookup_stability(def_id, stab);
             }
         }
@@ -2213,6 +2253,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
     #[instrument(level = "debug", skip(self))]
     fn encode_deprecation(&mut self, def_id: LocalDefId) {
         if let Some(depr) = self.tcx.lookup_deprecation(def_id.to_def_id()) {
+            self.fingerprint_entry(def_id, DepKind::lookup_deprecation_entry, &depr);
             self.table_writer().lookup_deprecation_entry(def_id, depr);
         }
     }
@@ -2276,12 +2317,16 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
 
             let stability = tcx.lookup_stability(CRATE_DEF_ID);
 
+            let crate_span = tcx.def_span(CRATE_DEF_ID.to_def_id());
+            self.fingerprint_entry(CRATE_DEF_ID, DepKind::def_kind, &DefKind::Mod);
             self.table_writer().def_kind(CRATE_DEF_ID, DefKind::Mod);
-            self.table_writer().def_span(CRATE_DEF_ID, tcx.def_span(CRATE_DEF_ID.to_def_id()));
+            self.fingerprint_entry(CRATE_DEF_ID, DepKind::def_span, &crate_span);
+            self.table_writer().def_span(CRATE_DEF_ID, crate_span);
             self.encode_attrs(CRATE_DEF_ID);
             let vis = tcx.local_visibility(CRATE_DEF_ID).map_id(|mod_id| mod_id.to_local_def_id());
             self.table_writer().visibility(CRATE_DEF_ID, vis);
             if let Some(stability) = stability {
+                self.fingerprint_entry(CRATE_DEF_ID, DepKind::lookup_stability, &stability);
                 self.table_writer().lookup_stability(CRATE_DEF_ID, stability);
             }
             self.encode_deprecation(CRATE_DEF_ID);
@@ -2332,14 +2377,19 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 let mut def_key = tcx.hir_def_key(id);
                 def_key.disambiguated_data.data = DefPathData::MacroNs(name);
 
-                self.table_writer().def_kind(id, DefKind::Macro(macro_kind.into()));
+                let def_kind = DefKind::Macro(macro_kind.into());
+                self.fingerprint_entry(id, DepKind::def_kind, &def_kind);
+                self.table_writer().def_kind(id, def_kind);
 
                 self.encode_attrs(id);
                 self.table_writer().def_keys(id, def_key);
+                self.fingerprint_entry(id, DepKind::def_ident_span, &span);
                 self.table_writer().def_ident_span(id, span);
+                self.fingerprint_entry(id, DepKind::def_span, &span);
                 self.table_writer().def_span(id, span);
                 self.table_writer().visibility(id, ty::Visibility::Public);
                 if let Some(stability) = stability {
+                    self.fingerprint_entry(id, DepKind::lookup_stability, &stability);
                     self.table_writer().lookup_stability(id, stability);
                 }
             }
@@ -2508,6 +2558,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
 
             if of_trait {
                 let header = tcx.impl_trait_header(local_id);
+                self.fingerprint_entry(local_id, DepKind::impl_trait_header, &header);
                 self.table_writer().impl_trait_header(local_id, header);
 
                 let impl_is_fully_generic_for_reflection =
@@ -3220,6 +3271,7 @@ fn with_encode_metadata_header(
         prev_session: None,
         // A proc-macro crate encodes no foreign references.
         foreign_refs: (!tcx.crate_types().contains(&CrateType::ProcMacro)).then(Default::default),
+        item_fingerprints: Default::default(),
     };
 
     // Encode the rustc version string in a predictable location.

@@ -2096,6 +2096,12 @@ rustc_queries! {
         separate_provide_extern
     }
 
+    /// A fingerprint of the metadata entries of an item of another crate that the lookups `dep_graph::reads_extern_item_entry` names read.
+    query extern_item_fingerprint(def_id: DefId) -> u64 {
+        desc { "looking up the fingerprint of `{}`", tcx.def_path_str(def_id) }
+        separate_provide_extern
+    }
+
     /// Gets the hash for the host proc macro. Used to support -Z dual-proc-macro.
     query crate_host_hash(_: CrateNum) -> Option<Svh> {
         eval_always

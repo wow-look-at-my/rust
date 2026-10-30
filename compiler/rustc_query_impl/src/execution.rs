@@ -12,7 +12,7 @@ use rustc_middle::dep_graph::{
     DepGraphData, DepNode, DepNodeIndex, DepNodeKey, SerializedDepNodeIndex,
 };
 use rustc_middle::query::{
-    ActiveKeyStatus, QueryCache, QueryCycle, QueryJob, QueryJobId, QueryLatch, QueryMode,
+    ActiveKeyStatus, QueryCache, QueryCycle, QueryJob, QueryJobId, QueryKey, QueryLatch, QueryMode,
     QueryState, QueryVTable, QueryWaiter,
 };
 use rustc_middle::ty::TyCtxt;
@@ -530,6 +530,12 @@ fn is_transparent<'tcx, C: QueryCache>(
     dep_graph_data: &DepGraphData,
     key: C::Key,
 ) -> bool {
+    // The value of an item of another crate is never fed and never on disk.
+    if dep_graph_data.is_extern_item_transparent(query.dep_kind)
+        && key.key_as_def_id().is_some_and(|def_id| !def_id.is_local())
+    {
+        return true;
+    }
     dep_graph_data.is_transparent(query.dep_kind)
         && !query.eval_always
         && !query.feedable
