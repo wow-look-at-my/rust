@@ -1566,6 +1566,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             attr_flags |= AttrFlags::IS_DOC_HIDDEN;
         }
 
+        self.fingerprint_entry(def_id, DepKind::is_doc_hidden, &attr_flags.bits());
         self.table_writer().attr_flags(def_id, attr_flags);
     }
 
@@ -1665,6 +1666,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             }
             if should_encode_variances(tcx, def_id, def_kind) {
                 let v = tcx.variances_of(def_id);
+                self.fingerprint_entry(local_id, DepKind::variances_of, &v);
                 self.table_writer().variances_of(local_id, v);
             }
             if should_encode_fn_sig(def_kind) {
@@ -1706,20 +1708,26 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             }
             if should_encode_constness(def_kind) {
                 let constness = tcx.constness(def_id);
+                self.fingerprint_entry(local_id, DepKind::constness, &constness);
                 self.table_writer().constness(local_id, constness);
             }
             if let DefKind::Fn | DefKind::AssocFn = def_kind {
                 let asyncness = tcx.asyncness(def_id);
+                self.fingerprint_entry(local_id, DepKind::asyncness, &asyncness);
                 self.table_writer().asyncness(local_id, asyncness);
                 self.table_writer().fn_arg_idents(local_id, tcx.fn_arg_idents(def_id));
             }
-            self.table_writer().intrinsic(local_id, tcx.intrinsic(def_id));
+            let intrinsic = tcx.intrinsic(def_id);
+            self.fingerprint_entry(local_id, DepKind::intrinsic_raw, &intrinsic);
+            self.table_writer().intrinsic(local_id, intrinsic);
             if let DefKind::TyParam | DefKind::Trait = def_kind {
                 let default = tcx.object_lifetime_default(def_id);
                 self.table_writer().object_lifetime_default(local_id, default);
             }
             if let DefKind::Trait = def_kind {
-                self.table_writer().trait_def(local_id, tcx.trait_def(def_id));
+                let trait_def = tcx.trait_def(def_id);
+                self.fingerprint_entry(local_id, DepKind::trait_def, trait_def);
+                self.table_writer().trait_def(local_id, trait_def);
                 self.table_writer().explicit_super_clauses_of(
                     local_id,
                     tcx.explicit_super_clauses_of(def_id).skip_binder(),
@@ -1741,7 +1749,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 }
             }
             if let DefKind::TraitAlias = def_kind {
-                self.table_writer().trait_def(local_id, tcx.trait_def(def_id));
+                let trait_def = tcx.trait_def(def_id);
+                self.fingerprint_entry(local_id, DepKind::trait_def, trait_def);
+                self.table_writer().trait_def(local_id, trait_def);
                 self.table_writer().explicit_super_clauses_of(
                     local_id,
                     tcx.explicit_super_clauses_of(def_id).skip_binder(),
@@ -2024,7 +2034,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         self.fingerprint_entry(def_id, DepKind::associated_item, &item);
 
         if matches!(item.container, AssocContainer::Trait | AssocContainer::TraitImpl(_)) {
-            self.table_writer().defaultness(def_id, item.defaultness(tcx));
+            let defaultness = item.defaultness(tcx);
+            self.fingerprint_entry(def_id, DepKind::defaultness, &defaultness);
+            self.table_writer().defaultness(def_id, defaultness);
         }
 
         self.table_writer().assoc_container(def_id, item.container);
@@ -2124,11 +2136,14 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                     .reused_body(PrevBody::OptimizedMir, def_id)
                     .unwrap_or_else(|| tcx.optimized_mir(def_id));
                 self.table_writer().optimized_mir(def_id, body);
+                // Another crate reads the presence of this entry as `is_mir_available`.
+                self.fingerprint_entry(def_id, DepKind::is_mir_available, &true);
                 let lint_roots = mir_lint_roots(tcx, def_id, [body]);
                 self.table_writer().optimized_mir_lint_roots(def_id, lint_roots);
 
-                self.table_writer()
-                    .cross_crate_inlinable(def_id, tcx.cross_crate_inlinable(def_id));
+                let inlinable = tcx.cross_crate_inlinable(def_id);
+                self.fingerprint_entry(def_id, DepKind::cross_crate_inlinable, &inlinable);
+                self.table_writer().cross_crate_inlinable(def_id, inlinable);
 
                 self.table_writer().closure_saved_names_of_captured_variables(
                     def_id,
@@ -2577,7 +2592,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                     local_id,
                     impl_is_fully_generic_for_reflection,
                 );
-                self.table_writer().defaultness(local_id, tcx.defaultness(local_id));
+                let defaultness = tcx.defaultness(local_id);
+                self.fingerprint_entry(local_id, DepKind::defaultness, &defaultness);
+                self.table_writer().defaultness(local_id, defaultness);
 
                 let trait_ref = header.trait_ref.instantiate_identity().skip_norm_wip();
                 let simplified_self_ty = fast_reject::simplify_type(

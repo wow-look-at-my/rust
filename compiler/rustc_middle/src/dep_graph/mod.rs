@@ -73,6 +73,15 @@ pub fn reads_extern_item_entry(kind: DepKind) -> bool {
             | DepKind::lookup_stability
             | DepKind::lookup_deprecation_entry
             | DepKind::associated_item
+            | DepKind::constness
+            | DepKind::asyncness
+            | DepKind::defaultness
+            | DepKind::intrinsic_raw
+            | DepKind::variances_of
+            | DepKind::trait_def
+            | DepKind::cross_crate_inlinable
+            | DepKind::is_mir_available
+            | DepKind::is_doc_hidden
     )
 }
 
