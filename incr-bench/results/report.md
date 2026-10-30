@@ -38,7 +38,21 @@ The rows are the body edit. The graph is 82% smaller on both workloads. With `pr
 
 These ratios do not settle the 10% bound. `props` and `props-ctfe` run the same compiler, and `props-ctfe` caches less. Even so, their ratios differ by up to 12% in the incorrect direction: on rustc `props` is at 0.36x and `props-ctfe` at 0.32x. The non-incremental build of `props` took 27.3 s and that of `props-ctfe` 34.7 s, so the jobs ran on runners of different speed. The ratio did not cancel the difference. On these numbers `props-ctfe` is within 4% of unpatched on rustc, and between 3% and 14% over it on grok.
 
-The paired legs of run 50 time every config on one runner, round after round, so a runner's speed falls on each config. `results/ci/` holds the node fates of each step: promoted green, re-run green, re-run red, unreached and new.
+The paired legs of run 50 (41119563423) time every config on one runner, round after round, so a runner's speed falls on each config. They measure `b152c50`, which holds the span change. The grok leg ran one round:
+
+| grok step | unpatched s | props s | props / unpatched | props-ctfe s | props-ctfe / unpatched |
+|---|---:|---:|---:|---:|---:|
+| cold | 868.4 | 828.1 | 0.95x | 801.6 | 0.92x |
+| edit:comment | 88.9 | 98.1 | 1.10x | 91.9 | 1.03x |
+| edit:body | 92.2 | 95.8 | 1.04x | 87.9 | 0.95x |
+| edit:new-item | 92.9 | 99.7 | 1.07x | 88.8 | 0.96x |
+| edit:signature | 97.1 | 109.4 | 1.13x | 102.0 | 1.05x |
+| revert | 96.6 | 106.6 | 1.10x | 100.4 | 1.04x |
+| config-change | 829.1 | 785.6 | 0.95x | 825.9 | 1.00x |
+
+On grok `props-ctfe` is within 10% of unpatched at every step, and `props` is not. Writing the CTFE results costs more time than computing them again. One round gives no spread, which is why the rustc leg repeats its rounds.
+
+On the same runner, unpatched wrote a 3178.8 MB graph and a 2253.7 MB query cache at the body edit. `props-ctfe` wrote 575.6 MB and 115.6 MB, 39% of the 1773.5 MB of object files. On rustc, the `props` leg of run 50 wrote a 376.3 MB graph and an 85.4 MB query cache, 96% of the 481.7 MB of object files. In run 49 that cache was 104.8 MB: the span change took 19.4 MB out of it. `results/ci/` holds the node fates of each step: promoted green, re-run green, re-run red, unreached and new.
 
 ## Each change
 
