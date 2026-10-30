@@ -537,6 +537,7 @@ impl OnDiskCache {
                 span_bytes: 0,
                 shorthand_refs: 0,
                 shorthand_ref_bytes: 0,
+                instance_shorthands: Default::default(),
                 prev_span: PrevSpan::default(),
                 prev_span_saved: Vec::new(),
                 inplace: None,
@@ -827,6 +828,7 @@ impl OnDiskCache {
                 span_bytes: 0,
                 shorthand_refs: 0,
                 shorthand_ref_bytes: 0,
+                instance_shorthands: Default::default(),
                 prev_span: PrevSpan::default(),
                 prev_span_saved: Vec::new(),
                 inplace: Some(Box::new(inplace)),
@@ -1118,6 +1120,11 @@ impl<'a, 'tcx> TyDecoder<'tcx> for CacheDecoder<'a, 'tcx> {
 
     #[inline]
     fn relative_shorthands(&self) -> bool {
+        self.pool.is_none()
+    }
+
+    #[inline]
+    fn instance_shorthands(&self) -> bool {
         self.pool.is_none()
     }
 
@@ -1461,6 +1468,7 @@ pub struct CacheEncoder<'tcx> {
     /// The type and predicate shorthand references, and their bytes, for `-Zincremental-info`.
     shorthand_refs: usize,
     shorthand_ref_bytes: usize,
+    instance_shorthands: FxHashMap<ty::Instance<'tcx>, usize>,
     prev_span: PrevSpan,
     /// The span state of each pool item under construction, outermost first.
     prev_span_saved: Vec<PrevSpan>,
@@ -1951,6 +1959,13 @@ impl<'tcx> TyEncoder<'tcx> for CacheEncoder<'tcx> {
 
     fn end_full_encoding(&mut self) -> usize {
         self.end_pool_item()
+    }
+
+    fn instance_shorthands(&mut self) -> Option<&mut FxHashMap<ty::Instance<'tcx>, usize>> {
+        if self.inplace.is_some() {
+            return None;
+        }
+        Some(&mut self.instance_shorthands)
     }
 }
 

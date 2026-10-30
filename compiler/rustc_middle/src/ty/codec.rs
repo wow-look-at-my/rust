@@ -58,6 +58,12 @@ pub trait TyEncoder<'tcx>: SpanEncoder {
     fn end_full_encoding(&mut self) -> usize {
         unreachable!("`end_full_encoding` without `begin_full_encoding`")
     }
+
+    /// The position of the full encoding of each instance, for an encoder that writes a
+    /// repeated instance as the distance back to it.
+    fn instance_shorthands(&mut self) -> Option<&mut FxHashMap<ty::Instance<'tcx>, usize>> {
+        None
+    }
 }
 
 pub trait TyDecoder<'tcx>:
@@ -79,6 +85,11 @@ pub trait TyDecoder<'tcx>:
 
     /// Must agree with `TyEncoder::relative_shorthands` of the encoder that wrote the data.
     fn relative_shorthands(&self) -> bool {
+        false
+    }
+
+    /// Must agree with `TyEncoder::instance_shorthands` of the encoder that wrote the data.
+    fn instance_shorthands(&self) -> bool {
         false
     }
 

@@ -7,12 +7,14 @@ use rustc_hir as hir;
 use rustc_hir::def::{CtorKind, DefKind, Namespace};
 use rustc_hir::def_id::{CrateNum, DefId};
 use rustc_macros::{Lift, StableHash, TyDecodable, TyEncodable};
+use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 use rustc_span::def_id::LOCAL_CRATE;
 use rustc_span::{DUMMY_SP, Span, bug, span_bug};
 use tracing::{debug, instrument};
 
 use crate::diagnostics;
 use crate::middle::codegen_fn_attrs::CodegenFnAttrFlags;
+use crate::ty::codec::{TyDecoder, TyEncoder};
 use crate::ty::normalize_erasing_regions::NormalizationError;
 use crate::ty::print::{FmtPrinter, Print};
 use crate::ty::{
@@ -28,11 +30,55 @@ use crate::ty::{
 ///
 /// Note: the `Lift` impl is currently not used by rustc, but is used by
 /// rustc_codegen_cranelift when the `jit` feature is enabled.
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, TyEncodable, TyDecodable)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 #[derive(StableHash, Lift, TypeFoldable, TypeVisitable)]
 pub struct Instance<'tcx> {
     pub def: InstanceKind<'tcx>,
     pub args: GenericArgsRef<'tcx>,
+}
+
+/// The tag before an instance that `TyEncoder::instance_shorthands` writes.
+const INSTANCE_FULL: u8 = 0;
+const INSTANCE_SHORTHAND: u8 = 1;
+
+impl<'tcx, E: TyEncoder<'tcx>> Encodable<E> for Instance<'tcx> {
+    fn encode(&self, e: &mut E) {
+        let start = e.position();
+        let Some(shorthands) = e.instance_shorthands() else {
+            self.def.encode(e);
+            self.args.encode(e);
+            return;
+        };
+        if let Some(&full) = shorthands.get(self) {
+            e.emit_u8(INSTANCE_SHORTHAND);
+            e.emit_usize(start - full);
+            return;
+        }
+        e.emit_u8(INSTANCE_FULL);
+        self.def.encode(e);
+        self.args.encode(e);
+        // A reference takes a tag and a distance of a bounded number of bytes.
+        if e.position() - start > 6 {
+            e.instance_shorthands().unwrap().insert(*self, start);
+        }
+    }
+}
+
+impl<'tcx, D: TyDecoder<'tcx>> Decodable<D> for Instance<'tcx> {
+    fn decode(d: &mut D) -> Self {
+        if !d.instance_shorthands() {
+            return Instance { def: Decodable::decode(d), args: Decodable::decode(d) };
+        }
+        let start = d.position();
+        match d.read_u8() {
+            INSTANCE_FULL => Instance { def: Decodable::decode(d), args: Decodable::decode(d) },
+            INSTANCE_SHORTHAND => {
+                let full = start - d.read_usize();
+                d.with_position(full, |d| Instance::decode(d))
+            }
+            tag => bug!("invalid instance tag {tag}"),
+        }
+    }
 }
 
 /// Describes why a `ReifyShim` was created. This is needed to distinguish a ReifyShim created to

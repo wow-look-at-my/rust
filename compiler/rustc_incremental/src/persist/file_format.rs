@@ -26,7 +26,7 @@ use crate::diagnostics;
 const FILE_MAGIC: &[u8] = b"RSIC";
 
 /// Change this if the header format, the dep graph encoding or the query cache encoding changes.
-const HEADER_FORMAT_VERSION: u16 = 18;
+const HEADER_FORMAT_VERSION: u16 = 19;
 
 pub(crate) fn write_file_header(stream: &mut FileEncoder<'_>, sess: &Session) {
     stream.emit_raw_bytes(FILE_MAGIC);
