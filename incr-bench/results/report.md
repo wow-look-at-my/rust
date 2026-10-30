@@ -1,6 +1,6 @@
 # Report: unpatched compiler against this branch
 
-The unpatched compiler is `dc44e7f2c436`. The patched numbers are from CI run 41048892988 (run 48), config `props`. That config uses the flags below. Each ratio is an incremental build divided by a non-incremental build of the same step on the same runner. This is because the runners of different runs differ in speed.
+The unpatched compiler is `dc44e7f2c436`. The numbers are from CI run 41094926524 (run 49), which ran the unpatched compiler and the branch at `19951ad` in one run. Config `props` uses the flags below. `props-ctfe` adds `eval_to_const_value_raw,eval_to_allocation_raw` to `-Zincremental-uncache`. Each ratio is an incremental build divided by a non-incremental build of the same step in the same job. Each job gets its own runner, and the runners differ in speed.
 
 ```
 -Zincremental-rmeta-reuse -Zincremental-keep-configs=1 -Zincremental-extern-items
@@ -12,28 +12,33 @@ The unpatched compiler is `dc44e7f2c436`. The patched numbers are from CI run 41
 
 | workload | compiler | dep-graph.bin MB | query-cache.bin MB | *.o MB | graph+cache % of *.o |
 |---|---|---:|---:|---:|---:|
-| grok | unpatched (run 40289423253) | 3171.4 | 2248.4 | 1772.1 | 306% |
-| grok | this branch (run 48) | 573.6 | 145.3 | 1773.5 | 40.5% |
-| rustc | unpatched (run 40289423253) | 2098.0 | 1073.7 | 481.7 | 658% |
-| rustc | this branch (run 48) | 379.4 | 106.0 | 488.0 | 99.5% |
+| grok | unpatched | 3178.8 | 2253.7 | 1776.1 | 306% |
+| grok | props | 573.6 | 145.3 | 1773.5 | 41% |
+| grok | props-ctfe | 573.6 | 136.8 | 1773.5 | 40% |
+| rustc | unpatched | 2098.0 | 1073.7 | 481.7 | 658% |
+| rustc | props | 376.2 | 104.8 | 481.7 | 100% |
+| rustc | props-ctfe | 376.2 | 93.5 | 481.7 | 98% |
 
-The graph is 82% smaller on both workloads. Graph plus cache is 87% smaller on grok and 85% smaller on rustc.
+The rows are the body edit. The graph is 82% smaller on both workloads. With `props-ctfe`, graph plus cache is 87% smaller on grok and 87% smaller on rustc.
 
 ## Time: an edit, incremental against non-incremental
 
-| workload | step | unpatched | this branch |
-|---|---|---:|---:|
-| grok | edit:comment | 0.31x | 0.26x |
-| grok | edit:body | 0.31x | 0.26x |
-| grok | edit:new-item | 0.28x | 0.27x |
-| grok | edit:signature | not run | 0.32x |
-| rustc | edit:comment | 0.29x | 0.30x |
-| rustc | edit:body | 0.29x | 0.32x |
-| rustc | edit:new-item | 0.30x | 0.32x |
+| workload | step | unpatched | props | props-ctfe |
+|---|---|---:|---:|---:|
+| grok | edit:comment | 0.24x | 0.27x | 0.26x |
+| grok | edit:body | 0.24x | 0.26x | 0.26x |
+| grok | edit:new-item | 0.24x | 0.29x | 0.26x |
+| grok | edit:signature | 0.29x | 0.32x | 0.33x |
+| grok | revert | 0.29x | 0.34x | 0.30x |
+| rustc | edit:comment | 0.31x | 0.35x | 0.30x |
+| rustc | edit:body | 0.31x | 0.36x | 0.32x |
+| rustc | edit:new-item | 0.31x | 0.36x | 0.32x |
+| rustc | edit:signature | 0.32x | 0.35x | 0.32x |
+| rustc | revert | 0.32x | 0.35x | 0.32x |
 
-On grok each edit is faster than unpatched. On rustc each edit is within 10% of unpatched: the worst is the body edit at 0.32x against 0.29x.
+These ratios do not settle the 10% bound. `props` and `props-ctfe` run the same compiler, and `props-ctfe` caches less. Even so, their ratios differ by up to 12% in the incorrect direction: on rustc `props` is at 0.36x and `props-ctfe` at 0.32x. The non-incremental build of `props` took 27.3 s and that of `props-ctfe` 34.7 s, so the jobs ran on runners of different speed. The ratio did not cancel the difference. On these numbers `props-ctfe` is within 4% of unpatched on rustc, and between 3% and 14% over it on grok.
 
-`results/ci/41048892988.md` holds the node fates of each step: promoted green, re-run green, re-run red, unreached and new.
+The paired legs of run 50 time every config on one runner, round after round, so a runner's speed falls on each config. `results/ci/` holds the node fates of each step: promoted green, re-run green, re-run red, unreached and new.
 
 ## Each change
 
@@ -63,7 +68,7 @@ The last two cost more time than they save in bytes, so the branch does not use 
 
 ## Gates
 
-CI ran these on `6c5f8b2` (run 41065632534) and on `4f8c38c` (run 41048902253). Every job passed:
+CI ran these on `b152c50` (run 41104963378), `6c5f8b2` (run 41065632534) and `4f8c38c` (run 41048902253). Every job passed:
 
 - `x.py check`, in `test-pr-check-1` and `test-pr-check-2`.
 - The tests of every compiler crate, `rustc_incremental` and `rustc_middle` among them, in `test-aarch64-gnu-llvm-22-2`.
@@ -74,4 +79,5 @@ CI ran these on `6c5f8b2` (run 41065632534) and on `4f8c38c` (run 41048902253). 
 ## What this report does not show
 
 - The gates ran in CI only. The local checkout is sparse and holds too little of the tree to build.
-- The unpatched rows come from run 40289423253 and the patched rows from run 48, on different runners. Only the ratios compare across the runs.
+- Every leg of run 49 ran on its own runner. A ratio cancels part of the speed difference between runners, not all of it, as the `props` and `props-ctfe` rows show.
+- Run 49 measured `19951ad`. The span change of `8b34cfd` is not in these numbers.
