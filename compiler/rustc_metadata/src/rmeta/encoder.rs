@@ -1436,6 +1436,13 @@ fn should_encode_type(tcx: TyCtxt<'_>, def_id: LocalDefId, def_kind: DefKind) ->
     }
 }
 
+/// Whether a query creates the definition and feeds its generics, clauses and codegen
+/// attributes. No provider can rebuild a fed value when the metadata fails to give it back.
+fn is_fed(tcx: TyCtxt<'_>, def_id: LocalDefId, def_kind: DefKind) -> bool {
+    matches!(def_kind, DefKind::Static { nested: true, .. } | DefKind::SyntheticCoroutineBody)
+        || tcx.opt_rpitit_info(def_id.to_def_id()).is_some()
+}
+
 fn should_encode_fn_sig(def_kind: DefKind) -> bool {
     match def_kind {
         DefKind::Fn | DefKind::AssocFn | DefKind::Ctor(_, CtorKind::Fn) => true,
@@ -1653,6 +1660,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 let attrs = tcx.codegen_fn_attrs(def_id);
                 self.fingerprint_entry(local_id, DepKind::codegen_fn_attrs, attrs);
                 self.table_writer().codegen_fn_attrs(local_id, attrs);
+                if !is_fed(tcx, local_id, def_kind) {
+                    self.in_metadata.codegen_fn_attrs.insert(local_id);
+                }
             }
             if should_encode_visibility(def_kind) {
                 let vis = tcx.local_visibility(local_id).map_id(|mod_id| mod_id.to_local_def_id());
@@ -1682,6 +1692,10 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 let clauses = tcx.explicit_clauses_of(def_id);
                 self.fingerprint_entry(local_id, DepKind::explicit_clauses_of, &clauses);
                 self.table_writer().explicit_clauses_of(local_id, clauses);
+                if !is_fed(tcx, local_id, def_kind) {
+                    self.in_metadata.generics_of.insert(local_id);
+                    self.in_metadata.explicit_clauses_of.insert(local_id);
+                }
                 let inferred_outlives = tcx.inferred_outlives_of(def_id);
                 self.fingerprint_entry(local_id, DepKind::inferred_outlives_of, &inferred_outlives);
                 self.table_writer().inferred_outlives_of(local_id, inferred_outlives);
@@ -2876,6 +2890,36 @@ impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
         self.checked(tcx, &self.signatures, DepKind::fn_sig, def, sig, expected)
     }
 
+    fn generics_of(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<ty::Generics> {
+        let generics = self.session.lock().generics_of(def);
+        self.checked(tcx, &self.signatures, DepKind::generics_of, def, generics, expected)
+    }
+
+    fn explicit_clauses_of(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<ty::GenericClauses<'tcx>> {
+        let clauses = self.session.lock().explicit_clauses_of(def);
+        self.checked(tcx, &self.signatures, DepKind::explicit_clauses_of, def, clauses, expected)
+    }
+
+    fn codegen_fn_attrs(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<CodegenFnAttrs> {
+        let attrs = self.session.lock().codegen_fn_attrs(def);
+        self.checked(tcx, &self.signatures, DepKind::codegen_fn_attrs, def, attrs, expected)
+    }
+
     fn decoded(&self, kind: DepKind, def: LocalDefId) -> bool {
         self.taken.lock().contains(&(kind, def))
     }
@@ -3126,6 +3170,33 @@ pub(crate) fn prev_metadata_fn_sig<'tcx>(
 ) -> Option<ty::EarlyBinder<'tcx, ty::PolyFnSig<'tcx>>> {
     let (prev, expected) = prev_metadata_for(tcx, DepKind::fn_sig, def)?;
     prev.fn_sig(tcx, def, expected)
+}
+
+/// Provides the `prev_metadata_generics_of` hook.
+pub(crate) fn prev_metadata_generics_of<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+) -> Option<ty::Generics> {
+    let (prev, expected) = prev_metadata_for(tcx, DepKind::generics_of, def)?;
+    prev.generics_of(tcx, def, expected)
+}
+
+/// Provides the `prev_metadata_explicit_clauses_of` hook.
+pub(crate) fn prev_metadata_explicit_clauses_of<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+) -> Option<ty::GenericClauses<'tcx>> {
+    let (prev, expected) = prev_metadata_for(tcx, DepKind::explicit_clauses_of, def)?;
+    prev.explicit_clauses_of(tcx, def, expected)
+}
+
+/// Provides the `prev_metadata_codegen_fn_attrs` hook.
+pub(crate) fn prev_metadata_codegen_fn_attrs<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+) -> Option<CodegenFnAttrs> {
+    let (prev, expected) = prev_metadata_for(tcx, DepKind::codegen_fn_attrs, def)?;
+    prev.codegen_fn_attrs(tcx, def, expected)
 }
 
 /// The session's metadata and the recorded hash of `def`'s value of the query

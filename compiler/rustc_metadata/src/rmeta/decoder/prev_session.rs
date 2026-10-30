@@ -347,6 +347,30 @@ impl<'tcx> PrevSession<'tcx> {
         self.with_item_scope(def_id, old, || self.decode_at(lazy.position))
     }
 
+    /// Decodes the generics that the session stored for `def_id`.
+    pub(crate) fn generics_of(&self, def_id: LocalDefId) -> Option<ty::Generics> {
+        let old = self.old_index(def_id)?;
+        let lazy = self.root.tables.generics_of.get(&self.blob, old)?;
+        self.with_item_scope(def_id, old, || self.decode_at(lazy.position))
+    }
+
+    /// Decodes the clauses that the session stored for `def_id`.
+    pub(crate) fn explicit_clauses_of(
+        &self,
+        def_id: LocalDefId,
+    ) -> Option<ty::GenericClauses<'tcx>> {
+        let old = self.old_index(def_id)?;
+        let lazy = self.root.tables.explicit_clauses_of.get(&self.blob, old)?;
+        self.with_item_scope(def_id, old, || self.decode_at(lazy.position))
+    }
+
+    /// Decodes the codegen attributes that the session stored for `def_id`.
+    pub(crate) fn codegen_fn_attrs(&self, def_id: LocalDefId) -> Option<CodegenFnAttrs> {
+        let old = self.old_index(def_id)?;
+        let lazy = self.root.tables.codegen_fn_attrs.get(&self.blob, old)?;
+        self.with_item_scope(def_id, old, || self.decode_at(lazy.position))
+    }
+
     fn with_item_scope<R>(
         &self,
         def_id: LocalDefId,

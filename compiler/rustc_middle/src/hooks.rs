@@ -131,6 +131,16 @@ declare_hooks! {
     hook prev_metadata_fn_sig(def: LocalDefId)
         -> Option<ty::EarlyBinder<'tcx, ty::PolyFnSig<'tcx>>>;
 
+    /// Gives the generics of a green item from the metadata in `old_session_directory`, or `None`.
+    hook prev_metadata_generics_of(def: LocalDefId) -> Option<ty::Generics>;
+
+    /// Gives the clauses of a green item from the metadata in `old_session_directory`, or `None`.
+    hook prev_metadata_explicit_clauses_of(def: LocalDefId) -> Option<ty::GenericClauses<'tcx>>;
+
+    /// Gives the codegen attributes of a green item from the metadata in `old_session_directory`.
+    hook prev_metadata_codegen_fn_attrs(def: LocalDefId)
+        -> Option<crate::middle::codegen_fn_attrs::CodegenFnAttrs>;
+
     /// Under `-Z incremental-info`, prints how `built` differs from the decoded body of `def`.
     hook prev_metadata_explain_mismatch(def: LocalDefId, built: &mir::Body<'tcx>) -> ();
 

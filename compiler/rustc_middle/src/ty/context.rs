@@ -821,6 +821,9 @@ pub struct InMetadata {
     pub promoted_mir: FxHashSet<LocalDefId>,
     pub type_of: FxHashSet<LocalDefId>,
     pub fn_sig: FxHashSet<LocalDefId>,
+    pub generics_of: FxHashSet<LocalDefId>,
+    pub explicit_clauses_of: FxHashSet<LocalDefId>,
+    pub codegen_fn_attrs: FxHashSet<LocalDefId>,
 }
 
 impl InMetadata {
@@ -833,6 +836,9 @@ impl InMetadata {
                 | DepKind::promoted_mir
                 | DepKind::type_of
                 | DepKind::fn_sig
+                | DepKind::generics_of
+                | DepKind::explicit_clauses_of
+                | DepKind::codegen_fn_attrs
         )
     }
 
@@ -844,6 +850,9 @@ impl InMetadata {
             DepKind::promoted_mir => Some(&self.promoted_mir),
             DepKind::type_of => Some(&self.type_of),
             DepKind::fn_sig => Some(&self.fn_sig),
+            DepKind::generics_of => Some(&self.generics_of),
+            DepKind::explicit_clauses_of => Some(&self.explicit_clauses_of),
+            DepKind::codegen_fn_attrs => Some(&self.codegen_fn_attrs),
             _ => None,
         }
     }
@@ -890,6 +899,30 @@ pub trait PrevMetadata<'tcx>: DynSend + DynSync {
         def: LocalDefId,
         expected: Fingerprint,
     ) -> Option<ty::EarlyBinder<'tcx, ty::PolyFnSig<'tcx>>>;
+
+    /// The generics of a green node, if they decode and their hash is `expected`.
+    fn generics_of(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<ty::Generics>;
+
+    /// The clauses of a green node, if they decode and their hash is `expected`.
+    fn explicit_clauses_of(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<ty::GenericClauses<'tcx>>;
+
+    /// The codegen attributes of a green node, if they decode and their hash is `expected`.
+    fn codegen_fn_attrs(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<CodegenFnAttrs>;
 
     /// Whether this session decoded the value of `def` for the query of `kind`.
     fn decoded(&self, kind: DepKind, def: LocalDefId) -> bool;
