@@ -21,7 +21,7 @@ use rustc_serialize::opaque::{FileEncodeResult, FileEncoder, IntEncodedWithFixed
 use rustc_serialize::{ContextOrd, Decodable, Decoder, Encodable, Encoder};
 use rustc_session::Session;
 use rustc_span::hygiene::{
-    ExpnId, HygieneDecodeContext, HygieneEncodeContext, SyntaxContext, SyntaxContextKey,
+    ExpnId, ExpnKind, HygieneDecodeContext, HygieneEncodeContext, SyntaxContext, SyntaxContextKey,
 };
 use rustc_span::{
     BlobDecoder, BytePos, ByteSymbol, CachingSourceMapView, ExpnData, ExpnHash, RelativeBytePos,
@@ -600,8 +600,14 @@ impl OnDiskCache {
                 },
                 |encoder, expn_id, data, hash| {
                     if expn_id.krate == LOCAL_CRATE {
+                        let data = data.expect("local expn");
+                        // Macro expansion runs in full in every session,
+                        // before a query reads this cache.
+                        if matches!(data.kind, ExpnKind::Macro(..) | ExpnKind::AstPass(_)) {
+                            return;
+                        }
                         let pos = AbsoluteBytePos::new(encoder.position());
-                        encoder.encode_tagged(TAG_EXPN_DATA, data.expect("local expn"));
+                        encoder.encode_tagged(TAG_EXPN_DATA, data);
                         expn_bytes += encoder.position() - pos.to_usize();
                         expn_data.insert(hash, pos);
                     } else {
