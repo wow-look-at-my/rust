@@ -13,6 +13,7 @@ impl<T> Checked for T {
     #[cfg(bfail2)]
     const OK: () = [()][std::mem::size_of::<T>()];
     //[bfail2]~^ ERROR index out of bounds
+    //[bfail2]~| NOTE evaluation of `<u32 as Checked>::OK` failed here
 }
 
 fn check<T>() {
