@@ -476,7 +476,9 @@ impl DepGraphData {
                 reads[0]
             }
             // A kind that is not anon gets here only as a transparent task.
-            _ if !dep_kind.is_anon() => self.current.alloc_transparent(reads),
+            _ if !dep_kind.is_anon() || self.current.is_transparent(dep_kind) => {
+                self.current.alloc_transparent(reads)
+            }
             _ => {
                 // The dep node indices are hashed here instead of hashing the dep nodes of the
                 // dependencies. These indices may refer to different nodes per session, but this
