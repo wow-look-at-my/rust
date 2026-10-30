@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use rustc_attr_ir::{AttributeKind, EncodeCrossCrate, find_attr};
 use rustc_data_structures::fingerprint::Fingerprint;
-use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
+use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_data_structures::memmap::{Mmap, MmapMut};
 use rustc_data_structures::owned_slice::slice_owned;
 use rustc_data_structures::stable_hash::{StableHash, StableHasher};
@@ -34,7 +34,7 @@ use rustc_middle::query::Providers;
 use rustc_middle::traits::specialization_graph;
 use rustc_middle::ty::codec::TyEncoder;
 use rustc_middle::ty::fast_reject::{self, TreatParams};
-use rustc_middle::ty::{AssocContainer, MirInMetadata, PrevMetadata};
+use rustc_middle::ty::{AssocContainer, InMetadata, PrevMetadata};
 use rustc_serialize::opaque::FileEncoder;
 use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 use rustc_session::config::mitigation_coverage::DeniedPartialMitigation;
@@ -98,6 +98,8 @@ pub(super) struct EncodeContext<'a, 'tcx> {
     foreign_refs: Option<ForeignRefsBuilder>,
     /// Under `-Zincremental-extern-items`, the sum of the fingerprints of the entries of each item that `reads_extern_item_entry` names.
     item_fingerprints: FxIndexMap<LocalDefId, u64>,
+    /// The local values this metadata holds, which the query cache then leaves out.
+    in_metadata: InMetadata,
 }
 
 #[derive(Default)]
@@ -762,6 +764,11 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         _ = stat!("mir", || self.encode_mir());
 
         _ = stat!("def-ids", || self.encode_def_ids());
+
+        if tcx.sess.opts.unstable_opts.incremental_rmeta_reuse && tcx.dep_graph.is_fully_enabled() {
+            // This metadata goes into the session directory.
+            let _ = tcx.in_metadata.set(mem::take(&mut self.in_metadata));
+        }
 
         let interpret_alloc_index = stat!("interpret-alloc-index", || {
             let mut interpret_alloc_index = Vec::new();
@@ -1664,6 +1671,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 let fn_sig = tcx.fn_sig(def_id);
                 self.fingerprint_entry(local_id, DepKind::fn_sig, &fn_sig);
                 self.table_writer().fn_sig(local_id, fn_sig);
+                self.in_metadata.fn_sig.insert(local_id);
             }
             if should_encode_generics(def_kind) {
                 let g = tcx.generics_of(def_id);
@@ -1691,6 +1699,10 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 let ty = tcx.type_of(def_id);
                 self.fingerprint_entry(local_id, DepKind::type_of, &ty);
                 self.table_writer().type_of(local_id, ty);
+                // A fed type has no provider that can rebuild it when the metadata fails.
+                if !matches!(def_kind, DefKind::AnonConst | DefKind::SyntheticCoroutineBody) {
+                    self.in_metadata.type_of.insert(local_id);
+                }
             }
             if should_encode_constness(def_kind) {
                 let constness = tcx.constness(def_id);
@@ -2101,7 +2113,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             let (encode_const, encode_opt) = should_encode_mir(tcx, reachable_set, def_id);
             if encode_const || encode_opt { Some((def_id, encode_const, encode_opt)) } else { None }
         });
-        let mut in_metadata = MirInMetadata::default();
+        let mut in_metadata = mem::take(&mut self.in_metadata);
         for (def_id, encode_const, encode_opt) in keys_and_jobs {
             debug_assert!(encode_const || encode_opt);
 
@@ -2177,10 +2189,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             }
         }
 
-        if tcx.sess.opts.unstable_opts.incremental_rmeta_reuse && tcx.dep_graph.is_fully_enabled() {
-            // This metadata goes into the session directory.
-            let _ = tcx.mir_in_metadata.set(in_metadata);
-        }
+        self.in_metadata = in_metadata;
 
         if tcx.sess.opts.unstable_opts.incremental_rmeta_reuse
             && tcx.sess.opts.unstable_opts.incremental_info
@@ -2823,9 +2832,37 @@ struct PrevMetadataMir<'tcx> {
     const_bodies: [AtomicUsize; 3],
     /// Under `-Z incremental-info`, the first decoded body that did not match its hash.
     first_mismatch: Lock<Option<(LocalDefId, Fingerprint, &'tcx mir::Body<'tcx>)>>,
+    /// The decoded, rejected and mismatched counts for types and signatures.
+    signatures: [AtomicUsize; 3],
+    /// Each value that a query took from this metadata.
+    taken: Lock<FxHashSet<(DepKind, LocalDefId)>>,
 }
 
 impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
+    fn type_of(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<ty::EarlyBinder<'tcx, Ty<'tcx>>> {
+        let ty = self.session.lock().type_of(def);
+        self.checked(tcx, &self.signatures, DepKind::type_of, def, ty, expected)
+    }
+
+    fn fn_sig(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<ty::EarlyBinder<'tcx, ty::PolyFnSig<'tcx>>> {
+        let sig = self.session.lock().fn_sig(def);
+        self.checked(tcx, &self.signatures, DepKind::fn_sig, def, sig, expected)
+    }
+
+    fn decoded(&self, kind: DepKind, def: LocalDefId) -> bool {
+        self.taken.lock().contains(&(kind, def))
+    }
+
     fn optimized_mir(
         &self,
         tcx: TyCtxt<'tcx>,
@@ -2852,6 +2889,7 @@ impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
             return None;
         }
         self.decoded.fetch_add(1, Ordering::Relaxed);
+        self.taken.lock().insert((DepKind::optimized_mir, def));
         Some(tcx.arena.alloc(body))
     }
 
@@ -2862,7 +2900,9 @@ impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
         expected: Fingerprint,
     ) -> Option<&'tcx mir::Body<'tcx>> {
         let body = self.session.lock().body(PrevBody::MirForCtfe, def);
-        Some(tcx.arena.alloc(self.checked(tcx, "CTFE MIR", def, body, expected)?))
+        let body =
+            self.checked(tcx, &self.const_bodies, DepKind::mir_for_ctfe, def, body, expected);
+        Some(tcx.arena.alloc(body?))
     }
 
     fn promoted_mir(
@@ -2872,7 +2912,9 @@ impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
         expected: Fingerprint,
     ) -> Option<&'tcx IndexVec<mir::Promoted, mir::Body<'tcx>>> {
         let promoted = self.session.lock().promoted(def);
-        Some(tcx.arena.alloc(self.checked(tcx, "promoted MIR", def, promoted, expected)?))
+        let promoted =
+            self.checked(tcx, &self.const_bodies, DepKind::promoted_mir, def, promoted, expected);
+        Some(tcx.arena.alloc(promoted?))
     }
 
     fn explain_mismatch(&self, tcx: TyCtxt<'tcx>, def: LocalDefId, built: &mir::Body<'tcx>) {
@@ -2968,6 +3010,13 @@ impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
             rejected.load(Ordering::Relaxed),
             mismatched.load(Ordering::Relaxed),
         );
+        let [decoded, rejected, mismatched] = &self.signatures;
+        eprintln!(
+            "[incremental] codegen: decoded {} types and signatures from metadata, {} rejected, {} mismatched",
+            decoded.load(Ordering::Relaxed),
+            rejected.load(Ordering::Relaxed),
+            mismatched.load(Ordering::Relaxed),
+        );
     }
 }
 
@@ -2976,12 +3025,13 @@ impl<'tcx> PrevMetadataMir<'tcx> {
     fn checked<T: StableHash>(
         &self,
         tcx: TyCtxt<'tcx>,
-        what: &str,
+        counts: &[AtomicUsize; 3],
+        kind: DepKind,
         def: LocalDefId,
         value: Option<T>,
         expected: Fingerprint,
     ) -> Option<T> {
-        let [decoded, rejected, mismatched] = &self.const_bodies;
+        let [decoded, rejected, mismatched] = counts;
         let Some(value) = value else {
             rejected.fetch_add(1, Ordering::Relaxed);
             return None;
@@ -2992,11 +3042,12 @@ impl<'tcx> PrevMetadataMir<'tcx> {
         if hash != expected {
             let earlier = mismatched.fetch_add(1, Ordering::Relaxed);
             if earlier == 0 && tcx.sess.opts.unstable_opts.incremental_info {
-                eprintln!("[incremental] codegen: mismatch of the {what} of {def:?}");
+                eprintln!("[incremental] codegen: mismatch of the {kind:?} of {def:?}");
             }
             return None;
         }
         decoded.fetch_add(1, Ordering::Relaxed);
+        self.taken.lock().insert((kind, def));
         Some(value)
     }
 }
@@ -3042,6 +3093,24 @@ pub(crate) fn prev_metadata_promoted_mir<'tcx>(
     prev.promoted_mir(tcx, def, expected)
 }
 
+/// Provides the `prev_metadata_type_of` hook.
+pub(crate) fn prev_metadata_type_of<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+) -> Option<ty::EarlyBinder<'tcx, Ty<'tcx>>> {
+    let (prev, expected) = prev_metadata_for(tcx, DepKind::type_of, def)?;
+    prev.type_of(tcx, def, expected)
+}
+
+/// Provides the `prev_metadata_fn_sig` hook.
+pub(crate) fn prev_metadata_fn_sig<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+) -> Option<ty::EarlyBinder<'tcx, ty::PolyFnSig<'tcx>>> {
+    let (prev, expected) = prev_metadata_for(tcx, DepKind::fn_sig, def)?;
+    prev.fn_sig(tcx, def, expected)
+}
+
 /// The session's metadata and the recorded hash of `def`'s value of the query
 /// of `kind`.
 fn prev_metadata_for<'tcx>(
@@ -3065,6 +3134,8 @@ fn prev_metadata_for<'tcx>(
             mismatched: AtomicUsize::new(0),
             const_bodies: Default::default(),
             first_mismatch: Lock::new(None),
+            signatures: Default::default(),
+            taken: Default::default(),
         }));
         Some(prev as &'tcx dyn PrevMetadata<'tcx>)
     });
@@ -3272,6 +3343,7 @@ fn with_encode_metadata_header(
         // A proc-macro crate encodes no foreign references.
         foreign_refs: (!tcx.crate_types().contains(&CrateType::ProcMacro)).then(Default::default),
         item_fingerprints: Default::default(),
+        in_metadata: Default::default(),
     };
 
     // Encode the rustc version string in a predictable location.

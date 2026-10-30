@@ -3,13 +3,13 @@ use rustc_data_structures::unord::UnordMap;
 #[expect(unused_imports, reason = "used by doc comments")]
 use rustc_middle::dep_graph::DepKindVTable;
 use rustc_middle::dep_graph::{
-    DepGraphData, DepKind, DepNode, DepNodeIndex, DepNodeKey, SerializedDepNodeIndex,
+    DepGraphData, DepNode, DepNodeIndex, DepNodeKey, SerializedDepNodeIndex,
 };
 use rustc_middle::query::erase::{Erasable, Erased};
 use rustc_middle::query::on_disk_cache::{CacheDecoder, CacheEncoder};
 use rustc_middle::query::{QueryCache, QueryState, QueryVTable, erase};
-use rustc_middle::ty::TyCtxt;
 use rustc_middle::ty::codec::TyEncoder;
+use rustc_middle::ty::{InMetadata, TyCtxt};
 use rustc_middle::verify_ich::incremental_verify_ich;
 use rustc_serialize::{Decodable, Encodable};
 use rustc_span::bug;
@@ -60,13 +60,20 @@ where
     let _timer = tcx.prof.generic_activity_with_arg("encode_query_results_for", query.name);
 
     assert!(all_inactive(&query.state));
-    let in_metadata = tcx.mir_in_metadata.get().and_then(|sets| sets.for_kind(query.dep_kind));
+    let in_metadata = tcx.in_metadata.get().and_then(|sets| sets.for_kind(query.dep_kind));
+    // A session that copies the metadata holds every value that it decoded
+    // from it.
+    let prev = match tcx.prev_metadata.get() {
+        Some(&Some(prev)) if InMetadata::holds_kind(query.dep_kind) => Some(prev),
+        _ => None,
+    };
     let mut values = Vec::new();
     query.cache.for_each(&mut |key, value, dep_node| {
-        if let Some(in_metadata) = in_metadata
+        if (in_metadata.is_some() || prev.is_some())
             && let Some(def_id) = DepNode::construct(tcx, query.dep_kind, key).extract_def_id(tcx)
             && let Some(def_id) = def_id.as_local()
-            && in_metadata.contains(&def_id)
+            && (in_metadata.is_some_and(|set| set.contains(&def_id))
+                || prev.is_some_and(|prev| prev.decoded(query.dep_kind, def_id)))
         {
             return;
         }
@@ -183,13 +190,10 @@ pub(crate) fn promote_from_disk_inner<'tcx, C: QueryCache>(
         if tcx.sess.opts.unstable_opts.incremental_uncache.is_some() {
             return;
         }
-        // Under `-Z incremental-rmeta-reuse` the metadata holds some MIR in place of the query
-        // cache.
+        // Under `-Z incremental-rmeta-reuse` the metadata holds some MIR, types and signatures
+        // in place of the query cache.
         if tcx.sess.opts.unstable_opts.incremental_rmeta_reuse
-            && matches!(
-                query.dep_kind,
-                DepKind::optimized_mir | DepKind::mir_for_ctfe | DepKind::promoted_mir
-            )
+            && InMetadata::holds_kind(query.dep_kind)
         {
             return;
         }

@@ -330,6 +330,23 @@ impl<'tcx> PrevSession<'tcx> {
         Some(promoted)
     }
 
+    /// Decodes the type that the session stored for `def_id`.
+    pub(crate) fn type_of(&self, def_id: LocalDefId) -> Option<ty::EarlyBinder<'tcx, Ty<'tcx>>> {
+        let old = self.old_index(def_id)?;
+        let lazy = self.root.tables.type_of.get(&self.blob, old)?;
+        self.with_item_scope(def_id, old, || self.decode_at(lazy.position))
+    }
+
+    /// Decodes the signature that the session stored for `def_id`.
+    pub(crate) fn fn_sig(
+        &self,
+        def_id: LocalDefId,
+    ) -> Option<ty::EarlyBinder<'tcx, ty::PolyFnSig<'tcx>>> {
+        let old = self.old_index(def_id)?;
+        let lazy = self.root.tables.fn_sig.get(&self.blob, old)?;
+        self.with_item_scope(def_id, old, || self.decode_at(lazy.position))
+    }
+
     fn with_item_scope<R>(
         &self,
         def_id: LocalDefId,

@@ -809,6 +809,8 @@ fn provide_cstore_hooks(providers: &mut Providers) {
         crate::rmeta::encoder::prev_metadata_optimized_mir;
     providers.hooks.prev_metadata_mir_for_ctfe = crate::rmeta::encoder::prev_metadata_mir_for_ctfe;
     providers.hooks.prev_metadata_promoted_mir = crate::rmeta::encoder::prev_metadata_promoted_mir;
+    providers.hooks.prev_metadata_type_of = crate::rmeta::encoder::prev_metadata_type_of;
+    providers.hooks.prev_metadata_fn_sig = crate::rmeta::encoder::prev_metadata_fn_sig;
     providers.hooks.prev_metadata_explain_mismatch =
         crate::rmeta::encoder::prev_metadata_explain_mismatch;
     providers.hooks.import_source_files = |tcx, cnum| {
