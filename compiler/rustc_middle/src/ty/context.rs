@@ -824,10 +824,13 @@ pub struct InMetadata {
     pub generics_of: FxHashSet<LocalDefId>,
     pub explicit_clauses_of: FxHashSet<LocalDefId>,
     pub codegen_fn_attrs: FxHashSet<LocalDefId>,
+    pub def_span: FxHashSet<LocalDefId>,
+    pub def_ident_span: FxHashSet<LocalDefId>,
 }
 
 impl InMetadata {
-    /// The queries whose values the metadata can give back.
+    /// The queries whose values the query cache leaves out when the metadata holds them. A
+    /// provider gives such a value back from the metadata, or builds it again from the HIR.
     pub fn holds_kind(kind: DepKind) -> bool {
         matches!(
             kind,
@@ -839,6 +842,8 @@ impl InMetadata {
                 | DepKind::generics_of
                 | DepKind::explicit_clauses_of
                 | DepKind::codegen_fn_attrs
+                | DepKind::def_span
+                | DepKind::def_ident_span
         )
     }
 
@@ -853,6 +858,8 @@ impl InMetadata {
             DepKind::generics_of => Some(&self.generics_of),
             DepKind::explicit_clauses_of => Some(&self.explicit_clauses_of),
             DepKind::codegen_fn_attrs => Some(&self.codegen_fn_attrs),
+            DepKind::def_span => Some(&self.def_span),
+            DepKind::def_ident_span => Some(&self.def_ident_span),
             _ => None,
         }
     }

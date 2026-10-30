@@ -1436,10 +1436,11 @@ fn should_encode_type(tcx: TyCtxt<'_>, def_id: LocalDefId, def_kind: DefKind) ->
     }
 }
 
-/// Whether a query creates the definition and feeds its generics, clauses and codegen
-/// attributes. No provider can rebuild a fed value when the metadata fails to give it back.
+/// Whether a query creates the definition and feeds its spans, generics, clauses and codegen
+/// attributes. No provider can rebuild a fed value that the query cache does not hold.
 fn is_fed(tcx: TyCtxt<'_>, def_id: LocalDefId, def_kind: DefKind) -> bool {
     matches!(def_kind, DefKind::Static { nested: true, .. } | DefKind::SyntheticCoroutineBody)
+        || matches!(tcx.def_key(def_id).disambiguated_data.data, DefPathData::OpaqueLifetime(_))
         || tcx.opt_rpitit_info(def_id.to_def_id()).is_some()
 }
 
@@ -1643,6 +1644,10 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 let def_span = tcx.def_span(local_id);
                 self.fingerprint_entry(local_id, DepKind::def_span, &def_span);
                 self.table_writer().def_span(local_id, def_span);
+                // The provider reads the span out of the HIR again, which costs less than a cache entry.
+                if !is_fed(tcx, local_id, def_kind) {
+                    self.in_metadata.def_span.insert(local_id);
+                }
             }
             if should_encode_attrs(def_kind) {
                 self.encode_attrs(local_id);
@@ -1655,6 +1660,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             {
                 self.fingerprint_entry(local_id, DepKind::def_ident_span, &ident_span);
                 self.table_writer().def_ident_span(local_id, ident_span);
+                if !is_fed(tcx, local_id, def_kind) {
+                    self.in_metadata.def_ident_span.insert(local_id);
+                }
             }
             if def_kind.has_codegen_attrs() {
                 let attrs = tcx.codegen_fn_attrs(def_id);
