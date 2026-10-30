@@ -109,5 +109,5 @@ CI ran these on `b152c50` (run 41104963378), `6c5f8b2` (run 41065632534) and `4f
 
 - The gates ran in CI only. The local checkout is sparse and holds too little of the tree to build.
 - Every leg of run 49 ran on its own runner. A ratio cancels part of the speed difference between runners, not all of it, as the `props` and `props-ctfe` rows show.
-- The time and size tables above the paired legs measured `19951ad`, before the span change of `8b34cfd`. The paired legs and a later run sizes measured `b152c50`.
+- The time and size tables above the paired legs measured `19951ad`, before the span change of `8b34cfd`. The paired legs, and the sizes CI run 41119563423 gives, measured `b152c50`.
 - The grok paired leg ran one round, so its ratios carry no spread.
