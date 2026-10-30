@@ -22,10 +22,19 @@ fn lib_source(name: &str) -> String {
 }
 
 fn build(name: &str, cap: bool) {
+    build_with(name, cap, false);
+}
+
+/// With `verify`, rustc hashes each value it loads from the cache again, and stops on a
+/// value that does not match the dep graph.
+fn build_with(name: &str, cap: bool, verify: bool) {
     let mut cmd = rustc();
     cmd.input(format!("{name}.rs")).crate_name(name).crate_type("rlib").incremental("incr");
     if cap {
         cmd.arg("-Zincremental-size-cap=1");
+    }
+    if verify {
+        cmd.arg("-Zincremental-verify-ich");
     }
     cmd.run();
 }
@@ -79,9 +88,10 @@ fn main() {
     assert!(Path::new("incr/keepme/file").exists(), "the cap deleted a non-crate dir");
     assert!(Path::new("incr/not-a-crate-dir").exists(), "the cap deleted a non-crate file");
 
-    // Rebuild an evicted crate and the rebuilt ones, then link and run all of them.
+    // Rebuild an evicted crate and the rebuilt ones, then link and run all of
+    // them.
     for name in ["a", "b", "c", "g"] {
-        build(name, false);
+        build_with(name, false, true);
         assert_one_finalized_session(name);
     }
     rfs::write(
