@@ -52,7 +52,22 @@ The paired legs of run 50 (41119563423) time every config on one runner, round a
 
 On grok `props-ctfe` is within 10% of unpatched at every step, and `props` is not. Writing the CTFE results costs more time than computing them again. One round gives no spread, which is why the rustc leg repeats its rounds.
 
-On the same runner, unpatched wrote a 3178.8 MB graph and a 2253.7 MB query cache at the body edit. `props-ctfe` wrote 575.6 MB and 115.6 MB, 39% of the 1773.5 MB of object files. On rustc, the `props` leg of run 50 wrote a 376.3 MB graph and an 85.4 MB query cache, 96% of the 481.7 MB of object files. In run 49 that cache was 104.8 MB: the span change took 19.4 MB out of it. `results/ci/` holds the node fates of each step: promoted green, re-run green, re-run red, unreached and new.
+The rustc leg repeated its rounds. Each cell is the median of the rounds' ratios to unpatched, with the range of the rounds after it:
+
+| rustc step | props | props-ctfe |
+|---|---:|---:|
+| cold | 1.00x (0.99–1.01) | 1.01x (1.01–1.02) |
+| edit:comment | 1.04x (1.04–1.06) | 1.07x (1.06–1.07) |
+| edit:body | 1.06x (1.04–1.08) | 1.07x (1.07–1.09) |
+| edit:new-item | 1.05x (1.05–1.08) | 1.08x (1.07–1.09) |
+| edit:signature | 1.04x (1.04–1.05) | 1.05x (1.05–1.05) |
+| revert | 1.05x (1.04–1.10) | 1.07x (1.04–1.09) |
+
+Both configs are within 10% of unpatched on every rustc step, and so is every round of `props-ctfe`. The rounds agree to within 5% of each other, against up to 12% between the per-config legs of run 49. `props-ctfe` is the config that meets both bounds on both workloads. Graph plus cache at 39% of the object files on grok and 94% on rustc, and every edit within 10% of unpatched. Consider the per-config legs of run 50. That legs give the grok body edit as 0.31x for `props-ctfe` and 0.26x for `props`, while the paired leg puts `props-ctfe`.
+
+The faster of the two. A ratio across runners does not hold that much precision.
+
+On the same runner, unpatched wrote a 3178.8 MB graph and a 2253.7 MB query cache at the body edit. `props-ctfe` wrote 575.6 MB and 115.6 MB, 39% of the 1773.5 MB of object files. On rustc, the `props` leg of run 50 wrote a 376.3 MB graph and an 85.4 MB query cache, 96% of the 481.7 MB of object files. In run 49 that cache was 104.8 MB: the span change took 19.4 MB out of it. `props-ctfe` wrote a 74.2 MB query cache, 94% of the object files, against 93.5 MB in run 49. `results/ci/` holds the node fates of each step: promoted green, re-run green, re-run red, unreached and new.
 
 ## Each change
 
@@ -94,4 +109,5 @@ CI ran these on `b152c50` (run 41104963378), `6c5f8b2` (run 41065632534) and `4f
 
 - The gates ran in CI only. The local checkout is sparse and holds too little of the tree to build.
 - Every leg of run 49 ran on its own runner. A ratio cancels part of the speed difference between runners, not all of it, as the `props` and `props-ctfe` rows show.
-- Run 49 measured `19951ad`. The span change of `8b34cfd` is not in these numbers.
+- The time and size tables above the paired legs measured `19951ad`, before the span change of `8b34cfd`. The paired legs and a later run sizes measured `b152c50`.
+- The grok paired leg ran one round, so its ratios carry no spread.
