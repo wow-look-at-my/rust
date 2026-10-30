@@ -19,7 +19,7 @@ die() {
 
 if [[ $event != workflow_dispatch ]]; then
 	request=incr-bench/ci-request.env
-	baseline='' patched='' grok_ref='' workloads='' configs=()
+	baseline='' patched='' grok_ref='' workloads='' paired='' configs=()
 	# read fails on a last line with no newline. The -n test keeps that line.
 	while IFS='=' read -r name value || [[ -n $name ]]; do
 		case $name in
@@ -28,6 +28,7 @@ if [[ $event != workflow_dispatch ]]; then
 		patched) patched=$value ;;
 		grok_ref) grok_ref=$value ;;
 		workloads) workloads=$value ;;
+		paired) paired=$value ;;
 		config) configs+=("$value") ;;
 		*) die "$request names an unknown key: $name" ;;
 		esac
@@ -65,6 +66,15 @@ for entry in "${configs[@]}"; do
 	done
 done
 [[ $legs != '[]' ]] || die "the request names no config"
+# "paired=WORKLOAD:ROUNDS ..." adds one leg per workload that runs every config on one runner.
+pair_configs=$(jq -c 'unique_by(.config) | sort_by(.compiler != "baseline") | map({config, compiler, sha, flags})' <<< "$legs")
+for p in ${paired:-}; do
+	[[ $p =~ ^(grok|syn|rustc):([1-9][0-9]*)$ ]] || die "paired entry '$p' is not WORKLOAD:ROUNDS"
+	w=${BASH_REMATCH[1]}
+	[[ " $workloads " == *" $w "* ]] || die "paired workload '$w' is not in workloads"
+	legs=$(jq -c --arg leg "$w-paired" --arg w "$w" --argjson cs "$pair_configs" --arg r "${BASH_REMATCH[2]}" \
+		'. + [{leg: $leg, workload: $w, config: "paired", compiler: "pair", sha: "", key: "", flags: "", configs: $cs, rounds: $r}]' <<< "$legs")
+done
 compilers='[]'
 for c in baseline patched; do
 	[[ -n ${used[$c]:-} ]] || continue

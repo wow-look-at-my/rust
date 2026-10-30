@@ -47,3 +47,52 @@ END {
 	for (i = 1; i <= n; i++) print rows[i]
 }
 ' "$@"
+
+# A paired leg names each config NAME@rROUND. Its rounds ran on one runner, so their wall times divide without a non-incremental build.
+awk -F'\t' '
+FNR == 1 { table = ($1 == "workload"); next }
+!table || $6 != "incr" || $2 !~ /@r[0-9]+$/ { next }
+{
+	name = $2; sub(/@r[0-9]+$/, "", name); round = substr($2, length(name) + 3) + 0
+	k = $1 SUBSEP $7 SUBSEP round
+	wall[k, name] = $8
+	if ($3 == "baseline") base[k] = name
+	if (!(($1, $7) in seenstep)) { seenstep[$1, $7] = 1; steps[++ns] = $1 SUBSEP $7 }
+	if (!(name in seencfg)) {
+		seencfg[name] = 1
+		# The baseline config goes first in each step.
+		if ($3 == "baseline") { for (i = ++nc; i > 1; i--) cfgs[i] = cfgs[i - 1]; cfgs[1] = name } else cfgs[++nc] = name
+	}
+	if (round > rounds) rounds = round
+}
+function median(a, n,    i, j, t) {
+	for (i = 2; i <= n; i++) for (j = i; j > 1 && a[j - 1] > a[j]; j--) { t = a[j]; a[j] = a[j - 1]; a[j - 1] = t }
+	return n % 2 ? a[(n + 1) / 2] : (a[n / 2] + a[n / 2 + 1]) / 2
+}
+END {
+	if (ns == 0) exit
+	print ""
+	print "Paired legs: each config ran on the same runner, round after round. A ratio is the wall time of the config divided by the wall time of the baseline compiler in the same round. The last column is the median over the rounds."
+	print ""
+	printf "| workload | step | config |"
+	for (r = 1; r <= rounds; r++) printf " round %d s | round %d ratio |", r, r
+	print " median ratio |"
+	printf "|---|---|---|"
+	for (r = 1; r <= rounds; r++) printf "---:|---:|"
+	print "---:|"
+	for (s = 1; s <= ns; s++) {
+		split(steps[s], ws, SUBSEP)
+		for (c = 1; c <= nc; c++) {
+			printf "| %s | %s | %s |", ws[1], ws[2], cfgs[c]
+			m = 0; delete rs
+			for (r = 1; r <= rounds; r++) {
+				k = ws[1] SUBSEP ws[2] SUBSEP r
+				w = ((k, cfgs[c]) in wall) ? wall[k, cfgs[c]] : ""
+				b = (k in base) ? wall[k, base[k]] : ""
+				if (w != "" && b > 0) { rs[++m] = w / b; printf " %s | %.2fx |", w, w / b } else printf " %s | n/a |", w
+			}
+			print (m > 0 ? sprintf(" %.2fx |", median(rs, m)) : " n/a |")
+		}
+	}
+}
+' "$@"

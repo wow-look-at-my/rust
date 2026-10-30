@@ -131,10 +131,26 @@ jobs:
         run: bench/incr-bench/scripts/ci-free-disk.sh
 
       - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
+        if: matrix.compiler != 'pair'
         with:
           mode: receive
           name: toolchain-${{ matrix.compiler }}
           path: toolchain
+
+      # A paired leg runs both compilers on this one runner.
+      - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
+        if: matrix.compiler == 'pair'
+        with:
+          mode: receive
+          name: toolchain-baseline
+          path: toolchains/baseline
+
+      - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
+        if: matrix.compiler == 'pair'
+        with:
+          mode: receive
+          name: toolchain-patched
+          path: toolchains/patched
 
       - name: Check out grok-build
         if: matrix.workload == 'grok'
@@ -173,7 +189,16 @@ jobs:
       - name: Install summarize
         run: cargo install --locked --git https://github.com/rust-lang/measureme --rev e22edccd0364a3058e8e618f51988d64db0b3e10 summarize
 
+      - name: Benchmark the paired configs
+        if: matrix.compiler == 'pair'
+        run: bench/incr-bench/scripts/ci-bench-pair.sh "${{ matrix.workload }}" src toolchains "${{ runner.temp }}/targets" results "${{ matrix.leg }}"
+        env:
+          BENCH_PAIR_CONFIGS: ${{ toJSON(matrix.configs) }}
+          BENCH_PAIR_ROUNDS: ${{ matrix.rounds }}
+          CARGO_BUILD_JOBS: "3"
+
       - name: Benchmark
+        if: matrix.compiler != 'pair'
         run: bench/incr-bench/scripts/ci-bench.sh "${{ matrix.workload }}" src toolchain/bin/rustc "${{ runner.temp }}/targets" "results/${{ matrix.leg }}.tsv"
         env:
           BENCH_CONFIG: ${{ matrix.config }}
@@ -184,7 +209,7 @@ jobs:
           CARGO_BUILD_JOBS: "3"
 
       - name: Leg table
-        run: bench/incr-bench/scripts/ci-report.sh "results/${{ matrix.leg }}.tsv" >> "$GITHUB_STEP_SUMMARY"
+        run: bench/incr-bench/scripts/ci-report.sh results/${{ matrix.leg }}*.tsv >> "$GITHUB_STEP_SUMMARY"
 
       - uses: wow-look-at-my/buildhost/.github/actions/buildhost-handoff@lkgb
         with:
@@ -222,7 +247,7 @@ jobs:
             for (const name of names) {
               const dir = `${process.env.GITHUB_WORKSPACE}/in/${name}`;
               await lib.handoff({ core, github, context, octokit, exec, steps: {}, inputs: { mode: 'receive', name: `results-${name}`, path: dir, server: 'https://pazer.build', token: '' } });
-              if (!fs.existsSync(`${dir}/${name}.tsv`)) throw new Error(`leg ${name} handed off no ${name}.tsv`);
+              if (!fs.readdirSync(dir).some((f: string) => f.startsWith(name) && f.endsWith('.tsv'))) throw new Error(`leg ${name} handed off no ${name}*.tsv`);
             }
 
       - name: Write the report

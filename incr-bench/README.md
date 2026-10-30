@@ -25,7 +25,7 @@ Build each with `go-toolchain`.
 
 ## CI benchmark
 
-A push that changes `ci-request.env` runs `.github/workflows/incr-bench.yml`. The file names `baseline`, `patched`, `grok_ref`, `workloads`, and one `config=NAME baseline|patched [RUSTC FLAGS]` line per config. Each config and workload is one leg. The report lands in the job summary and in `results/ci/<run id>.md`.
+A push that changes `ci-request.env` runs `.github/workflows/incr-bench.yml`. The file names `baseline`, `patched`, `grok_ref`, `workloads`, and one `config=NAME baseline|patched [RUSTC FLAGS]` line per config. Each config and workload is one leg. A `paired=WORKLOAD:ROUNDS ...` line adds one leg per workload that runs the incremental steps of every config on one runner, round after round. And the report divides each wall time by the baseline compiler's in the same round. The report lands in the job summary and in `results/ci/<run id>.md`.
 
 ## Results
 

@@ -274,7 +274,7 @@ run_mode() {
 	done
 	git checkout -q -- .
 	build "$tdir" "$mode" revert
-	if [[ $mode == incr && -n $profile_crates ]] && command -v summarize > /dev/null; then
+	if [[ $mode == incr && -n $profile_crates && ${BENCH_PROFILE:-1} == 1 ]] && command -v summarize > /dev/null; then
 		profile_edit "$tdir" body
 		profile_edit "$tdir" comment
 		# The signature edit changes the item that the new-item edit adds. Build that item unprofiled first.
@@ -295,5 +295,7 @@ run_mode() {
 }
 
 "$rustc_bin" -vV
-run_mode incr
-run_mode noincr
+# A paired leg runs only the incremental mode. It compares compilers on one runner, so a non-incremental build has nothing to divide.
+for m in ${BENCH_MODES:-incr noincr}; do
+	run_mode "$m"
+done
