@@ -78,6 +78,19 @@ So the grok comment edit is over the 10% bound with `props-ctfe`, and the single
 
 The encode cost is a hash map lookup per edge, which `e0822ef` replaces with a direct-mapped table. The next bench run measures that change, and a config that caches `symbol_name` again.
 
+CI run 41163473453 measured `e0822ef`, the direct-mapped edge table. `props-ctfe-sym` there is `props-ctfe` with `symbol_name` out of `-Zincremental-transparent`. The query keeps its node. The branch then held no value for it on disk. Medians over the rounds, against unpatched:
+
+| step | grok props-ctfe | grok props-ctfe-sym | rustc props-ctfe | rustc props-ctfe-sym |
+|---|---:|---:|---:|---:|
+| cold | 1.00x | 0.96x | 0.99x | 1.01x |
+| edit:comment | 1.14x | 1.01x | 1.11x | 1.04x |
+| edit:body | 1.11x | 1.03x | 1.14x | 1.09x |
+| edit:new-item | 1.19x | 1.11x | 1.13x | 1.08x |
+| edit:signature | 1.10x | 1.01x | 1.10x | 1.07x |
+| revert | 1.14x | 1.00x | 1.10x | 1.10x |
+
+A transparent query has no node, so each task that calls it records the reads of the call. The codegen tasks then carry many more edges to check. The node costs 64.9 MB of graph on grok, where graph plus cache becomes 43% of the object files. On rustc it costs 28.4 MB, and the share becomes 99%. The edge table cut the dep graph encode of the grok comment edit from 4.39 s to 3.02 s and left the graph size the same. The paired legs of CI run 41163473453 hold `props-ctfe` slower on rustc than the rounds of a later run did, on the same graph bytes.
+
 Both configs are within 10% of unpatched on every rustc step, and so is every round of `props-ctfe`. The rounds agree to within 5% of each other, against up to 12% between the per-config legs of run 49. `props-ctfe` meets the size bound on both workloads, with graph plus cache at 39% of the object files on grok and 94% on rustc. It meets the time bound on rustc, and not on the grok comment edit. The per-config legs of run 50 rank the two configs the other way on the grok body edit: 0.31x for `props-ctfe`, 0.26x for `props`.
 
 A ratio across runners does not hold that much precision.
