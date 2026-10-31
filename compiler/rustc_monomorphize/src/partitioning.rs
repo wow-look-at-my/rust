@@ -102,12 +102,14 @@ use std::path::{Path, PathBuf};
 use rustc_attr_ir::lang_items::LangItem;
 use rustc_attr_ir::{InlineAttr, Linkage};
 use rustc_data_structures::either::Either;
+use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::{FxHasher, FxIndexMap, FxIndexSet};
 use rustc_data_structures::sync::par_join;
 use rustc_data_structures::unord::{UnordMap, UnordSet};
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, DefIdSet, LOCAL_CRATE};
 use rustc_hir::definitions::DefPathDataName;
+use rustc_middle::dep_graph::{DepKind, DepNode, hash_result, short_value_fingerprint};
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::middle::exported_symbols::{SymbolExportInfo, SymbolExportLevel};
 use rustc_middle::mir::StatementKind;
@@ -1181,8 +1183,14 @@ where
 {
     let _prof_timer = tcx.prof.generic_activity("assert_symbols_are_distinct");
 
-    let mut symbols: Vec<_> =
-        mono_items.map(|mono_item| (mono_item, mono_item.symbol_name(tcx))).collect();
+    // A green `symbol_name` node holds the hash of the name it had.
+    let mut hashes: Vec<_> =
+        mono_items.map(|mono_item| (symbol_name_hash(tcx, mono_item), mono_item)).collect();
+    hashes.sort_unstable_by_key(|&(hash, _)| hash);
+    let mut symbols = Vec::new();
+    for run in hashes.chunk_by(|a, b| a.0 == b.0).filter(|run| run.len() > 1) {
+        symbols.extend(run.iter().map(|&(_, mono_item)| (mono_item, mono_item.symbol_name(tcx))));
+    }
 
     symbols.sort_by_key(|sym| sym.1);
 
@@ -1202,6 +1210,27 @@ where
             tcx.dcx().emit_fatal(SymbolAlreadyDefined { span, symbol: sym1.to_string() });
         }
     }
+}
+
+/// The hash the dep graph records for the symbol name of `mono_item`. Equal names give equal
+/// hashes, so only items that share a hash can share a name.
+fn symbol_name_hash<'tcx>(tcx: TyCtxt<'tcx>, mono_item: &MonoItem<'tcx>) -> Fingerprint {
+    let instance = match *mono_item {
+        MonoItem::Fn(instance) => instance,
+        MonoItem::Static(def_id) => ty::Instance::mono(tcx, def_id),
+        MonoItem::GlobalAsm(item_id) => ty::Instance::mono(tcx, item_id.owner_id.to_def_id()),
+    };
+    if tcx.dep_graph.is_fully_enabled() {
+        // A green node needs no name: the graph holds the hash of the one it had.
+        let node = DepNode::construct(tcx, DepKind::symbol_name, &instance);
+        if tcx.dep_graph.try_mark_green(tcx, &node).is_some()
+            && let Some(hash) = tcx.dep_graph.green_value_fingerprint(&node)
+        {
+            return hash;
+        }
+    }
+    let name = tcx.symbol_name(instance);
+    short_value_fingerprint(tcx.with_stable_hashing_context(|mut hcx| hash_result(&mut hcx, &name)))
 }
 
 fn collect_and_partition_mono_items(tcx: TyCtxt<'_>, (): ()) -> MonoItemPartitions<'_> {
