@@ -91,6 +91,27 @@ CI run 41163473453 measured `e0822ef`, the direct-mapped edge table. `props-ctfe
 
 A transparent query has no node, so each task that calls it records the reads of the call. The codegen tasks then carry many more edges to check. The node costs 64.9 MB of graph on grok, where graph plus cache becomes 43% of the object files. On rustc it costs 28.4 MB, and the share becomes 99%. The edge table cut the dep graph encode of the grok comment edit from 4.39 s to 3.02 s and left the graph size the same. The paired legs of CI run 41163473453 hold `props-ctfe` slower on rustc than the rounds of CI run 41119563423 did, on the same graph bytes.
 
+CI run 41180014620 restored `cache_on_disk` on `symbol_name`, as upstream has it. `props-sym` keeps the node and stores no value. `props-symc` stores the value too. Medians over the rounds, against unpatched:
+
+| step | grok props-sym | grok props-symc | rustc props-sym | rustc props-symc |
+|---|---:|---:|---:|---:|
+| edit:comment | 1.05x | 1.01x | 1.04x | 1.02x |
+| edit:body | 1.03x | 0.95x | 1.10x | 1.07x |
+| edit:new-item | 1.14x | 1.06x | 1.08x | 1.08x |
+| edit:signature | 1.11x | 1.04x | 1.08x | 1.06x |
+| revert | 1.15x | 1.09x | 1.11x | 1.09x |
+
+| workload | config | dep-graph.bin MB | query-cache.bin MB | *.o MB | graph+cache % of *.o |
+|---|---|---:|---:|---:|---:|
+| grok | props-sym | 641.5 | 115.6 | 1773.5 | 43% |
+| grok | props-symc | 641.5 | 507.9 | 1773.5 | 65% |
+| rustc | props-sym | 404.9 | 90.0 | 481.7 | 103% |
+| rustc | props-symc | 404.9 | 293.0 | 481.7 | 145% |
+
+The names cost 392 MB of query cache on grok and 203 MB on rustc. Without them, the partitioner's symbol check built the name of every mono item again in each session. `11f98b2` makes the check read the hash of a green name from the dep graph instead, and build names only where hashes are equal. The rustc legs passed their flags as `RUSTFLAGS_NOT_BOOTSTRAP`, which never reaches proc macros and build scripts. Those crates wrote their `symbol_name` values, which is the 15.8 MB by which the `props-sym` cache of rustc exceeds the 74.2 MB of run 52. The rustc workload now passes `MAGIC_EXTRA_RUSTFLAGS`, which reaches every crate.
+
+The decoder counters of this run gave each cause zero while bodies were rejected. Those bodies return before the item scope, which `ae747af` now counts.
+
 Both configs are within 10% of unpatched on every rustc step, and so is every round of `props-ctfe`. The rounds agree to within 5% of each other, against up to 12% between the per-config legs of run 49. `props-ctfe` meets the size bound on both workloads, with graph plus cache at 39% of the object files on grok and 94% on rustc. It meets the time bound on rustc, and not on the grok comment edit. The per-config legs of run 50 rank the two configs the other way on the grok body edit: 0.31x for `props-ctfe`, 0.26x for `props`.
 
 A ratio across runners does not hold that much precision.
