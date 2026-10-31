@@ -60,6 +60,10 @@ where
     let _timer = tcx.prof.generic_activity_with_arg("encode_query_results_for", query.name);
 
     assert!(all_inactive(&query.state));
+    // The filter below hashes a dep node for each entry. A kind that writes nothing needs none.
+    if !query.cache_on_disk_local {
+        return 0;
+    }
     let in_metadata = tcx.in_metadata.get().and_then(|sets| sets.for_kind(query.dep_kind));
     // A session that copies the metadata holds every value that it decoded
     // from it.
@@ -69,6 +73,9 @@ where
     };
     let mut values = Vec::new();
     query.cache.for_each(&mut |key, value, dep_node| {
+        if !query.will_cache_on_disk_for_key(*key) {
+            return;
+        }
         if (in_metadata.is_some() || prev.is_some())
             && let Some(def_id) = DepNode::construct(tcx, query.dep_kind, key).extract_def_id(tcx)
             && let Some(def_id) = def_id.as_local()
@@ -77,9 +84,7 @@ where
         {
             return;
         }
-        if query.will_cache_on_disk_for_key(*key) {
-            values.push((dep_node, *value));
-        }
+        values.push((dep_node, *value));
     });
     // In node order, the index stores each node as a small step from the one before.
     values.sort_unstable_by_key(|&(dep_node, _)| dep_node.as_u32());
