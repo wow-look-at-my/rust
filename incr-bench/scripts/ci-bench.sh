@@ -288,7 +288,7 @@ run_mode() {
 	fi
 	# A changed profile or feature set is a new build configuration, and cargo
 	# gives it new crate dirs.
-	if [[ $workload != rustc ]]; then
+	if [[ $workload != rustc && ${BENCH_CONFIG_CHANGE:-1} == 1 ]]; then
 		CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false build "$tdir" "$mode" config-change
 	fi
 	rm -rf "$tdir"

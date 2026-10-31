@@ -26,7 +26,7 @@ for ((r = 1; r <= rounds; r++)); do
 		compiler=$(jq -r .compiler <<< "$c")
 		echo "::group::round $r, $name ($compiler)"
 		BENCH_CONFIG="$name@r$r" BENCH_COMPILER="$compiler" BENCH_TOOLCHAIN=$(jq -r .sha <<< "$c") \
-			BENCH_RUSTC_FLAGS=$(jq -r .flags <<< "$c") BENCH_MODES=incr BENCH_PROFILE=0 \
+			BENCH_RUSTC_FLAGS=$(jq -r .flags <<< "$c") BENCH_MODES=incr BENCH_PROFILE=0 BENCH_CONFIG_CHANGE=0 \
 			"$here/ci-bench.sh" "$workload" "$src" "$toolchains/$compiler/bin/rustc" \
 			"$target_root/r$r-$name" "$results_dir/$leg.$name.r$r.tsv"
 		echo "::endgroup::"
