@@ -683,6 +683,38 @@ impl FingerprintRefs {
     }
 }
 
+/// A direct-mapped table from an edge target to the last position of an edge
+/// to it in the block.
+struct EdgePositions {
+    slots: Box<[(u32, u32)]>,
+}
+
+impl EdgePositions {
+    const SLOTS: usize = 1 << 18;
+
+    fn new() -> Self {
+        EdgePositions { slots: vec![(u32::MAX, u32::MAX); Self::SLOTS].into() }
+    }
+
+    #[inline]
+    fn slot(target: u32) -> usize {
+        (target.wrapping_mul(0x9E37_79B1) >> (32 - Self::SLOTS.trailing_zeros())) as usize
+    }
+
+    /// Returns a position in `history` that holds `target`. A slot that an earlier block or
+    /// another target left fails this check, so a block start needs no clear.
+    #[inline]
+    fn get(&self, target: u32, history: &[u32]) -> Option<u32> {
+        let (slot_target, at) = self.slots[Self::slot(target)];
+        (slot_target == target && history.get(at as usize) == Some(&target)).then_some(at)
+    }
+
+    #[inline]
+    fn insert(&mut self, target: u32, at: u32) {
+        self.slots[Self::slot(target)] = (target, at);
+    }
+}
+
 /// What a thread's encoder remembers about the nodes it already wrote.
 struct EncoderRefs {
     /// The index of the last node in the unflushed buffer.
@@ -691,8 +723,8 @@ struct EncoderRefs {
     /// Keyed by the first half of a key, with zero as the second half.
     key_highs: FingerprintRefs,
     values: FingerprintRefs,
-    /// The position of the last edge of the unflushed buffer to each target.
-    edge_positions: FxHashMap<u32, u32>,
+    /// The position of an earlier edge of the unflushed buffer to a target.
+    edge_positions: EdgePositions,
     /// The number of edges in the unflushed buffer.
     edge_count: u32,
     /// The targets of the edges in the unflushed buffer, in order.
@@ -707,7 +739,7 @@ impl EncoderRefs {
             keys: FingerprintRefs::new(),
             key_highs: FingerprintRefs::new(),
             values: FingerprintRefs::new(),
-            edge_positions: FxHashMap::default(),
+            edge_positions: EdgePositions::new(),
             edge_count: 0,
             edge_history: Vec::new(),
             kind_flags: KindFlags::new(),
@@ -777,7 +809,6 @@ impl NodeInfo<'_> {
         }
         if edges_restart {
             flags |= FLAG_EDGES_RESTART;
-            refs.edge_positions.clear();
             refs.edge_count = 0;
             refs.edge_history.clear();
             refs.kind_flags.clear();
@@ -838,7 +869,7 @@ impl NodeInfo<'_> {
             let target = edges[i].as_u32();
             let delta = i64::from(target) - prev;
             let delta_code = ((((delta << 1) ^ (delta >> 63)) as u64) << 1) | 1;
-            let at = refs.edge_positions.get(&target).copied();
+            let at = refs.edge_positions.get(target, &refs.edge_history);
             let mut len = 1;
             if let Some(at) = at {
                 while i + len < edges.len()
@@ -865,6 +896,7 @@ impl NodeInfo<'_> {
             }
             for edge in &edges[i..i + len] {
                 refs.edge_positions.insert(edge.as_u32(), refs.edge_count);
+                debug_assert_eq!(refs.edge_history.len(), refs.edge_count as usize);
                 refs.edge_history.push(edge.as_u32());
                 refs.edge_count += 1;
             }

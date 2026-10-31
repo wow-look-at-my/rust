@@ -118,6 +118,21 @@ fn edge_back_references_restart_at_a_flush() {
 }
 
 #[test]
+fn edge_targets_that_share_a_slot_round_trip() {
+    let far = 0x0100_0000;
+    let other = (far + 1..).find(|&t| EdgePositions::slot(t) == EdgePositions::slot(far)).unwrap();
+    let entries = vec![
+        (0, node(1, 1), val(1), vec![]),
+        (1, node(1, 2), val(2), vec![far]),
+        (2, node(1, 3), val(3), vec![0, far]),
+        // `other` takes the slot of `far`, so the next edge to `far` has no back reference.
+        (3, node(1, 4), val(4), vec![other, far, other, far]),
+        (4, node(1, 5), val(5), vec![far, other, far, 0]),
+    ];
+    round_trip(&entries, &[2]);
+}
+
+#[test]
 fn a_repeated_run_of_edges_is_one_code() {
     let far = 0x0100_0000;
     let run: Vec<u32> = (0..40).map(|k| far + k * 977).collect();
