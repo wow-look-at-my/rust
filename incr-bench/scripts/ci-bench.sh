@@ -94,6 +94,11 @@ measure() {
 		total=$(( $(sum_sizes "${inc[@]}") - linked ))
 		crate_dirs=$(find "${inc[@]}" -mindepth 1 -maxdepth 1 -type d | wc -l)
 		sessions=$(find "${inc[@]}" -mindepth 2 -maxdepth 2 -type d -name 's-*' | wc -l)
+		if [[ $mode == incr && $step == edit:body ]]; then
+			echo "largest query caches $mode $step (bytes, crate dir):"
+			find "${inc[@]}" -name query-cache.bin -printf '%s\t%h\n' | sort -rn | head -n 15 |
+				awk -F'\t' '{n = split($2, p, "/"); print $1 "\t" p[n - 5] "/" p[n - 1]}'
+		fi
 	fi
 	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.1f\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n' \
 		"$workload" "$config" "$compiler" "$toolchain" "$flags" "$mode" "$step" "$secs" \
