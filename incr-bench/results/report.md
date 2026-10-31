@@ -128,6 +128,20 @@ On rustc `props-sym` is within 10% of unpatched at every step. On grok the comme
 
 The next run caches `optimized_mir` for the bodies the metadata does not hold.
 
+CI run 41211661910 measured `props-sym-mir`, which is `props-sym` with `optimized_mir` cached. The query cache then skips the bodies the metadata holds. Medians over the rounds, against unpatched:
+
+| step | grok props-sym | grok props-sym-mir | rustc props-sym | rustc props-sym-mir |
+|---|---:|---:|---:|---:|
+| edit:comment | 1.03x | 1.04x | 0.95x | 0.93x |
+| edit:body | 1.02x | 1.02x | 1.02x | 0.99x |
+| edit:new-item | 1.09x | 1.13x | 0.99x | 0.97x |
+| edit:signature | 1.07x | 1.04x | 1.04x | 0.97x |
+| revert | 1.21x | 1.10x | 1.05x | 1.01x |
+
+The cached bodies add 165.6 MB of query cache on grok and 76.4 MB on rustc. Graph plus cache is then 52% of the object files on grok and 118% on rustc. On the grok comment edit, the codegen decoder of `xai_grok_shell` now rejects no body. In the paired grok leg each config did the same work at the new-item edit. That grok is by the decoder counts and node fates, and `xai_grok_shell` compiled in 51 to 52 s against 40 to 42 s unpatched. The bench now self-profiles that edit too.
+
+The listing of the largest rustc query caches names the 12.4 MB: a 31.4 MB query cache of the bootstrap tool. This also covers which x.py compiles with the workload compiler and none of the flags. `1a648f7` passes the flags there as well.
+
 The breakdown that each crate prints matches run 52 on rustc. The extra 12.4 MB of query cache thus sits in compiles that print no breakdown. The next run lists the largest query caches by crate to name them.
 
 Both configs are within 10% of unpatched on every rustc step, and so is every round of `props-ctfe`. The rounds agree to within 5% of each other, against up to 12% between the per-config legs of run 49. `props-ctfe` meets the size bound on both workloads, with graph plus cache at 39% of the object files on grok and 94% on rustc. It meets the time bound on rustc, and not on the grok comment edit. The per-config legs of run 50 rank the two configs the other way on the grok body edit: 0.31x for `props-ctfe`, 0.26x for `props`.

@@ -291,6 +291,7 @@ run_mode() {
 	if [[ $mode == incr && -n $profile_crates && ${BENCH_PROFILE:-1} == 1 ]] && command -v summarize > /dev/null; then
 		profile_edit "$tdir" body
 		profile_edit "$tdir" comment
+		profile_edit "$tdir" new-item
 		# The signature edit changes the item that the new-item edit adds. Build that item unprofiled first.
 		edit new-item
 		if ! CARGO_TARGET_DIR="$tdir" CARGO_INCREMENTAL=1 "${cmd[@]}" > "$target_root/profile.log" 2>&1; then
