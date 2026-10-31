@@ -63,7 +63,24 @@ The rustc leg repeated its rounds. Each cell is the median of the rounds' ratios
 | edit:signature | 1.04x (1.04–1.05) | 1.05x (1.05–1.05) |
 | revert | 1.05x (1.04–1.10) | 1.07x (1.04–1.09) |
 
-Both configs are within 10% of unpatched on every rustc step, and so is every round of `props-ctfe`. The rounds agree to within 5% of each other, against up to 12% between the per-config legs of run 49. `props-ctfe` is the config that meets both bounds on both workloads. Graph plus cache at 39% of the object files on grok and 94% on rustc, and every edit within 10% of unpatched. Consider the per-config legs of run 50. That legs give the grok body edit as 0.31x for `props-ctfe` and 0.26x for `props`, while the paired leg puts `props-ctfe`.
+CI run 41150372379 ran the grok paired leg again, with multiple rounds of unpatched and `props-ctfe`:
+
+| grok step | round 1 | round 2 | median over this run and the round above |
+|---|---:|---:|---:|
+| cold | 1.08x | 1.09x | 1.08x |
+| edit:comment | 1.13x | 1.12x | 1.12x |
+| edit:body | 1.18x | 1.00x | 1.00x |
+| edit:new-item | 1.10x | 0.99x | 0.99x |
+| edit:signature | 1.10x | 1.04x | 1.05x |
+| revert | 1.22x | 1.10x | 1.10x |
+
+So the grok comment edit is over the 10% bound with `props-ctfe`, and the single round above did not show it. The self-profile of the comment edit names the costs in the `xai-grok-shell` crate. `symbol_name` ran for 338,132 instances in 3.73 s, where unpatched loads the names from its cache in 0.62 s. This is because the symbol check of the partitioner asks for the name of every mono item. The dep graph encode took 4.39 s for 6.0M nodes against 1.75 s for 10.6M nodes unpatched. `typeck_root` and `mir_borrowck` took 3.1 s more, for the bodies that a span change makes red and that the cache no longer holds.
+
+The encode cost is a hash map lookup per edge, which `e0822ef` replaces with a direct-mapped table. The next bench run measures that change, and a config that caches `symbol_name` again.
+
+Both configs are within 10% of unpatched on every rustc step, and so is every round of `props-ctfe`. The rounds agree to within 5% of each other, against up to 12% between the per-config legs of run 49. `props-ctfe` meets the size bound on both workloads, with graph plus cache at 39% of the object files on grok and 94% on rustc. It meets the time bound on rustc, and not on the grok comment edit. The per-config legs of run 50 rank the two configs the other way on the grok body edit: 0.31x for `props-ctfe`, 0.26x for `props`.
+
+A ratio across runners does not hold that much precision.
 
 The faster of the two. A ratio across runners does not hold that much precision.
 
