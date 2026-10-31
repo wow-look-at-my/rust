@@ -52,6 +52,8 @@ esac
 if [[ $workload == rustc ]]; then
 	# Bootstrap's rustc shim adds MAGIC_EXTRA_RUSTFLAGS to every compile, host crates included. An empty value is one empty argument.
 	[[ -z $flags ]] || export MAGIC_EXTRA_RUSTFLAGS="$flags"
+	# x.py compiles bootstrap itself with the same compiler, outside the shim.
+	export RUSTFLAGS_BOOTSTRAP="$flags"
 	# The stage1 toolchain has no cargo, and bootstrap looks for one next to build.rustc. Use the cargo that src/stage0 pins.
 	host=$("$rustc_bin" -vV | sed -n 's/^host: //p')
 	date=$(sed -n 's/^compiler_date=//p' "$src/src/stage0")
