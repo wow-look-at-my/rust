@@ -80,12 +80,26 @@ pub(crate) enum RejectCause {
     Expansion,
     /// A span names a file of a dependency that the dependency no longer has.
     ForeignFile,
+    /// The session had no definition with this path hash.
+    NewItem,
+    /// The session stored no entry of this table for the item.
+    NoEntry,
+    /// An earlier item named a definition of a changed dependency that is gone.
+    Poisoned,
 }
 
 impl RejectCause {
-    pub(crate) const COUNT: usize = 5;
-    pub(crate) const NAMES: [&str; Self::COUNT] =
-        ["no-file", "no-scope", "outside-item", "expansion", "foreign-file"];
+    pub(crate) const COUNT: usize = 8;
+    pub(crate) const NAMES: [&str; Self::COUNT] = [
+        "no-file",
+        "no-scope",
+        "outside-item",
+        "expansion",
+        "foreign-file",
+        "new-item",
+        "no-entry",
+        "poisoned",
+    ];
 }
 
 /// The stable ids of the positions the session wrote into the dependencies that changed.
@@ -218,7 +232,21 @@ impl<'tcx> PrevSession<'tcx> {
 
     /// The index the session gave to `def_id`.
     fn old_index(&self, def_id: LocalDefId) -> Option<DefIndex> {
-        self.def_path_hash_map.def_path_hash_to_def_index(&self.tcx.def_path_hash(def_id.into()))
+        let old = self
+            .def_path_hash_map
+            .def_path_hash_to_def_index(&self.tcx.def_path_hash(def_id.into()));
+        if old.is_none() {
+            self.count_reject(RejectCause::NewItem);
+        }
+        old
+    }
+
+    /// The table entry the session stored for an item.
+    fn entry<T>(&self, entry: Option<T>) -> Option<T> {
+        if entry.is_none() {
+            self.count_reject(RejectCause::NoEntry);
+        }
+        entry
     }
 
     /// Maps a definition of another crate, named by its index at the time of the session.
@@ -291,10 +319,10 @@ impl<'tcx> PrevSession<'tcx> {
     /// placed in this session.
     pub(crate) fn body(&self, kind: PrevBody, def_id: LocalDefId) -> Option<mir::Body<'tcx>> {
         let old = self.old_index(def_id)?;
-        let lazy = match kind {
+        let lazy = self.entry(match kind {
             PrevBody::OptimizedMir => self.root.tables.optimized_mir.get(&self.blob, old),
             PrevBody::MirForCtfe => self.root.tables.mir_for_ctfe.get(&self.blob, old),
-        }?;
+        })?;
         let mut body: mir::Body<'tcx> =
             self.with_item_scope(def_id, old, || self.decode_at(lazy.position))?;
         let lint_roots = match kind {
@@ -349,7 +377,7 @@ impl<'tcx> PrevSession<'tcx> {
         def_id: LocalDefId,
     ) -> Option<IndexVec<mir::Promoted, mir::Body<'tcx>>> {
         let old = self.old_index(def_id)?;
-        let lazy = self.root.tables.promoted_mir.get(&self.blob, old)?;
+        let lazy = self.entry(self.root.tables.promoted_mir.get(&self.blob, old))?;
         let mut promoted: IndexVec<mir::Promoted, mir::Body<'tcx>> =
             self.with_item_scope(def_id, old, || self.decode_at(lazy.position))?;
         let lint_roots = self.root.tables.promoted_mir_lint_roots.get(&self.blob, old);
@@ -360,7 +388,7 @@ impl<'tcx> PrevSession<'tcx> {
     /// Decodes the type that the session stored for `def_id`.
     pub(crate) fn type_of(&self, def_id: LocalDefId) -> Option<ty::EarlyBinder<'tcx, Ty<'tcx>>> {
         let old = self.old_index(def_id)?;
-        let lazy = self.root.tables.type_of.get(&self.blob, old)?;
+        let lazy = self.entry(self.root.tables.type_of.get(&self.blob, old))?;
         self.with_item_scope(def_id, old, || self.decode_at(lazy.position))
     }
 
@@ -370,14 +398,14 @@ impl<'tcx> PrevSession<'tcx> {
         def_id: LocalDefId,
     ) -> Option<ty::EarlyBinder<'tcx, ty::PolyFnSig<'tcx>>> {
         let old = self.old_index(def_id)?;
-        let lazy = self.root.tables.fn_sig.get(&self.blob, old)?;
+        let lazy = self.entry(self.root.tables.fn_sig.get(&self.blob, old))?;
         self.with_item_scope(def_id, old, || self.decode_at(lazy.position))
     }
 
     /// Decodes the generics that the session stored for `def_id`.
     pub(crate) fn generics_of(&self, def_id: LocalDefId) -> Option<ty::Generics> {
         let old = self.old_index(def_id)?;
-        let lazy = self.root.tables.generics_of.get(&self.blob, old)?;
+        let lazy = self.entry(self.root.tables.generics_of.get(&self.blob, old))?;
         self.with_item_scope(def_id, old, || self.decode_at(lazy.position))
     }
 
@@ -387,14 +415,14 @@ impl<'tcx> PrevSession<'tcx> {
         def_id: LocalDefId,
     ) -> Option<ty::GenericClauses<'tcx>> {
         let old = self.old_index(def_id)?;
-        let lazy = self.root.tables.explicit_clauses_of.get(&self.blob, old)?;
+        let lazy = self.entry(self.root.tables.explicit_clauses_of.get(&self.blob, old))?;
         self.with_item_scope(def_id, old, || self.decode_at(lazy.position))
     }
 
     /// Decodes the codegen attributes that the session stored for `def_id`.
     pub(crate) fn codegen_fn_attrs(&self, def_id: LocalDefId) -> Option<CodegenFnAttrs> {
         let old = self.old_index(def_id)?;
-        let lazy = self.root.tables.codegen_fn_attrs.get(&self.blob, old)?;
+        let lazy = self.entry(self.root.tables.codegen_fn_attrs.get(&self.blob, old))?;
         self.with_item_scope(def_id, old, || self.decode_at(lazy.position))
     }
 
@@ -406,6 +434,7 @@ impl<'tcx> PrevSession<'tcx> {
     ) -> Option<R> {
         self.attempted.set(self.attempted.get() + 1);
         if self.poisoned.get() {
+            self.count_reject(RejectCause::Poisoned);
             return None;
         }
         self.scope.set(self.item_scope(def_id, old));
@@ -438,6 +467,7 @@ impl<'tcx> PrevSession<'tcx> {
             return None;
         }
         if self.poisoned.get() {
+            self.count_reject(RejectCause::Poisoned);
             return None;
         }
         self.reused.set(self.reused.get() + 1);
