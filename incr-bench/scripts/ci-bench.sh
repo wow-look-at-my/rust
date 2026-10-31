@@ -130,6 +130,13 @@ build() {
 		echo "codegen MIR from metadata $mode $step: $codegen (decoded, rejected, mismatched)"
 		{ grep -E '^\[incremental\] codegen: (mismatch of|field |spans |first span )' "$log" || true; } | sed -n 1,30p | cut -c1-600
 	fi
+	# An -Zincremental-info run names why the decoder gave up on each item it could not reuse.
+	local causes
+	causes=$({ grep -oE '^\[incremental\] (metadata|codegen): items the decoder rejected, by cause: .*' "$log" || true; } |
+		awk '{for (i = 9; i < NF; i += 2) s[$2 " " $i] += $(i + 1)} END {for (k in s) printf "%s %d; ", k, s[k]}')
+	if [[ -n $causes ]]; then
+		echo "items the decoder rejected $mode $step, by cause: $causes"
+	fi
 	local consts
 	consts=$({ grep -oE 'codegen: decoded [0-9]+ CTFE and promoted MIR values from metadata, [0-9]+ rejected, [0-9]+ mismatched' "$log" || true; } | tr -d ',' | awk '{d += $3; r += $11; m += $13} END {printf "%d\t%d\t%d", d, r, m}')
 	if [[ $consts != $'0\t0\t0' ]]; then

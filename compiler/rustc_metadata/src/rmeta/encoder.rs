@@ -55,7 +55,7 @@ use twox_hash::XxHash3_128;
 use crate::diagnostics::{FailCreateFileEncoder, FailWriteFile};
 use crate::eii::EiiMapEncodedKeyValue;
 use crate::rmeta::decoder::prev_session::{
-    PrevBody, PrevSession, exported_stable_id, mir_lint_root_bodies,
+    PrevBody, PrevSession, RejectCause, exported_stable_id, mir_lint_root_bodies,
 };
 use crate::rmeta::remapped_def_id::RemappedRawDefId;
 use crate::rmeta::*;
@@ -2232,12 +2232,18 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             && tcx.sess.opts.unstable_opts.incremental_info
         {
             match &self.prev_session {
-                Some(prev) => eprintln!(
-                    "[incremental] metadata: decoded {} of {} MIR bodies from the previous session ({} marked green)",
-                    prev.reused.get(),
-                    prev.requested.get(),
-                    prev.attempted.get(),
-                ),
+                Some(prev) => {
+                    eprintln!(
+                        "[incremental] metadata: decoded {} of {} MIR bodies from the previous session ({} marked green)",
+                        prev.reused.get(),
+                        prev.requested.get(),
+                        prev.attempted.get(),
+                    );
+                    eprintln!(
+                        "[incremental] metadata: items the decoder rejected, by cause: {}",
+                        reject_causes(prev)
+                    );
+                }
                 None => {
                     eprintln!("[incremental] metadata: no previous metadata to decode MIR from")
                 }
@@ -3072,6 +3078,10 @@ impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
             self.rejected.load(Ordering::Relaxed),
             self.mismatched.load(Ordering::Relaxed),
         );
+        eprintln!(
+            "[incremental] codegen: items the decoder rejected, by cause: {}",
+            reject_causes(&self.session.lock())
+        );
         let [decoded, rejected, mismatched] = &self.const_bodies;
         eprintln!(
             "[incremental] codegen: decoded {} CTFE and promoted MIR values from metadata, {} rejected, {} mismatched",
@@ -3133,6 +3143,12 @@ pub(crate) fn prev_metadata_explain_mismatch<'tcx>(
     if let Some(Some(prev)) = tcx.prev_metadata.get() {
         prev.explain_mismatch(tcx, def, built);
     }
+}
+
+/// The items the session's decoder rejected, as `cause count` pairs.
+fn reject_causes(prev: &PrevSession<'_>) -> String {
+    let counts = RejectCause::NAMES.iter().zip(&prev.rejects);
+    counts.map(|(name, count)| format!("{name} {}", count.get())).collect::<Vec<_>>().join(" ")
 }
 
 /// Provides the `prev_metadata_optimized_mir` hook.

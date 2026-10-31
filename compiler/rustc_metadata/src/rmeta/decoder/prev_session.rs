@@ -61,6 +61,31 @@ pub(crate) struct PrevSession<'tcx> {
     pub(crate) reused: Cell<usize>,
     pub(crate) attempted: Cell<usize>,
     pub(crate) requested: Cell<usize>,
+    /// The cause of the first rejection in the item being decoded.
+    reject_cause: Cell<Option<RejectCause>>,
+    /// The items each cause rejected, for `-Zincremental-info`.
+    pub(crate) rejects: [Cell<usize>; RejectCause::COUNT],
+}
+
+/// Why the decoder gave up on an item.
+#[derive(Clone, Copy)]
+pub(crate) enum RejectCause {
+    /// A local span names a file that this session does not have.
+    NoFile,
+    /// A local span of a changed file, where the item has no `def_span` to move it by.
+    NoScope,
+    /// A local span of a changed file that lands outside the item once moved.
+    OutsideItem,
+    /// The item names an expansion that this session does not have.
+    Expansion,
+    /// A span names a file of a dependency that the dependency no longer has.
+    ForeignFile,
+}
+
+impl RejectCause {
+    pub(crate) const COUNT: usize = 5;
+    pub(crate) const NAMES: [&str; Self::COUNT] =
+        ["no-file", "no-scope", "outside-item", "expansion", "foreign-file"];
 }
 
 /// The stable ids of the positions the session wrote into the dependencies that changed.
@@ -139,6 +164,8 @@ impl<'tcx> PrevSession<'tcx> {
             reused: Cell::new(0),
             attempted: Cell::new(0),
             requested: Cell::new(0),
+            reject_cause: Cell::new(None),
+            rejects: Default::default(),
         };
         if changed.is_empty() {
             return Some(session);
@@ -392,16 +419,25 @@ impl<'tcx> PrevSession<'tcx> {
             .then(|| self.tcx.local_def_id_to_hir_id(def_id).owner.def_id);
         self.span_parent.set(parent);
         self.rejected.set(false);
+        self.reject_cause.set(None);
         let r = f();
         self.scope.set(None);
         self.span_parent.set(None);
+        let cause = self.reject_cause.take();
         if self.expn_missing.replace(false) {
             // The hygiene cache can hold contexts built on the root fallback.
             *self.hygiene_context.borrow_mut() = Default::default();
             self.rejected.set(false);
+            self.count_reject(cause.unwrap_or(RejectCause::Expansion));
             return None;
         }
-        if self.rejected.replace(false) || self.poisoned.get() {
+        if self.rejected.replace(false) {
+            if let Some(cause) = cause {
+                self.count_reject(cause);
+            }
+            return None;
+        }
+        if self.poisoned.get() {
             return None;
         }
         self.reused.set(self.reused.get() + 1);
@@ -464,27 +500,42 @@ impl<'tcx> PrevSession<'tcx> {
         Some(MatchedFile { current, unchanged })
     }
 
+    fn count_reject(&self, cause: RejectCause) {
+        let count = &self.rejects[cause as usize];
+        count.set(count.get() + 1);
+    }
+
+    /// Rejects the item being decoded. The first cause is the one counted.
+    fn reject(&self, cause: RejectCause) {
+        self.rejected.set(true);
+        if self.reject_cause.get().is_none() {
+            self.reject_cause.set(Some(cause));
+        }
+    }
+
     /// Places an old local span in this session, or rejects the item being decoded.
     fn place_local_span(&self, file: u32, lo: u32, hi: u32) -> (BytePos, BytePos) {
         let Some(file) = self.matched_file(file) else {
-            self.rejected.set(true);
+            self.reject(RejectCause::NoFile);
             return (BytePos(0), BytePos(0));
         };
         let start = file.current.start_pos;
         if file.unchanged {
             return (start + BytePos(lo), start + BytePos(hi));
         }
-        if let Some(scope) = self.scope.get() {
-            let lo = i64::from(start.0) + i64::from(lo) + scope.delta;
-            let hi = i64::from(start.0) + i64::from(hi) + scope.delta;
-            if let (Ok(lo), Ok(hi)) = (u32::try_from(lo), u32::try_from(hi))
-                && scope.lo.0 <= lo
-                && hi <= scope.hi.0
-            {
-                return (BytePos(lo), BytePos(hi));
-            }
+        let Some(scope) = self.scope.get() else {
+            self.reject(RejectCause::NoScope);
+            return (start, start);
+        };
+        let lo = i64::from(start.0) + i64::from(lo) + scope.delta;
+        let hi = i64::from(start.0) + i64::from(hi) + scope.delta;
+        if let (Ok(lo), Ok(hi)) = (u32::try_from(lo), u32::try_from(hi))
+            && scope.lo.0 <= lo
+            && hi <= scope.hi.0
+        {
+            return (BytePos(lo), BytePos(hi));
         }
-        self.rejected.set(true);
+        self.reject(RejectCause::OutsideItem);
         (start, start)
     }
 }
@@ -589,7 +640,7 @@ impl<'a, 'tcx> PrevDecoder<'a, 'tcx> {
         }
         let cnum = CrateNum::decode(self);
         let Some(metadata_index) = self.prev.map_foreign_file(cnum, metadata_index) else {
-            self.prev.rejected.set(true);
+            self.prev.reject(RejectCause::ForeignFile);
             return (RawSpan::Dummy, ctxt);
         };
         let tcx = self.prev.tcx;
