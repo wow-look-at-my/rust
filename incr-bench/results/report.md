@@ -112,6 +112,24 @@ The names cost 392 MB of query cache on grok and 203 MB on rustc. Without them, 
 
 The decoder counters of this run gave each cause zero while bodies were rejected. Those bodies return before the item scope, which `ae747af` now counts.
 
+CI run 41195234908 measured `11f98b2`, the hashed symbol check. `props-sym-local` is `props-sym` without `-Zincremental-extern-items`. Medians over the rounds, against unpatched:
+
+| step | grok props-sym | grok props-sym-local | rustc props-sym | rustc props-sym-local |
+|---|---:|---:|---:|---:|
+| edit:comment | 1.01x | 1.02x | 0.99x | 1.05x |
+| edit:body | 0.99x | 1.00x | 1.01x | 1.08x |
+| edit:new-item | 1.10x | 1.09x | 1.00x | 1.00x |
+| edit:signature | 1.10x | 1.12x | 0.99x | 1.00x |
+| revert | 1.21x | 1.20x | 0.99x | 0.99x |
+
+At the body edit, `props-sym` writes a 642.0 MB graph and a 115.7 MB query cache on grok, 43% of the 1774.6 MB of object files. On rustc it writes 404.0 MB and 86.6 MB, 102% of the 481.4 MB of object files. Without `-Zincremental-extern-items` the graph is 62 MB larger on grok and 54 MB larger on rustc. The flag stays.
+
+On rustc `props-sym` is within 10% of unpatched at every step. On grok the comment and body edits are too, and the new-item, signature and revert steps are not. Every body the codegen decoder rejected was missing from the `.rmeta`: 1186 on the grok comment edit. The metadata stores MIR only for generic and inlinable functions. Such a body rebuilds its typeck, borrowck and MIR when its codegen unit is red. The later edits make more units red.
+
+The next run caches `optimized_mir` for the bodies the metadata does not hold.
+
+The breakdown that each crate prints matches run 52 on rustc. The extra 12.4 MB of query cache thus sits in compiles that print no breakdown. The next run lists the largest query caches by crate to name them.
+
 Both configs are within 10% of unpatched on every rustc step, and so is every round of `props-ctfe`. The rounds agree to within 5% of each other, against up to 12% between the per-config legs of run 49. `props-ctfe` meets the size bound on both workloads, with graph plus cache at 39% of the object files on grok and 94% on rustc. It meets the time bound on rustc, and not on the grok comment edit. The per-config legs of run 50 rank the two configs the other way on the grok body edit: 0.31x for `props-ctfe`, 0.26x for `props`.
 
 A ratio across runners does not hold that much precision.
