@@ -30,6 +30,7 @@ use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_middle::middle::codegen_fn_attrs::{CodegenFnAttrFlags, CodegenFnAttrs};
 use rustc_middle::middle::privacy::{self, Level};
+use rustc_middle::middle::reachable::ReachableBodyRef;
 use rustc_middle::mir::interpret::{ConstAllocation, ErrorHandled, GlobalAlloc};
 use rustc_middle::query::Providers;
 use rustc_middle::ty::{self, ExistentialTraitRef, TyCtxt};
@@ -50,7 +51,6 @@ fn recursively_reachable(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
 struct ReachableContext<'tcx> {
     // The type context.
     tcx: TyCtxt<'tcx>,
-    maybe_typeck_results: Option<&'tcx ty::TypeckResults<'tcx>>,
     // The set of items which must be exported in the linkage sense.
     reachable_symbols: LocalDefIdSet,
     // A worklist of item IDs. Each item ID in this worklist will be inlined
@@ -62,6 +62,37 @@ struct ReachableContext<'tcx> {
 }
 
 impl<'tcx> Visitor<'tcx> for ReachableContext<'tcx> {
+    fn visit_nested_body(&mut self, body: hir::BodyId) {
+        let owner = self.tcx.hir_body_owner_def_id(body);
+        for &body_ref in self.tcx.reachable_body_refs(owner) {
+            match body_ref {
+                ReachableBodyRef::Item(kind, def_id) => {
+                    self.propagate_item(Res::Def(kind, def_id.to_def_id()))
+                }
+                ReachableBodyRef::Symbol(def_id) => {
+                    self.reachable_symbols.insert(def_id);
+                }
+            }
+        }
+    }
+}
+
+/// Collects the `ReachableBodyRef`s of one body, with that body's typeck results.
+struct BodyRefCollector<'tcx> {
+    tcx: TyCtxt<'tcx>,
+    maybe_typeck_results: Option<&'tcx ty::TypeckResults<'tcx>>,
+    refs: Vec<ReachableBodyRef>,
+}
+
+impl<'tcx> BodyRefCollector<'tcx> {
+    #[track_caller]
+    fn typeck_results(&self) -> &'tcx ty::TypeckResults<'tcx> {
+        self.maybe_typeck_results
+            .expect("`BodyRefCollector::typeck_results` called outside of body")
+    }
+}
+
+impl<'tcx> Visitor<'tcx> for BodyRefCollector<'tcx> {
     fn visit_nested_body(&mut self, body: hir::BodyId) {
         let old_maybe_typeck_results =
             self.maybe_typeck_results.replace(self.tcx.typeck_body(body));
@@ -88,14 +119,16 @@ impl<'tcx> Visitor<'tcx> for ReachableContext<'tcx> {
                     .map(|(kind, def_id)| Res::Def(kind, def_id))
             }
             hir::ExprKind::Closure(&hir::Closure { def_id, .. }) => {
-                self.reachable_symbols.insert(def_id);
+                self.refs.push(ReachableBodyRef::Symbol(def_id));
                 None
             }
             _ => None,
         };
 
-        if let Some(res) = res {
-            self.propagate_item(res);
+        if let Some(Res::Def(kind, def_id)) = res
+            && let Some(def_id) = def_id.as_local()
+        {
+            self.refs.push(ReachableBodyRef::Item(kind, def_id));
         }
 
         intravisit::walk_expr(self, expr)
@@ -106,23 +139,20 @@ impl<'tcx> Visitor<'tcx> for ReachableContext<'tcx> {
             if let hir::InlineAsmOperand::SymStatic { def_id, .. } = op
                 && let Some(def_id) = def_id.as_local()
             {
-                self.reachable_symbols.insert(def_id);
+                self.refs.push(ReachableBodyRef::Symbol(def_id));
             }
         }
         intravisit::walk_inline_asm(self, asm, id);
     }
 }
 
-impl<'tcx> ReachableContext<'tcx> {
-    /// Gets the type-checking results for the current body.
-    /// As this will ICE if called outside bodies, only call when working with
-    /// `Expr` or `Pat` nodes (they are guaranteed to be found only in bodies).
-    #[track_caller]
-    fn typeck_results(&self) -> &'tcx ty::TypeckResults<'tcx> {
-        self.maybe_typeck_results
-            .expect("`ReachableContext::typeck_results` called outside of body")
-    }
+fn reachable_body_refs(tcx: TyCtxt<'_>, def_id: LocalDefId) -> &[ReachableBodyRef] {
+    let mut collector = BodyRefCollector { tcx, maybe_typeck_results: None, refs: vec![] };
+    collector.visit_nested_body(tcx.hir_body_owned_by(def_id).id());
+    tcx.arena.alloc_from_iter(collector.refs)
+}
 
+impl<'tcx> ReachableContext<'tcx> {
     /// Returns true if the given def ID represents a local item that is recursive for reachability,
     /// i.e. whether everything mentioned in here also needs to be considered reachable.
     ///
@@ -469,7 +499,6 @@ fn reachable_set(tcx: TyCtxt<'_>, (): ()) -> LocalDefIdSet {
     });
     let mut reachable_context = ReachableContext {
         tcx,
-        maybe_typeck_results: None,
         reachable_symbols: Default::default(),
         worklist: Vec::new(),
         any_library,
@@ -526,5 +555,5 @@ fn reachable_set(tcx: TyCtxt<'_>, (): ()) -> LocalDefIdSet {
 }
 
 pub(crate) fn provide(providers: &mut Providers) {
-    *providers = Providers { reachable_set, ..*providers };
+    *providers = Providers { reachable_set, reachable_body_refs, ..*providers };
 }

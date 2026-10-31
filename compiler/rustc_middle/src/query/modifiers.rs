@@ -8,6 +8,11 @@
 
 // tidy-alphabetical-start
 //
+/// # `anon` query modifier
+///
+/// Generate a dep node based not on the query key, but on the query's dependencies.
+pub(crate) struct anon;
+
 /// # `arena_cache` query modifier
 ///
 /// Query return values must impl `Copy` and be small, but some queries must return values that
@@ -60,6 +65,9 @@ pub(crate) struct eval_always;
 ///
 /// Generate a `feed` method to set the query's value from another query.
 pub(crate) struct feedable;
+
+/// # `global_input` query modifier A read of this query records no dep graph edge.
+pub(crate) struct global_input;
 
 /// # `handle_cycle_error` query modifier
 ///

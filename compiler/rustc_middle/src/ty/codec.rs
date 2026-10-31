@@ -37,6 +37,33 @@ pub trait TyEncoder<'tcx>: SpanEncoder {
     fn predicate_shorthands(&mut self) -> &mut FxHashMap<ty::PredicateKind<'tcx>, usize>;
 
     fn encode_alloc_id(&mut self, alloc_id: &AllocId);
+
+    /// Counts a shorthand reference that took `bytes`, for an encoder that reports its sizes.
+    fn note_shorthand_ref(&mut self, _bytes: usize) {}
+
+    /// Whether a shorthand reference is the distance back from the reference to the full
+    /// encoding, rather than the position of the full encoding.
+    fn relative_shorthands(&self) -> bool {
+        false
+    }
+
+    /// Starts the full encoding of a value that has no shorthand yet. An encoder that
+    /// writes full encodings to a separate stream returns true. The value is then
+    /// always referenced by the shorthand that `end_full_encoding` returns.
+    fn begin_full_encoding(&mut self) -> bool {
+        false
+    }
+
+    /// Ends a full encoding that `begin_full_encoding` started, and returns its position.
+    fn end_full_encoding(&mut self) -> usize {
+        unreachable!("`end_full_encoding` without `begin_full_encoding`")
+    }
+
+    /// The position of the full encoding of each instance, for an encoder that writes a
+    /// repeated instance as the distance back to it.
+    fn instance_shorthands(&mut self) -> Option<&mut FxHashMap<ty::Instance<'tcx>, usize>> {
+        None
+    }
 }
 
 pub trait TyDecoder<'tcx>:
@@ -54,6 +81,29 @@ pub trait TyDecoder<'tcx>:
 
     fn positioned_at_shorthand(&self) -> bool {
         (self.peek_byte() & (SHORTHAND_OFFSET as u8)) != 0
+    }
+
+    /// Must agree with `TyEncoder::relative_shorthands` of the encoder that wrote the data.
+    fn relative_shorthands(&self) -> bool {
+        false
+    }
+
+    /// Must agree with `TyEncoder::instance_shorthands` of the encoder that wrote the data.
+    fn instance_shorthands(&self) -> bool {
+        false
+    }
+
+    /// Reads a shorthand reference and returns the position of the full encoding.
+    fn read_shorthand(&mut self) -> usize {
+        let at = self.position();
+        let pos = self.read_usize();
+        assert!(pos >= SHORTHAND_OFFSET);
+        let shorthand = pos - SHORTHAND_OFFSET;
+        if self.relative_shorthands() {
+            at.checked_sub(shorthand).expect("shorthand points before the start of the data")
+        } else {
+            shorthand
+        }
     }
 
     fn decode_alloc_id(&mut self) -> AllocId;
@@ -94,11 +144,27 @@ where
 {
     let existing_shorthand = cache(encoder).get(value).copied();
     if let Some(shorthand) = existing_shorthand {
-        encoder.emit_usize(shorthand);
+        let start = encoder.position();
+        if encoder.relative_shorthands() {
+            // The distance is never more than the position, so it stays shorter than the
+            // full encoding.
+            encoder.emit_usize(start - (shorthand - SHORTHAND_OFFSET) + SHORTHAND_OFFSET);
+        } else {
+            encoder.emit_usize(shorthand);
+        }
+        encoder.note_shorthand_ref(encoder.position() - start);
         return;
     }
 
     let variant = value.variant();
+
+    if encoder.begin_full_encoding() {
+        variant.encode(encoder);
+        let shorthand = encoder.end_full_encoding() + SHORTHAND_OFFSET;
+        cache(encoder).insert(*value, shorthand);
+        encoder.emit_usize(shorthand);
+        return;
+    }
 
     let start = encoder.position();
     variant.encode(encoder);
@@ -189,9 +255,7 @@ impl<'tcx, D: TyDecoder<'tcx>> Decodable<D> for Ty<'tcx> {
     fn decode(decoder: &mut D) -> Ty<'tcx> {
         // Handle shorthands first, if we have a usize > 0x80.
         if decoder.positioned_at_shorthand() {
-            let pos = decoder.read_usize();
-            assert!(pos >= SHORTHAND_OFFSET);
-            let shorthand = pos - SHORTHAND_OFFSET;
+            let shorthand = decoder.read_shorthand();
 
             decoder.cached_ty_for_shorthand(shorthand, |decoder| {
                 decoder.with_position(shorthand, Ty::decode)
@@ -209,9 +273,7 @@ impl<'tcx, D: TyDecoder<'tcx>> Decodable<D> for ty::Predicate<'tcx> {
         // Handle shorthands first, if we have a usize > 0x80.
         let predicate_kind = ty::Binder::bind_with_vars(
             if decoder.positioned_at_shorthand() {
-                let pos = decoder.read_usize();
-                assert!(pos >= SHORTHAND_OFFSET);
-                let shorthand = pos - SHORTHAND_OFFSET;
+                let shorthand = decoder.read_shorthand();
 
                 decoder.with_position(shorthand, <ty::PredicateKind<'tcx> as Decodable<D>>::decode)
             } else {

@@ -729,6 +729,10 @@ fn test_unstable_options_tracking_hash() {
     untracked!(future_incompat_test, true);
     untracked!(identify_regions, true);
     untracked!(incremental_info, true);
+    untracked!(incremental_inplace_cache, true);
+    untracked!(incremental_keep_configs, Some(1));
+    untracked!(incremental_size_cap, Some(1));
+    untracked!(incremental_uncache, Some(vec![String::from("optimized_mir")]));
     untracked!(incremental_verify_ich, true);
     untracked!(input_stats, true);
     untracked!(link_native_libraries, false);

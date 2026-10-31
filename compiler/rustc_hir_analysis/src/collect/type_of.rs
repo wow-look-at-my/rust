@@ -22,6 +22,10 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::EarlyBinder<'_
     use rustc_hir::*;
     use rustc_middle::ty::Ty;
 
+    if let Some(ty) = tcx.prev_metadata_type_of(def_id) {
+        return ty;
+    }
+
     // If we are computing `type_of` the synthesized associated type for an RPITIT in the impl
     // side, use `collect_return_position_impl_trait_in_trait_tys` to infer the value of the
     // associated type in the impl.

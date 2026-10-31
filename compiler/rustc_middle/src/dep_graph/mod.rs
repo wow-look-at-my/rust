@@ -10,7 +10,7 @@ pub use self::graph::{
 };
 use self::graph::{MarkFrame, print_markframe_trace};
 pub use self::retained::RetainedDepGraph;
-pub use self::serialized::{SerializedDepGraph, SerializedDepNodeIndex};
+pub use self::serialized::{SerializedDepGraph, SerializedDepNodeIndex, short_value_fingerprint};
 pub use crate::dep_graph::debug::{DepNodeFilter, EdgeFilter};
 pub use crate::ty::print::with_reduced_queries;
 use crate::ty::{self, TyCtxt};
@@ -53,6 +53,36 @@ impl KeyFingerprintStyle {
             KeyFingerprintStyle::Opaque => false,
         }
     }
+}
+
+/// The lookups of an item of another crate whose metadata entries `extern_item_fingerprint`
+/// covers. The metadata encoder hashes the value of each of them into the item's fingerprint.
+pub fn reads_extern_item_entry(kind: DepKind) -> bool {
+    matches!(
+        kind,
+        DepKind::def_kind
+            | DepKind::def_span
+            | DepKind::def_ident_span
+            | DepKind::type_of
+            | DepKind::generics_of
+            | DepKind::fn_sig
+            | DepKind::explicit_clauses_of
+            | DepKind::inferred_outlives_of
+            | DepKind::impl_trait_header
+            | DepKind::codegen_fn_attrs
+            | DepKind::lookup_stability
+            | DepKind::lookup_deprecation_entry
+            | DepKind::associated_item
+            | DepKind::constness
+            | DepKind::asyncness
+            | DepKind::defaultness
+            | DepKind::intrinsic_raw
+            | DepKind::variances_of
+            | DepKind::trait_def
+            | DepKind::cross_crate_inlinable
+            | DepKind::is_mir_available
+            | DepKind::is_doc_hidden
+    )
 }
 
 /// Execute the operation with provided dependencies.

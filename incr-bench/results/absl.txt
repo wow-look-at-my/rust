@@ -1,0 +1,12 @@
+abseil-cpp with tests, CMake + ninja, -j2, nice 19
+cold build: 1037.1s
+total output:      3.228 GB
+objs + archives:   1.155 GB
+executables:       2.069 GB
+build-system meta: ~4.2 MB (0.13% of total)
+  build.ninja              2.27 MB
+  .ninja_deps              0.78 MB
+  CMakeFiles/rules.ninja   0.24 MB
+  *.cmake (65 files)       0.47 MB
+  .ninja_log               0.09 MB
+edit steps: not measured, the disk filled before the first edit.

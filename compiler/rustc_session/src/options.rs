@@ -2580,11 +2580,40 @@ options! {
         "do not display the source code block in diagnostics for files in the directory"),
     implicit_sysroot_deps: bool = (true, parse_bool, [TRACKED],
         "allows rust to search sysroot for a crate's dependencies (default: yes)"),
+    incremental_explain_red: Option<Vec<String>> = (None, parse_opt_comma_list, [UNTRACKED],
+        "comma-separated dep kinds: for each node of these kinds that cannot be marked green, \
+        print the chain of red dependencies down to the input that changed (default: none)"),
+    incremental_extern_items: bool = (false, parse_bool, [TRACKED],
+        "write a fingerprint of each item into the crate metadata, and give each item of another \
+        crate one dep node that its metadata lookups read (default: no)"),
     incremental_ignore_spans: bool = (false, parse_bool, [TRACKED],
         "ignore spans during ICH computation -- used for testing (default: no)"),
     incremental_info: bool = (false, parse_bool, [UNTRACKED],
         "print high-level information about incremental reuse (or the lack thereof) \
         (default: no)"),
+    incremental_inplace_cache: bool = (false, parse_bool, [UNTRACKED],
+        "keep query values in an append-only file beside the session directories, so a session \
+        writes only the values it recomputed (default: no)"),
+    incremental_keep_configs: Option<usize> = (None, parse_opt_number, [UNTRACKED],
+        "number of build configurations of a crate to keep in the incremental directory, \
+        most recently used first (default: keep all)"),
+    incremental_rmeta_reuse: bool = (false, parse_bool, [UNTRACKED],
+        "decode the MIR of unchanged items from the previous session's crate metadata \
+        instead of recomputing it (default: no)"),
+    incremental_size_cap: Option<u64> = (None, parse_opt_number, [UNTRACKED],
+        "evict the least recently used crate directories once the incremental directory \
+        exceeds this many bytes; falls back to the `RUSTC_INCREMENTAL_SIZE_CAP` environment \
+        variable (default: no cap)"),
+    incremental_stable_cgu_merge: bool = (false, parse_bool, [TRACKED],
+        "when a crate has more codegen units than the limit, merge each into a bucket picked \
+        by a hash of its name instead of by size, so a size change renames no other unit \
+        (default: no)"),
+    incremental_transparent: Option<Vec<String>> = (None, parse_opt_comma_list, [TRACKED],
+        "comma-separated dep kinds that get no dep node of their own: each task of such a kind \
+        hands its reads to the task that reads it (default: none)"),
+    incremental_uncache: Option<Vec<String>> = (None, parse_opt_comma_list, [UNTRACKED],
+        "comma-separated query names to treat as not cache_on_disk: the query cache does not \
+        write or load their values, so they recompute when needed (default: none)"),
     incremental_verify_ich: bool = (false, parse_bool, [UNTRACKED],
         "verify extended properties for incr. comp. (default: no):
         - hashes of green query instances

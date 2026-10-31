@@ -1,0 +1,570 @@
+
+=== collapse xai_grok_shell-1yymvei0n623d/dep-graph.bin  678820342 bytes, 10606036 nodes, 92301047 edges, names mapped, 4 workers
+key crate half: 5517664 distinct values; top value 819ee25cdd7f6719 has 3445304 nodes; 83 other values have >= 1000 nodes
+  local (top value)        3445304 nodes  32.5% |   231014742 B  34.0% of node bytes | top kinds: [def_kind 4% def_span 4% def_ident_span 4% lower_to_hir 4% hir_owner 4%]
+  upstream (83 values)      494533 nodes   4.7% |    21765781 B   3.2% of node bytes | top kinds: [type_of 9% def_kind 8% generics_of 7% def_span 5% associated_item 4%]
+  tail (rare values)       6666199 nodes  62.9% |   426039131 B  62.8% of node bytes | top kinds: [layout_of 21% fn_abi_of_instance_no_deduced_attrs 7% resolve_instance_raw 7% symbol_name 7% implementations_of_trait 6%]
+  most common upstream values: 49b6f044c3c5f9d3=58578 43a9e3d9207f4d4f=46115 878850e2ad76ffc2=26713 1b63011abee2bcbc=23495 6714b69d9b717b79=19905 2d3f89b1c0192954=19607 39ba53cfc80f8fec=19032 6ee2287fca6b1018=18460
+P1 dropped nodes, top 25 kinds by count (of 185 dropped kinds):
+  layout_of                                      1009243 dropped   9.5% of all nodes |    2.6 edges/node before
+  fn_abi_of_instance_no_deduced_attrs             497085 dropped   4.7% of all nodes |   10.3 edges/node before
+  resolve_instance_raw                            483064 dropped   4.6% of all nodes |    6.9 edges/node before
+  symbol_name                                     477043 dropped   4.5% of all nodes |   23.7 edges/node before
+  implementations_of_trait                        412876 dropped   3.9% of all nodes |    1.0 edges/node before
+  check_mono_item                                 332149 dropped   3.1% of all nodes |   10.2 edges/node before
+  evaluate_root_goal_for_proof_tree_raw           229287 dropped   2.2% of all nodes |    9.0 edges/node before
+  type_op_prove_predicate                         221121 dropped   2.1% of all nodes |    3.8 edges/node before
+  try_normalize_generic_arg_after_erasing_regions    211702 dropped   2.0% of all nodes |    2.7 edges/node before
+  def_kind                                        183665 dropped   1.7% of all nodes |    1.1 edges/node before
+  needs_drop_raw                                  180629 dropped   1.7% of all nodes |    4.7 edges/node before
+  is_copy_raw                                     178805 dropped   1.7% of all nodes |    5.0 edges/node before
+  hir_owner                                       138875 dropped   1.3% of all nodes |    1.0 edges/node before
+  erase_and_anonymize_regions_ty                  126139 dropped   1.2% of all nodes |    1.1 edges/node before
+  visibility                                      112153 dropped   1.1% of all nodes |    1.0 edges/node before
+  clauses_of                                      109513 dropped   1.0% of all nodes |    3.0 edges/node before
+  param_env                                        85471 dropped   0.8% of all nodes |    4.5 edges/node before
+  check_well_formed                                68143 dropped   0.6% of all nodes |   17.9 edges/node before
+  shallow_lint_levels_on                           56436 dropped   0.5% of all nodes |    5.0 edges/node before
+  hir_attr_map                                     56436 dropped   0.5% of all nodes |    1.0 edges/node before
+  hir_owner_parent_q                               56435 dropped   0.5% of all nodes |    1.2 edges/node before
+  param_env_normalized_for_post_analysis           55025 dropped   0.5% of all nodes |    2.0 edges/node before
+  dropck_outlives                                  53143 dropped   0.5% of all nodes |   17.0 edges/node before
+  sanitizer_settings_for                           50971 dropped   0.5% of all nodes |    3.0 edges/node before
+  cross_crate_inlinable                            44977 dropped   0.4% of all nodes |    2.7 edges/node before
+P1 kept nodes per kind (102 kinds):
+  layout_of                                       395386 kept
+  items_of_instance                               334016 kept
+  size_estimate                                   330619 kept
+  TraitSelect                                     238513 kept
+  erase_and_anonymize_regions_ty                  216666 kept
+  def_span                                        167701 kept
+  def_ident_span                                  148701 kept
+  lower_to_hir                                    138875 kept
+  generics_of                                     131852 kept
+  type_of                                         124809 kept
+  eval_to_const_value_raw                         122706 kept
+  explicit_clauses_of                             119520 kept
+  inferred_outlives_of                            119520 kept
+  codegen_select_candidate                        114429 kept
+  eval_to_allocation_raw                           79946 kept
+  lookup_deprecation_entry                         78268 kept
+  lookup_stability                                 69439 kept
+  source_span                                      63754 kept
+  codegen_fn_attrs                                 53354 kept
+  is_reachable_non_generic                         45496 kept
+  trivial_const                                    43471 kept
+  used_trait_imports                               40894 kept
+  has_ffi_unwind_calls                             40894 kept
+  associated_item                                  36164 kept
+  optimized_mir                                    35821 kept
+  fn_sig                                           31612 kept
+  typeck_root                                      30566 kept
+  variances_of                                     28072 kept
+  promoted_mir                                     27048 kept
+  ty_span                                          20332 kept
+  impl_trait_header                                20003 kept
+  mir_const_qualif                                 15275 kept
+  mir_for_ctfe                                     14873 kept
+  associated_item_def_ids                          14680 kept
+  is_mir_available                                  9838 kept
+  adt_def                                           9054 kept
+  adt_destructor                                    8891 kept
+  impl_is_fully_generic_for_reflection              7410 kept
+  const_of_item                                     6309 kept
+  eval_static_initializer                           5373 kept
+  inherent_impls                                    4503 kept
+  adt_async_destructor                              4459 kept
+  adt_drop_tys                                      3833 kept
+  lit_to_const                                      3440 kept
+  mir_coroutine_witnesses                           2360 kept
+  explicit_item_self_bounds                         2071 kept
+  explicit_item_bounds                              1749 kept
+  crate_hash                                         887 kept
+  is_private_dep                                     887 kept
+  externally_implementable_items                     887 kept
+  crate_host_hash                                    886 kept
+  extra_filename                                     886 kept
+  crate_dep_kind                                     886 kept
+  used_crate_source                                  886 kept
+  exported_generic_symbols                           886 kept
+  inhabited_predicate_type                           646 kept
+  trait_def                                          588 kept
+  explicit_implied_clauses_of                        585 kept
+  hir_module_items                                   520 kept
+  is_opsem_inhabited_adt_cached                      358 kept
+  specialization_graph_of                            332 kept
+  explicit_super_clauses_of                          228 kept
+  exported_non_generic_symbols                       182 kept
+  CompileCodegenUnit                                 128 kept
+  valtree_to_const_val                                97 kept
+  lookup_const_stability                              56 kept
+  SideEffect                                          23 kept
+  coerce_unsized_info                                  6 kept
+  extern_crate                                         3 kept
+  Red                                                  1 kept
+  AnonZeroDeps                                         1 kept
+  Metadata                                             1 kept
+  resolver_for_lowering_raw                            1 kept
+  index_ast                                            1 kept
+  hir_crate_items                                      1 kept
+  analysis                                             1 kept
+  check_expectations                                   1 kept
+  skippable_lints                                      1 kept
+  effective_visibilities                               1 kept
+  reachable_set                                        1 kept
+  dependency_formats                                   1 kept
+  has_global_allocator                                 1 kept
+  has_alloc_error_handler                              1 kept
+  entry_fn                                             1 kept
+  crate_name                                           1 kept
+  get_lang_items                                       1 kept
+  all_diagnostic_items                                 1 kept
+  all_canonical_symbols                                1 kept
+  debugger_visualizers                                 1 kept
+  postorder_cnums                                      1 kept
+  allocator_kind                                       1 kept
+  crates                                               1 kept
+  used_crates                                          1 kept
+  stable_order_of_exportable_impls                     1 kept
+  exportable_items                                     1 kept
+  collect_and_partition_mono_items                     1 kept
+  backend_optimization_level                           1 kept
+  output_filenames                                     1 kept
+  all_rust_target_features                             1 kept
+  features_query                                       1 kept
+  crate_for_resolver                                   1 kept
+  limits                                               1 kept
+P2 dropped nodes, top 25 kinds by count (of 144 dropped kinds):
+  layout_of                                      1009243 dropped   9.5% of all nodes |    2.6 edges/node before
+  fn_abi_of_instance_no_deduced_attrs             497085 dropped   4.7% of all nodes |   10.3 edges/node before
+  resolve_instance_raw                            483064 dropped   4.6% of all nodes |    6.9 edges/node before
+  implementations_of_trait                        412876 dropped   3.9% of all nodes |    1.0 edges/node before
+  check_mono_item                                 332149 dropped   3.1% of all nodes |   10.2 edges/node before
+  evaluate_root_goal_for_proof_tree_raw           229287 dropped   2.2% of all nodes |    9.0 edges/node before
+  type_op_prove_predicate                         221121 dropped   2.1% of all nodes |    3.8 edges/node before
+  try_normalize_generic_arg_after_erasing_regions    211702 dropped   2.0% of all nodes |    2.7 edges/node before
+  def_kind                                        183665 dropped   1.7% of all nodes |    1.1 edges/node before
+  needs_drop_raw                                  180629 dropped   1.7% of all nodes |    4.7 edges/node before
+  is_copy_raw                                     178805 dropped   1.7% of all nodes |    5.0 edges/node before
+  hir_owner                                       138875 dropped   1.3% of all nodes |    1.0 edges/node before
+  erase_and_anonymize_regions_ty                  126139 dropped   1.2% of all nodes |    1.1 edges/node before
+  visibility                                      112153 dropped   1.1% of all nodes |    1.0 edges/node before
+  clauses_of                                      109513 dropped   1.0% of all nodes |    3.0 edges/node before
+  param_env                                        85471 dropped   0.8% of all nodes |    4.5 edges/node before
+  shallow_lint_levels_on                           56436 dropped   0.5% of all nodes |    5.0 edges/node before
+  hir_attr_map                                     56436 dropped   0.5% of all nodes |    1.0 edges/node before
+  hir_owner_parent_q                               56435 dropped   0.5% of all nodes |    1.2 edges/node before
+  param_env_normalized_for_post_analysis           55025 dropped   0.5% of all nodes |    2.0 edges/node before
+  sanitizer_settings_for                           50971 dropped   0.5% of all nodes |    3.0 edges/node before
+  cross_crate_inlinable                            44977 dropped   0.4% of all nodes |    2.7 edges/node before
+  coroutine_kind                                   44780 dropped   0.4% of all nodes |    1.4 edges/node before
+  thir_abstract_const                              41445 dropped   0.4% of all nodes |    1.0 edges/node before
+  opaque_types_defined_by                          40896 dropped   0.4% of all nodes |    6.1 edges/node before
+P2 kept nodes per kind (143 kinds):
+  symbol_name                                     477043 kept
+  layout_of                                       395386 kept
+  items_of_instance                               334016 kept
+  size_estimate                                   330619 kept
+  TraitSelect                                     238513 kept
+  erase_and_anonymize_regions_ty                  216666 kept
+  def_span                                        167701 kept
+  def_ident_span                                  148701 kept
+  lower_to_hir                                    138875 kept
+  generics_of                                     131852 kept
+  type_of                                         124809 kept
+  eval_to_const_value_raw                         122706 kept
+  explicit_clauses_of                             119520 kept
+  inferred_outlives_of                            119520 kept
+  codegen_select_candidate                        114429 kept
+  eval_to_allocation_raw                           79946 kept
+  lookup_deprecation_entry                         78268 kept
+  lookup_stability                                 69439 kept
+  check_well_formed                                68143 kept
+  source_span                                      63754 kept
+  codegen_fn_attrs                                 53354 kept
+  dropck_outlives                                  53143 kept
+  is_reachable_non_generic                         45496 kept
+  trivial_const                                    43471 kept
+  thir_body                                        40894 kept
+  mir_built                                        40894 kept
+  used_trait_imports                               40894 kept
+  check_match                                      40894 kept
+  has_ffi_unwind_calls                             40894 kept
+  mir_drops_elaborated_and_const_checked           39102 kept
+  check_liveness                                   39102 kept
+  associated_item                                  36164 kept
+  optimized_mir                                    35821 kept
+  fn_sig                                           31612 kept
+  check_unsafety                                   30566 kept
+  typeck_root                                      30566 kept
+  mir_borrowck                                     28774 kept
+  variances_of                                     28072 kept
+  promoted_mir                                     27048 kept
+  ty_span                                          20332 kept
+  impl_trait_header                                20003 kept
+  mir_const_qualif                                 15275 kept
+  mir_for_ctfe                                     14873 kept
+  associated_item_def_ids                          14680 kept
+  compare_impl_item                                10121 kept
+  is_mir_available                                  9838 kept
+  adt_def                                           9054 kept
+  adt_destructor                                    8891 kept
+  impl_is_fully_generic_for_reflection              7410 kept
+  const_of_item                                     6309 kept
+  eval_static_initializer                           5373 kept
+  inherent_impls                                    4503 kept
+  adt_async_destructor                              4459 kept
+  adt_drop_tys                                      3833 kept
+  lit_to_const                                      3440 kept
+  type_param_clauses                                2915 kept
+  vtable_entries                                    2627 kept
+  mir_coroutine_witnesses                           2360 kept
+  explicit_item_self_bounds                         2071 kept
+  explicit_item_bounds                              1749 kept
+  crate_hash                                         887 kept
+  is_private_dep                                     887 kept
+  externally_implementable_items                     887 kept
+  crate_host_hash                                    886 kept
+  extra_filename                                     886 kept
+  crate_dep_kind                                     886 kept
+  used_crate_source                                  886 kept
+  exported_generic_symbols                           886 kept
+  coherent_trait                                     791 kept
+  inhabited_predicate_type                           646 kept
+  trait_def                                          588 kept
+  explicit_implied_clauses_of                        585 kept
+  hir_module_items                                   520 kept
+  lint_mod                                           520 kept
+  check_mod_attrs                                    520 kept
+  check_mod_unstable_api_usage                       520 kept
+  check_mod_privacy                                  520 kept
+  check_mod_deathness                                520 kept
+  check_private_in_public                            520 kept
+  trait_impls_of                                     480 kept
+  is_opsem_inhabited_adt_cached                      358 kept
+  specialization_graph_of                            332 kept
+  has_significant_drop_raw                           255 kept
+  explicit_super_clauses_of                          228 kept
+  reachable_non_generics                             182 kept
+  exported_non_generic_symbols                       182 kept
+  dyn_compatibility_violations                       177 kept
+  CompileCodegenUnit                                 128 kept
+  first_method_vtable_slot                           114 kept
+  valtree_to_const_val                                97 kept
+  own_existential_vtable_entries                      92 kept
+  lookup_const_stability                              56 kept
+  SideEffect                                          23 kept
+  coerce_unsized_info                                  6 kept
+  extern_crate                                         3 kept
+  Red                                                  1 kept
+  AnonZeroDeps                                         1 kept
+  Metadata                                             1 kept
+  early_lint_checks                                    1 kept
+  resolver_for_lowering_raw                            1 kept
+  index_ast                                            1 kept
+  hir_crate_items                                      1 kept
+  analysis                                             1 kept
+  check_expectations                                   1 kept
+  lint_expectations                                    1 kept
+  skippable_lints                                      1 kept
+  mir_keys                                             1 kept
+  crate_variances                                      1 kept
+  inferred_outlives_crate                              1 kept
+  check_unused_traits                                  1 kept
+  live_symbols_and_ignored_derived_traits              1 kept
+  check_type_wf                                        1 kept
+  crate_inherent_impls                                 1 kept
+  crate_inherent_impls_overlap_check                   1 kept
+  effective_visibilities                               1 kept
+  reachable_set                                        1 kept
+  dependency_formats                                   1 kept
+  has_global_allocator                                 1 kept
+  has_alloc_error_handler                              1 kept
+  required_panic_strategy                              1 kept
+  upstream_monomorphizations                           1 kept
+  foreign_modules                                      1 kept
+  entry_fn                                             1 kept
+  crate_name                                           1 kept
+  get_lang_items                                       1 kept
+  all_diagnostic_items                                 1 kept
+  all_canonical_symbols                                1 kept
+  debugger_visualizers                                 1 kept
+  postorder_cnums                                      1 kept
+  allocator_kind                                       1 kept
+  crates                                               1 kept
+  used_crates                                          1 kept
+  traits                                               1 kept
+  stable_order_of_exportable_impls                     1 kept
+  exportable_items                                     1 kept
+  collect_and_partition_mono_items                     1 kept
+  backend_optimization_level                           1 kept
+  output_filenames                                     1 kept
+  all_rust_target_features                             1 kept
+  features_query                                       1 kept
+  crate_for_resolver                                   1 kept
+  limits                                               1 kept
+  check_externally_implementable_items                 1 kept
+P3 dropped nodes, top 25 kinds by count (of 186 dropped kinds):
+  layout_of                                      1009243 dropped   9.5% of all nodes |    2.6 edges/node before
+  fn_abi_of_instance_no_deduced_attrs             497085 dropped   4.7% of all nodes |   10.3 edges/node before
+  resolve_instance_raw                            483064 dropped   4.6% of all nodes |    6.9 edges/node before
+  symbol_name                                     477043 dropped   4.5% of all nodes |   23.7 edges/node before
+  implementations_of_trait                        412876 dropped   3.9% of all nodes |    1.0 edges/node before
+  check_mono_item                                 332149 dropped   3.1% of all nodes |   10.2 edges/node before
+  TraitSelect                                     238513 dropped   2.2% of all nodes |   10.8 edges/node before
+  evaluate_root_goal_for_proof_tree_raw           229287 dropped   2.2% of all nodes |    9.0 edges/node before
+  type_op_prove_predicate                         221121 dropped   2.1% of all nodes |    3.8 edges/node before
+  try_normalize_generic_arg_after_erasing_regions    211702 dropped   2.0% of all nodes |    2.7 edges/node before
+  def_kind                                        183665 dropped   1.7% of all nodes |    1.1 edges/node before
+  needs_drop_raw                                  180629 dropped   1.7% of all nodes |    4.7 edges/node before
+  is_copy_raw                                     178805 dropped   1.7% of all nodes |    5.0 edges/node before
+  hir_owner                                       138875 dropped   1.3% of all nodes |    1.0 edges/node before
+  erase_and_anonymize_regions_ty                  126139 dropped   1.2% of all nodes |    1.1 edges/node before
+  visibility                                      112153 dropped   1.1% of all nodes |    1.0 edges/node before
+  clauses_of                                      109513 dropped   1.0% of all nodes |    3.0 edges/node before
+  param_env                                        85471 dropped   0.8% of all nodes |    4.5 edges/node before
+  check_well_formed                                68143 dropped   0.6% of all nodes |   17.9 edges/node before
+  shallow_lint_levels_on                           56436 dropped   0.5% of all nodes |    5.0 edges/node before
+  hir_attr_map                                     56436 dropped   0.5% of all nodes |    1.0 edges/node before
+  hir_owner_parent_q                               56435 dropped   0.5% of all nodes |    1.2 edges/node before
+  param_env_normalized_for_post_analysis           55025 dropped   0.5% of all nodes |    2.0 edges/node before
+  dropck_outlives                                  53143 dropped   0.5% of all nodes |   17.0 edges/node before
+  sanitizer_settings_for                           50971 dropped   0.5% of all nodes |    3.0 edges/node before
+P3 kept nodes per kind (101 kinds):
+  layout_of                                       395386 kept
+  items_of_instance                               334016 kept
+  size_estimate                                   330619 kept
+  erase_and_anonymize_regions_ty                  216666 kept
+  def_span                                        167701 kept
+  def_ident_span                                  148701 kept
+  lower_to_hir                                    138875 kept
+  generics_of                                     131852 kept
+  type_of                                         124809 kept
+  eval_to_const_value_raw                         122706 kept
+  explicit_clauses_of                             119520 kept
+  inferred_outlives_of                            119520 kept
+  codegen_select_candidate                        114429 kept
+  eval_to_allocation_raw                           79946 kept
+  lookup_deprecation_entry                         78268 kept
+  lookup_stability                                 69439 kept
+  source_span                                      63754 kept
+  codegen_fn_attrs                                 53354 kept
+  is_reachable_non_generic                         45496 kept
+  trivial_const                                    43471 kept
+  used_trait_imports                               40894 kept
+  has_ffi_unwind_calls                             40894 kept
+  associated_item                                  36164 kept
+  optimized_mir                                    35821 kept
+  fn_sig                                           31612 kept
+  typeck_root                                      30566 kept
+  variances_of                                     28072 kept
+  promoted_mir                                     27048 kept
+  ty_span                                          20332 kept
+  impl_trait_header                                20003 kept
+  mir_const_qualif                                 15275 kept
+  mir_for_ctfe                                     14873 kept
+  associated_item_def_ids                          14680 kept
+  is_mir_available                                  9838 kept
+  adt_def                                           9054 kept
+  adt_destructor                                    8891 kept
+  impl_is_fully_generic_for_reflection              7410 kept
+  const_of_item                                     6309 kept
+  eval_static_initializer                           5373 kept
+  inherent_impls                                    4503 kept
+  adt_async_destructor                              4459 kept
+  adt_drop_tys                                      3833 kept
+  lit_to_const                                      3440 kept
+  mir_coroutine_witnesses                           2360 kept
+  explicit_item_self_bounds                         2071 kept
+  explicit_item_bounds                              1749 kept
+  crate_hash                                         887 kept
+  is_private_dep                                     887 kept
+  externally_implementable_items                     887 kept
+  crate_host_hash                                    886 kept
+  extra_filename                                     886 kept
+  crate_dep_kind                                     886 kept
+  used_crate_source                                  886 kept
+  exported_generic_symbols                           886 kept
+  inhabited_predicate_type                           646 kept
+  trait_def                                          588 kept
+  explicit_implied_clauses_of                        585 kept
+  hir_module_items                                   520 kept
+  is_opsem_inhabited_adt_cached                      358 kept
+  specialization_graph_of                            332 kept
+  explicit_super_clauses_of                          228 kept
+  exported_non_generic_symbols                       182 kept
+  CompileCodegenUnit                                 128 kept
+  valtree_to_const_val                                97 kept
+  lookup_const_stability                              56 kept
+  SideEffect                                          23 kept
+  coerce_unsized_info                                  6 kept
+  extern_crate                                         3 kept
+  Red                                                  1 kept
+  AnonZeroDeps                                         1 kept
+  Metadata                                             1 kept
+  resolver_for_lowering_raw                            1 kept
+  index_ast                                            1 kept
+  hir_crate_items                                      1 kept
+  analysis                                             1 kept
+  check_expectations                                   1 kept
+  skippable_lints                                      1 kept
+  effective_visibilities                               1 kept
+  reachable_set                                        1 kept
+  dependency_formats                                   1 kept
+  has_global_allocator                                 1 kept
+  has_alloc_error_handler                              1 kept
+  entry_fn                                             1 kept
+  crate_name                                           1 kept
+  get_lang_items                                       1 kept
+  all_diagnostic_items                                 1 kept
+  all_canonical_symbols                                1 kept
+  debugger_visualizers                                 1 kept
+  postorder_cnums                                      1 kept
+  allocator_kind                                       1 kept
+  crates                                               1 kept
+  used_crates                                          1 kept
+  stable_order_of_exportable_impls                     1 kept
+  exportable_items                                     1 kept
+  collect_and_partition_mono_items                     1 kept
+  backend_optimization_level                           1 kept
+  output_filenames                                     1 kept
+  all_rust_target_features                             1 kept
+  features_query                                       1 kept
+  crate_for_resolver                                   1 kept
+  limits                                               1 kept
+P1u dropped nodes, top 25 kinds by count (of 230 dropped kinds):
+  layout_of                                      1009243 dropped   9.5% of all nodes |    2.6 edges/node before
+  fn_abi_of_instance_no_deduced_attrs             497085 dropped   4.7% of all nodes |   10.3 edges/node before
+  resolve_instance_raw                            483064 dropped   4.6% of all nodes |    6.9 edges/node before
+  symbol_name                                     477043 dropped   4.5% of all nodes |   23.7 edges/node before
+  implementations_of_trait                        412876 dropped   3.9% of all nodes |    1.0 edges/node before
+  check_mono_item                                 332149 dropped   3.1% of all nodes |   10.2 edges/node before
+  evaluate_root_goal_for_proof_tree_raw           229287 dropped   2.2% of all nodes |    9.0 edges/node before
+  type_op_prove_predicate                         221121 dropped   2.1% of all nodes |    3.8 edges/node before
+  try_normalize_generic_arg_after_erasing_regions    211702 dropped   2.0% of all nodes |    2.7 edges/node before
+  def_kind                                        183665 dropped   1.7% of all nodes |    1.1 edges/node before
+  needs_drop_raw                                  180629 dropped   1.7% of all nodes |    4.7 edges/node before
+  is_copy_raw                                     178805 dropped   1.7% of all nodes |    5.0 edges/node before
+  hir_owner                                       138875 dropped   1.3% of all nodes |    1.0 edges/node before
+  erase_and_anonymize_regions_ty                  126139 dropped   1.2% of all nodes |    1.1 edges/node before
+  visibility                                      112153 dropped   1.1% of all nodes |    1.0 edges/node before
+  clauses_of                                      109513 dropped   1.0% of all nodes |    3.0 edges/node before
+  param_env                                        85471 dropped   0.8% of all nodes |    4.5 edges/node before
+  check_well_formed                                68143 dropped   0.6% of all nodes |   17.9 edges/node before
+  shallow_lint_levels_on                           56436 dropped   0.5% of all nodes |    5.0 edges/node before
+  hir_attr_map                                     56436 dropped   0.5% of all nodes |    1.0 edges/node before
+  hir_owner_parent_q                               56435 dropped   0.5% of all nodes |    1.2 edges/node before
+  param_env_normalized_for_post_analysis           55025 dropped   0.5% of all nodes |    2.0 edges/node before
+  dropck_outlives                                  53143 dropped   0.5% of all nodes |   17.0 edges/node before
+  sanitizer_settings_for                           50971 dropped   0.5% of all nodes |    3.0 edges/node before
+  type_of                                          45303 dropped   0.4% of all nodes |    1.0 edges/node before
+P1u kept nodes per kind (101 kinds):
+  layout_of                                       395386 kept
+  items_of_instance                               334016 kept
+  size_estimate                                   330619 kept
+  TraitSelect                                     238513 kept
+  erase_and_anonymize_regions_ty                  216666 kept
+  def_span                                        143161 kept
+  def_ident_span                                  141378 kept
+  lower_to_hir                                    138875 kept
+  eval_to_const_value_raw                         122706 kept
+  codegen_select_candidate                        114429 kept
+  generics_of                                      99525 kept
+  explicit_clauses_of                              99109 kept
+  inferred_outlives_of                             99109 kept
+  eval_to_allocation_raw                           79946 kept
+  type_of                                          79506 kept
+  lookup_deprecation_entry                         67671 kept
+  lookup_stability                                 64275 kept
+  source_span                                      63754 kept
+  trivial_const                                    41621 kept
+  used_trait_imports                               40894 kept
+  has_ffi_unwind_calls                             40894 kept
+  codegen_fn_attrs                                 37572 kept
+  typeck_root                                      30566 kept
+  is_reachable_non_generic                         30300 kept
+  promoted_mir                                     26357 kept
+  optimized_mir                                    26078 kept
+  variances_of                                     25995 kept
+  ty_span                                          20332 kept
+  fn_sig                                           17152 kept
+  associated_item                                  15551 kept
+  mir_const_qualif                                 15201 kept
+  mir_for_ctfe                                     14036 kept
+  impl_trait_header                                 9922 kept
+  associated_item_def_ids                           8576 kept
+  impl_is_fully_generic_for_reflection              7410 kept
+  const_of_item                                     6147 kept
+  eval_static_initializer                           5373 kept
+  adt_def                                           4265 kept
+  adt_destructor                                    4186 kept
+  inherent_impls                                    3674 kept
+  adt_async_destructor                              3615 kept
+  lit_to_const                                      3440 kept
+  adt_drop_tys                                      2059 kept
+  mir_coroutine_witnesses                           1951 kept
+  explicit_item_self_bounds                         1501 kept
+  explicit_item_bounds                              1403 kept
+  crate_hash                                         804 kept
+  is_private_dep                                     804 kept
+  externally_implementable_items                     804 kept
+  crate_host_hash                                    803 kept
+  extra_filename                                     803 kept
+  crate_dep_kind                                     803 kept
+  used_crate_source                                  803 kept
+  exported_generic_symbols                           803 kept
+  inhabited_predicate_type                           646 kept
+  hir_module_items                                   520 kept
+  is_mir_available                                   450 kept
+  is_opsem_inhabited_adt_cached                      358 kept
+  trait_def                                          168 kept
+  explicit_implied_clauses_of                        159 kept
+  CompileCodegenUnit                                 128 kept
+  exported_non_generic_symbols                       105 kept
+  valtree_to_const_val                                97 kept
+  specialization_graph_of                             74 kept
+  explicit_super_clauses_of                           73 kept
+  SideEffect                                          23 kept
+  lookup_const_stability                               7 kept
+  extern_crate                                         3 kept
+  Red                                                  1 kept
+  AnonZeroDeps                                         1 kept
+  Metadata                                             1 kept
+  resolver_for_lowering_raw                            1 kept
+  index_ast                                            1 kept
+  hir_crate_items                                      1 kept
+  analysis                                             1 kept
+  check_expectations                                   1 kept
+  skippable_lints                                      1 kept
+  effective_visibilities                               1 kept
+  reachable_set                                        1 kept
+  dependency_formats                                   1 kept
+  has_global_allocator                                 1 kept
+  has_alloc_error_handler                              1 kept
+  entry_fn                                             1 kept
+  crate_name                                           1 kept
+  get_lang_items                                       1 kept
+  all_diagnostic_items                                 1 kept
+  all_canonical_symbols                                1 kept
+  debugger_visualizers                                 1 kept
+  postorder_cnums                                      1 kept
+  allocator_kind                                       1 kept
+  crates                                               1 kept
+  used_crates                                          1 kept
+  stable_order_of_exportable_impls                     1 kept
+  exportable_items                                     1 kept
+  collect_and_partition_mono_items                     1 kept
+  backend_optimization_level                           1 kept
+  output_filenames                                     1 kept
+  all_rust_target_features                             1 kept
+  features_query                                       1 kept
+  crate_for_resolver                                   1 kept
+  limits                                               1 kept
+| policy | kept nodes | kept edges | max edges | avg edges | 38-byte layout | new layout | new, renumbered | max closure (kind) | closures / entries / peak live / walked again | missing targets | levels (widest) | time |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| P0 keep everything | 10606036 (100.0%) | 92301047 (100.0%) | 1553028 | 8.70 | 678.8 MB | 475.7 MB | 475.7 MB | 0 () | 0 / 0 / 0 / 0 | 0 | 1 (10606036) | 7.7s |
+| P1 non_query but Null + cache_on_disk/eval_always queries + nodes with 0 edges | 3573441 (33.7%) | 3630824443 (3933.7%) | 1091050 | 1016.06 | 11029.0 MB | 8227.8 MB | 7843.6 MB | 669258 (check_type_wf) | 7032595 / 1600129095 / 25772425 / 1361696 | 0 | 168 (3628739) | 132.2s |
+| P2 P1 + kinds with avg edges >= 16 | 4452885 (42.0%) | 172145529 (186.5%) | 1050161 | 38.66 | 685.8 MB | 482.7 MB | 448.2 MB | 12223 (check_mono_item) | 6153151 / 226672520 / 18545039 / 512369 | 0 | 168 (3705477) | 21.3s |
+| P3 P1 without TraitSelect and AnonZeroDeps by kind | 3334928 (31.4%) | 4118378851 (4461.9%) | 1090419 | 1234.92 | 12482.6 MB | 8825.2 MB | 8379.9 MB | 611543 (check_type_wf) | 7271108 / 3715815780 / 19213082 / 2596127 | 0 | 216 (2968766) | 179.5s |
+| P1u P1, but every node with an upstream crate half in its key is dropped | 3283986 (31.0%) | 3640196844 (3943.8%) | 1090864 | 1108.47 | 11046.3 MB | 8024.0 MB | 7653.6 MB | 623353 (check_type_wf) | 7322050 / 1528526129 / 13485123 / 1011419 | 0 | 169 (2814814) | 131.8s |
+resources xai_grok_shell-1yymvei0n623d/dep-graph.bin: wall 476.7s (index scan 0.4s), cpu 1669.3s = 350%, peak RssAnon 940 MB, process VmHWM 1591 MB (includes mapped pages: RssFile 0 MB, RssShmem 650 MB now)

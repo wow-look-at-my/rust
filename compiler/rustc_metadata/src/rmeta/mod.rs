@@ -49,7 +49,9 @@ use rustc_session::config::mitigation_coverage::DeniedPartialMitigation;
 use rustc_session::config::{SymbolManglingVersion, TargetModifier};
 use rustc_span::edition::Edition;
 use rustc_span::hygiene::{DecodedSyntaxContext, ExpnIndex, MacroKind, SyntaxContextKey};
-use rustc_span::{self, ExpnData, ExpnHash, ExpnId, Ident, Span, Symbol};
+use rustc_span::{
+    self, ExpnData, ExpnHash, ExpnId, Ident, SourceFileHash, Span, StableSourceFileId, Symbol,
+};
 use rustc_target::spec::{PanicStrategy, TargetTuple};
 use table::TableBuilder;
 
@@ -70,7 +72,7 @@ pub(crate) fn rustc_version(cfg_version: &'static str) -> String {
 /// Metadata encoding version.
 /// N.B., increment this if you change the format of metadata such that
 /// the rustc version can't be found to compare with `rustc_version()`.
-const METADATA_VERSION: u8 = 11;
+const METADATA_VERSION: u8 = 12;
 
 /// Metadata header which includes `METADATA_VERSION`.
 ///
@@ -321,6 +323,8 @@ pub(crate) struct CrateRoot {
     source_map: LazyTable<u32, u32, Option<LazyValue<rustc_span::SourceFile>>>,
     target_modifiers: LazyArray<TargetModifier>,
     denied_partial_mitigations: LazyArray<DeniedPartialMitigation>,
+    /// Encoded last of the lazy fields: every other part can write a foreign reference.
+    foreign_refs: LazyValue<ForeignRefs>,
 
     compiler_builtins: bool,
     needs_allocator: bool,
@@ -532,6 +536,18 @@ pub(crate) mod remapped_def_id {
     }
 }
 
+/// The stable identity of each foreign definition, expansion and source file
+/// that the metadata names by its position in another crate.
+#[derive(Default, Encodable, Decodable)]
+pub(crate) struct ForeignRefs {
+    /// Crate number, definition index, hash.
+    pub def_ids: Vec<(u32, u32, DefPathHash)>,
+    /// Crate number, expansion index, hash.
+    pub expns: Vec<(u32, u32, ExpnHash)>,
+    /// Crate number, index in that crate's source map, file id, source hash.
+    pub files: Vec<(u32, u32, StableSourceFileId, SourceFileHash)>,
+}
+
 /// A dependency record, as stored in the hashed [`CrateRoot`].
 ///
 /// Note the absence of the dependency's `-C extra-filename`: it lives in
@@ -633,6 +649,8 @@ define_tables! {
     // Note also that this table is fully populated (no gaps) as every DefIndex should have a
     // corresponding DefPathHash.
     def_path_hashes: Table<u64>,
+    // With `-Zincremental-extern-items`, the fingerprint of the entries of each item that `reads_extern_item_entry` names.
+    item_fingerprint: Table<u64>,
     explicit_item_bounds: Table<LazyArray<(ty::Clause<'static>, Span)>>,
     explicit_item_self_bounds: Table<LazyArray<(ty::Clause<'static>, Span)>>,
     inferred_outlives_of: Table<LazyArray<(ty::Clause<'static>, Span)>>,
@@ -678,7 +696,12 @@ define_tables! {
     const_param_default: Table<LazyValue<ty::EarlyBinder<'static, rustc_middle::ty::Const<'static>>>>,
     object_lifetime_default: Table<LazyValue<ObjectLifetimeDefault>>,
     optimized_mir: Table<LazyValue<mir::Body<'static>>>,
+    // The `ItemLocalId` of the lint root of each source scope of `optimized_mir`, in the order of `mir_lint_root_bodies`.
+    optimized_mir_lint_roots: Table<LazyArray<u32>>,
     mir_for_ctfe: Table<LazyValue<mir::Body<'static>>>,
+    // The same as `optimized_mir_lint_roots`, for `mir_for_ctfe` and for all `promoted_mir` bodies.
+    mir_for_ctfe_lint_roots: Table<LazyArray<u32>>,
+    promoted_mir_lint_roots: Table<LazyArray<u32>>,
     trivial_const: Table<LazyValue<(ConstValue, Ty<'static>)>>,
     closure_saved_names_of_captured_variables: Table<LazyValue<IndexVec<FieldIdx, Symbol>>>,
     mir_coroutine_witnesses: Table<LazyValue<mir::CoroutineLayout<'static>>>,

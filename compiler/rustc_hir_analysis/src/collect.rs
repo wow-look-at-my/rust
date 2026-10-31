@@ -1169,6 +1169,10 @@ fn fn_sig(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::EarlyBinder<'_, ty::PolyFn
     use rustc_hir::Node::*;
     use rustc_hir::*;
 
+    if let Some(sig) = tcx.prev_metadata_fn_sig(def_id) {
+        return sig;
+    }
+
     let hir_id = tcx.local_def_id_to_hir_id(def_id);
 
     let icx = ItemCtxt::new(tcx, def_id);

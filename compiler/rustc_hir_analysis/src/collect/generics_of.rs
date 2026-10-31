@@ -28,6 +28,10 @@ pub(super) fn generics_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::Generics {
         }
     }
 
+    if let Some(generics) = tcx.prev_metadata_generics_of(def_id) {
+        return generics;
+    }
+
     // For an RPITIT, synthesize generics which are equal to the opaque's generics
     // and parent fn's generics compressed into one list.
     if let Some(ty::ImplTraitInTraitData::Trait { fn_def_id, opaque_def_id }) =

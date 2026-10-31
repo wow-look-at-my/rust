@@ -1,0 +1,9 @@
+Kind list check: kinds-current.txt (from compiler/rustc_middle/src/queries.rs at the incr-bench tip) against the unpatched stage1 at /home/user/stage1-baseline, which wrote the sample graphs.
+
+Version: the baseline reports rustc 1.101.0-dev, and every sample dep-graph.bin header carries 1.101.0-dev. The samples parse in the 38-byte node layout with multiple kinds, the same count as the list.
+
+Source: from upstream dc44e7f2c43 to the tip, the only queries.rs change removes cache_on_disk from symbol_name. No query is added, removed or moved. The DepKind order is the same.
+
+Binary: the baseline compiled a small crate with -C incremental -Z query-dep-graph -Z dump-dep-graph. `dgstat kindedges kinds-current.txt dep-graph.bin` printed distinct kind-to-kind edges. They equal the lines of the dep_graph.txt that the compiler wrote with its own kind names.
+
+Verdict: the list matches. No per-kind result changes.

@@ -1,0 +1,21 @@
+base       r1 edits      cold                     16.804s  incr=113170195 B  dirs=2  wp=0/240 reused
+base       r1 edits      edit:comment              2.319s  incr=112091796 B  dirs=2  wp=239/240 reused
+base       r1 edits      nochange:comment          0.021s  incr=112091796 B  dirs=2  wp=0/0 reused
+base       r1 edits      revert:comment            2.279s  incr=112094210 B  dirs=2  wp=239/240 reused
+base       r1 edits      edit:body                 2.383s  incr=112173224 B  dirs=2  wp=237/240 reused
+base       r1 edits      nochange:body             0.022s  incr=112173224 B  dirs=2  wp=0/0 reused
+base       r1 edits      revert:body               2.597s  incr=112153543 B  dirs=2  wp=237/240 reused
+base       r1 edits      edit:sig                  2.328s  incr=112094379 B  dirs=2  wp=239/240 reused
+base       r1 edits      nochange:sig              0.024s  incr=112094379 B  dirs=2  wp=0/0 reused
+base       r1 edits      revert:sig                2.561s  incr=112094193 B  dirs=2  wp=239/240 reused
+base       r2 edits      cold                     15.951s  incr=113170206 B  dirs=2  wp=0/240 reused
+base       r2 edits      edit:comment              2.264s  incr=112091791 B  dirs=2  wp=239/240 reused
+base       r2 edits      nochange:comment          0.024s  incr=112091791 B  dirs=2  wp=0/0 reused
+base       r2 edits      revert:comment            2.307s  incr=112094218 B  dirs=2  wp=239/240 reused
+base       r2 edits      edit:body                 2.405s  incr=112173203 B  dirs=2  wp=237/240 reused
+base       r2 edits      nochange:body             0.028s  incr=112173203 B  dirs=2  wp=0/0 reused
+base       r2 edits      revert:body               2.489s  incr=112153545 B  dirs=2  wp=237/240 reused
+base       r2 edits      edit:sig                  2.213s  incr=112094380 B  dirs=2  wp=239/240 reused
+base       r2 edits      nochange:sig              0.023s  incr=112094380 B  dirs=2  wp=0/0 reused
+base       r2 edits      revert:sig                2.260s  incr=112094204 B  dirs=2  wp=239/240 reused
+done: rows appended to /home/user/bench-corpus/results.csv; logs in /home/user/bench-corpus/targets/base/logs

@@ -1,8 +1,7 @@
 //! The data that we will serialize and deserialize.
 //!
 //! Notionally, the dep-graph is a sequence of NodeInfo with the dependencies
-//! specified inline. The total number of nodes and edges are stored as the last
-//! 16 bytes of the file, so we can find them easily at decoding time.
+//! specified inline. After the nodes come the per-kind node counts and the session count as leb128, then the node index bound. The node count and the edge count as fixed 8-byte integers. Nothing is aligned or padded on disk.
 //!
 //! The serialisation is performed on-demand when each node is emitted. Using this
 //! scheme, we do not need to keep the current graph in memory.
@@ -12,28 +11,19 @@
 //! node and edge count are stored at the end of the file, all the arrays can be
 //! pre-allocated with the right length.
 //!
-//! The encoding of the dep-graph is generally designed around the fact that fixed-size
-//! reads of encoded data are generally faster than variable-sized reads. Ergo we adopt
-//! essentially the same varint encoding scheme used in the rmeta format; the edge lists
-//! for each node on the graph store a 2-bit integer which is the number of bytes per edge
-//! index in that node's edge list. We effectively ignore that an edge index of 0 could be
-//! encoded with 0 bytes in order to not require 3 bits to store the byte width of the edges.
-//! The overhead of calculating the correct byte width for each edge is mitigated by
-//! computing the max of the edge list once per node instead of per edge.
+//! Each node record starts with a [`NodeHead`] and a flags byte. The head bit-packs the
+//! [`DepKind`], the byte width of the largest edge index, and the edge count when it fits.
+//! The flags say which of the optional fields follow: the index, unless it is the previous
+//! index plus one. This also covers the 128-bit key fingerprint, or a leb128 distance back to
+//! an earlier node with the same key. This also covers the 64-bit result fingerprint, or a
+//! distance back, or nothing for zero. This also covers the edge count when the head has no
+//! room for it. Each edge is one leb128 code: a zigzag delta from the previous target, or a
+//! distance back into the edges of this block.
 //!
 //! When we decode this data, we do not immediately create [`SerializedDepNodeIndex`] and
-//! instead keep the data in its denser serialized form which lets us turn our on-disk size
-//! efficiency directly into a peak memory reduction. When we convert these encoded-in-memory
-//! values into their fully-deserialized type, we use a fixed-size read of the encoded array
-//! then mask off any errant bytes we read. The array of edge index bytes is padded to permit this.
-//!
-//! We also encode and decode the entire rest of each node using [`SerializedNodeHeader`]
-//! to let this encoding and decoding be done in one fixed-size operation. These headers contain
-//! two [`Fingerprint`]s along with the serialized [`DepKind`], and the number of edge indices
-//! in the node and the number of bytes used to encode the edge indices for this node. The
-//! [`DepKind`], number of edges, and bytes per edge are all bit-packed together, if they fit.
-//! If the number of edges in this node does not fit in the bits available in the header, we
-//! store it directly after the header with leb128.
+//! instead keep the edges at the byte width that the head names. This turns the on-disk
+//! size into a peak memory reduction. A fixed-size read of that array masks off the extra
+//! bytes. The in-memory edge array ends in padding to permit this. The file has none.
 //!
 //! Dep-graph indices are bulk allocated to threads inside `LocalEncoderState`. Having threads
 //! own these indices helps avoid races when they are conditionally used when marking nodes green.
@@ -56,11 +46,15 @@ use rustc_serialize::opaque::mem_encoder::MemEncoder;
 use rustc_serialize::opaque::{FileEncodeResult, FileEncoder, IntEncodedWithFixedSize, MemDecoder};
 use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 use rustc_session::Session;
+use rustc_span::def_id::StableCrateId;
 use tracing::{debug, instrument};
 
 use super::graph::{CurrentDepGraph, DepNodeColorMap, DesiredColor, TrySetColorResult};
 use super::retained::RetainedDepGraph;
 use super::{DepKind, DepNode, DepNodeIndex};
+
+#[cfg(test)]
+mod tests;
 
 // The maximum value of `SerializedDepNodeIndex` leaves the upper two bits
 // unused so that we can store multiple index types in `CompressedHybridIndex`,
@@ -339,7 +333,7 @@ impl SerializedDepGraph {
 
         // This estimation assumes that all of the encoded bytes are for the edge lists or for the
         // fixed-size node headers. But that's not necessarily true; if any edge list has a length
-        // that spills out of the size we can bit-pack into SerializedNodeHeader then some of the
+        // that spills out of the size we can bit-pack into NodeHead then some of the
         // total serialized size is also used by leb128-encoded edge list lengths. Neglecting that
         // contribution to graph_bytes means our estimation of the bytes needed for edge_list_data
         // slightly overshoots. But it cannot overshoot by much; consider that the worse case is
@@ -347,37 +341,34 @@ impl SerializedDepGraph {
         // least (34 byte header + 1 byte len + 64 bytes edge data), which is ~1%. A 2-byte leb128
         // length is about the same fractional overhead and it amortizes for yet greater lengths.
         let mut edge_list_data =
-            Vec::with_capacity(graph_bytes - node_count * size_of::<SerializedNodeHeader>());
+            Vec::with_capacity(graph_bytes.saturating_sub(node_count * NodeRecord::MIN_SIZE));
 
+        let mut prev_index = None;
+        let mut edge_history = Vec::new();
+        let mut kind_flags = KindFlags::new();
         for _ in 0..node_count {
-            // Decode the header for this edge; the header packs together as many of the fixed-size
-            // fields as possible to limit the number of times we update decoder state.
-            let node_header = SerializedNodeHeader { bytes: d.read_array() };
-
-            let index = node_header.index();
+            let record =
+                NodeRecord::decode(d, prev_index, &nodes, &value_fingerprints, &mut kind_flags);
+            let index = record.index;
+            prev_index = Some(index);
 
             let node = &mut nodes[index];
             // Make sure there's no duplicate indices in the dep graph.
-            assert!(node_header.node().kind != DepKind::Null && node.kind == DepKind::Null);
-            *node = node_header.node();
+            assert!(record.node.kind != DepKind::Null && node.kind == DepKind::Null);
+            *node = record.node;
 
-            value_fingerprints[index] = node_header.value_fingerprint();
+            value_fingerprints[index] = record.value_fingerprint;
 
-            // If the length of this node's edge list is small, the length is stored in the header.
-            // If it is not, we fall back to another decoder call.
-            let num_edges = node_header.len().unwrap_or_else(|| d.read_u32());
-
-            // The edges index list uses the same varint strategy as rmeta tables; we select the
-            // number of byte elements per-array not per-element. This lets us read the whole edge
-            // list for a node with one decoder call and also use the on-disk format in memory.
-            let edges_len_bytes = node_header.bytes_per_index() * (num_edges as usize);
+            // In memory, the edges index list uses the same varint strategy as rmeta tables. We
+            // select the number of byte elements per-array not per-element. Consider the
             // The in-memory structure for the edges list stores the byte width of the edges on
             // this node with the offset into the global edge data array.
-            let edges_header = node_header.edges_header(&edge_list_data, num_edges);
-
-            edge_list_data.extend(d.read_raw_bytes(edges_len_bytes));
-
-            edge_list_indices[index] = edges_header;
+            let start = edge_list_data.len();
+            let width = record.decode_edges(d, &mut edge_list_data, &mut edge_history);
+            edge_list_indices[index] = EdgeHeader {
+                repr: (start << DEP_NODE_WIDTH_BITS) | (width - 1),
+                num_edges: record.num_edges,
+            };
         }
 
         // When we access the edge list data, we do a fixed-size read from the edge list data then
@@ -389,12 +380,14 @@ impl SerializedDepGraph {
         // counting sort for `LazyNodeIndex`.
         let mut kinds = Vec::with_capacity(DepKind::NUM_VARIANTS);
         let mut offset = 0u32;
-        for _ in 0..(DepKind::NUM_VARIANTS) {
+        for k in 0..(DepKind::NUM_VARIANTS) {
             let len = d.read_u32();
+            // An anon key is not stored, so an anon kind is never looked up.
+            let len = if DepKind::from_u16(k as u16).is_anon() { 0 } else { len };
             kinds.push(LazyKindIndex { start: offset, len, map: OnceLock::new() });
             offset += len;
         }
-        debug_assert_eq!(offset as usize, node_count);
+        debug_assert!(offset as usize <= node_count);
 
         let session_count = d.read_u64();
 
@@ -402,12 +395,12 @@ impl SerializedDepGraph {
         // points at the next free slot in kind `k`'s range, so a kind's nodes end
         // up contiguous. Slots start as `None` and are each filled exactly once
         // (the counts sum to the number of non-`Null` nodes).
-        let mut nodes_by_kind = vec![None; node_count];
+        let mut nodes_by_kind = vec![None; offset as usize];
         let mut fill: Vec<u32> = kinds.iter().map(|k| k.start).collect();
         for (idx, node) in nodes.iter_enumerated() {
             // Unused indices from batch allocation stay `Null`; they carry no
             // encoded node and are never looked up by fingerprint, so skip them.
-            if node.kind == DepKind::Null {
+            if node.kind == DepKind::Null || node.kind.is_anon() {
                 continue;
             }
             let k = node.kind.as_usize();
@@ -431,142 +424,325 @@ impl SerializedDepGraph {
     }
 }
 
-/// A packed representation of all the fixed-size fields in a `NodeInfo`.
-///
-/// This stores in one byte array:
-/// * The value `Fingerprint` in the `NodeInfo`
-/// * The key `Fingerprint` in `DepNode` that is in this `NodeInfo`
-/// * The `DepKind`'s discriminant (a u16, but not all bits are used...)
-/// * The byte width of the encoded edges for this node
-/// * In whatever bits remain, the length of the edge list for this node, if it fits
-struct SerializedNodeHeader {
-    // 2 bytes for the DepNode
-    // 4 bytes for the index
-    // 16 for Fingerprint in DepNode
-    // 16 for Fingerprint in NodeInfo
-    bytes: [u8; 38],
-}
+/// The first a couple of bytes of a node record.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct NodeHead(u16);
 
-// The fields of a `SerializedNodeHeader`, this struct is an implementation detail and exists only
-// to make the implementation of `SerializedNodeHeader` simpler.
-struct Unpacked {
-    len: Option<u32>,
-    bytes_per_index: usize,
-    kind: DepKind,
-    index: SerializedDepNodeIndex,
-    key_fingerprint: PackedFingerprint,
-    value_fingerprint: Fingerprint,
-}
-
-// Bit fields, where
-// M: bits used to store the length of a node's edge list
-// N: bits used to store the byte width of elements of the edge list
-// are
-// 0..M    length of the edge
-// M..M+N  bytes per index
-// M+N..16 kind
-impl SerializedNodeHeader {
+// Bit fields. The kind, then one bit that says the flags byte is left out. Then the length of
+// the edge list plus one, or zero when the length does not fit.
+impl NodeHead {
     const TOTAL_BITS: usize = size_of::<DepKind>() * 8;
-    const LEN_BITS: usize = Self::TOTAL_BITS - Self::KIND_BITS - Self::WIDTH_BITS;
-    const WIDTH_BITS: usize = DEP_NODE_WIDTH_BITS;
     const KIND_BITS: usize = Self::TOTAL_BITS - DepKind::MAX.leading_zeros() as usize;
-    const MAX_INLINE_LEN: usize = (u16::MAX as usize >> (Self::TOTAL_BITS - Self::LEN_BITS)) - 1;
+    const SAME_FLAGS_BIT: usize = Self::KIND_BITS;
+    const LEN_SHIFT: usize = Self::KIND_BITS + 1;
+    const MAX_INLINE_LEN: usize = (u16::MAX as usize >> Self::LEN_SHIFT) - 1;
 
     #[inline]
-    fn new(
-        node: &DepNode,
-        index: DepNodeIndex,
-        value_fingerprint: Fingerprint,
-        edge_max_index: u32,
-        edge_count: usize,
-    ) -> Self {
-        debug_assert_eq!(Self::TOTAL_BITS, Self::LEN_BITS + Self::WIDTH_BITS + Self::KIND_BITS);
+    fn new(kind: DepKind, edge_count: usize, same_flags: bool) -> Self {
+        const { assert!(NodeHead::LEN_SHIFT + 5 <= NodeHead::TOTAL_BITS) };
 
-        let mut head = node.kind.as_u16();
-
-        let free_bytes = edge_max_index.leading_zeros() as usize / 8;
-        let bytes_per_index = (DEP_NODE_SIZE - free_bytes).saturating_sub(1);
-        head |= (bytes_per_index as u16) << Self::KIND_BITS;
-
-        // Encode number of edges + 1 so that we can reserve 0 to indicate that the len doesn't fit
-        // in this bitfield.
+        let mut head = kind.as_u16();
+        if same_flags {
+            head |= 1 << Self::SAME_FLAGS_BIT;
+        }
         if edge_count <= Self::MAX_INLINE_LEN {
-            head |= (edge_count as u16 + 1) << (Self::KIND_BITS + Self::WIDTH_BITS);
+            head |= (edge_count as u16 + 1) << Self::LEN_SHIFT;
         }
 
-        let hash: Fingerprint = node.key_fingerprint.into();
+        let head = Self(head);
+        debug_assert_eq!(head.kind(), kind);
+        debug_assert!(head.len().is_none_or(|len| len as usize == edge_count));
+        head
+    }
 
-        // Using half-open ranges ensures an unconditional panic if we get the magic numbers wrong.
-        let mut bytes = [0u8; 38];
-        bytes[..2].copy_from_slice(&head.to_le_bytes());
-        bytes[2..6].copy_from_slice(&index.as_u32().to_le_bytes());
-        bytes[6..22].copy_from_slice(&hash.to_le_bytes());
-        bytes[22..].copy_from_slice(&value_fingerprint.to_le_bytes());
+    #[inline]
+    fn kind(self) -> DepKind {
+        DepKind::from_u16(self.0 & mask(Self::KIND_BITS) as u16)
+    }
 
-        #[cfg(debug_assertions)]
-        {
-            let res = Self { bytes };
-            assert_eq!(value_fingerprint, res.value_fingerprint());
-            assert_eq!(*node, res.node());
-            if let Some(len) = res.len() {
-                assert_eq!(edge_count, len as usize);
+    /// The flags are those of the last node of this kind in the block, with the index next.
+    #[inline]
+    fn same_flags(self) -> bool {
+        self.0 & (1 << Self::SAME_FLAGS_BIT) != 0
+    }
+
+    #[inline]
+    fn len(self) -> Option<u32> {
+        ((self.0 as u32) >> Self::LEN_SHIFT).checked_sub(1)
+    }
+}
+
+/// The flags that the head can leave out: those that describe the key and the value.
+const KIND_FLAGS: u8 = FLAG_KEY_IS_REF
+    | FLAG_VALUE_IS_REF
+    | FLAG_VALUE_IS_ZERO
+    | FLAG_KEY_IS_ABSENT
+    | FLAG_KEY_HIGH_IS_REF;
+
+/// The last key and value flags of each kind in the block, for a head that leaves them out.
+struct KindFlags(Box<[Option<u8>]>);
+
+impl KindFlags {
+    fn new() -> Self {
+        KindFlags(vec![None; DepKind::NUM_VARIANTS].into())
+    }
+
+    fn clear(&mut self) {
+        self.0.fill(None);
+    }
+}
+
+/// The byte width of the largest of `targets`, at least one.
+fn edge_width(targets: &[u32]) -> usize {
+    let max = targets.iter().copied().max().unwrap_or(0);
+    (DEP_NODE_SIZE - max.leading_zeros() as usize / 8).max(1)
+}
+
+/// The index is the node's index plus one. Otherwise it follows as a fixed `u32`.
+const FLAG_INDEX_IS_NEXT: u8 = 1 << 0;
+/// The key fingerprint is the key of an earlier node. A leb128 distance back to it follows.
+const FLAG_KEY_IS_REF: u8 = 1 << 1;
+/// The value fingerprint is the value of an earlier node. A leb128 distance back to it follows.
+const FLAG_VALUE_IS_REF: u8 = 1 << 2;
+/// The value fingerprint is `Fingerprint::ZERO` and is not stored.
+const FLAG_VALUE_IS_ZERO: u8 = 1 << 3;
+
+/// Keeps the low 64 bits of a result fingerprint. The graph stores only those
+/// bits.
+#[inline]
+pub fn short_value_fingerprint(fingerprint: Fingerprint) -> Fingerprint {
+    Fingerprint::new(fingerprint.split().0, 0u64)
+}
+/// The node is anon. Its key is never looked up again, so it is not stored and decodes as zero.
+const FLAG_KEY_IS_ABSENT: u8 = 1 << 4;
+/// The node is the first of a block that one thread wrote. Edge back-references start again here.
+const FLAG_EDGES_RESTART: u8 = 1 << 5;
+/// The first half of the key is the first half of the key of an earlier node.
+const FLAG_KEY_HIGH_IS_REF: u8 = 1 << 6;
+
+/// One node of the serialized stream, without its edge targets.
+struct NodeRecord {
+    index: SerializedDepNodeIndex,
+    node: DepNode,
+    value_fingerprint: Fingerprint,
+    num_edges: u32,
+    edges_restart: bool,
+}
+
+/// The shortest run of edges that one back reference copies. Edges cost no more as multiple codes.
+const MIN_EDGE_RUN: usize = 3;
+
+fn leb_len(x: u64) -> u32 {
+    (64 - x.leading_zeros()).max(1).div_ceil(7)
+}
+
+impl NodeRecord {
+    /// The head, and nothing else.
+    const MIN_SIZE: usize = 2;
+
+    fn decode(
+        d: &mut MemDecoder<'_>,
+        prev_index: Option<SerializedDepNodeIndex>,
+        nodes: &IndexSlice<SerializedDepNodeIndex, DepNode>,
+        value_fingerprints: &IndexSlice<SerializedDepNodeIndex, Fingerprint>,
+        kind_flags: &mut KindFlags,
+    ) -> Self {
+        let head = NodeHead(u16::from_le_bytes(d.read_array()));
+        let kind = head.kind().as_usize();
+        let flags = if head.same_flags() {
+            kind_flags.0[kind].expect("dep graph head repeats flags that no earlier node has")
+                | FLAG_INDEX_IS_NEXT
+        } else {
+            let flags = d.read_u8();
+            if flags & FLAG_EDGES_RESTART != 0 {
+                kind_flags.clear();
             }
+            flags
+        };
+        kind_flags.0[kind] = Some(flags & KIND_FLAGS);
+
+        let index = if flags & FLAG_INDEX_IS_NEXT != 0 {
+            let prev = prev_index.expect("dep graph node refers to a missing previous node");
+            SerializedDepNodeIndex::from_u32(prev.as_u32() + 1)
+        } else {
+            SerializedDepNodeIndex::from_u32(u32::from_le_bytes(d.read_array()))
+        };
+
+        let key_fingerprint = if flags & FLAG_KEY_IS_ABSENT != 0 {
+            Fingerprint::ZERO.into()
+        } else if flags & FLAG_KEY_IS_REF != 0 {
+            nodes[Self::decode_ref(d, index, nodes)].key_fingerprint
+        } else if flags & FLAG_KEY_HIGH_IS_REF != 0 {
+            let earlier: Fingerprint =
+                nodes[Self::decode_ref(d, index, nodes)].key_fingerprint.into();
+            Fingerprint::new(earlier.split().0, u64::from_le_bytes(d.read_array())).into()
+        } else {
+            Fingerprint::from_le_bytes(d.read_array()).into()
+        };
+
+        let value_fingerprint = if flags & FLAG_VALUE_IS_ZERO != 0 {
+            Fingerprint::ZERO
+        } else if flags & FLAG_VALUE_IS_REF != 0 {
+            value_fingerprints[Self::decode_ref(d, index, nodes)]
+        } else {
+            Fingerprint::new(u64::from_le_bytes(d.read_array()), 0u64)
+        };
+
+        let num_edges = head.len().unwrap_or_else(|| d.read_u32());
+        let node = DepNode { kind: head.kind(), key_fingerprint };
+        let edges_restart = flags & FLAG_EDGES_RESTART != 0;
+        NodeRecord { index, node, value_fingerprint, num_edges, edges_restart }
+    }
+
+    /// Reads this node's edge targets and appends them to `out` at the byte width of the
+    /// largest, which it returns. `history` holds the targets of the block so far, for
+    /// back-references.
+    fn decode_edges(
+        &self,
+        d: &mut MemDecoder<'_>,
+        out: &mut Vec<u8>,
+        history: &mut Vec<u32>,
+    ) -> usize {
+        if self.edges_restart {
+            history.clear();
         }
-        Self { bytes }
-    }
-
-    #[inline]
-    fn unpack(&self) -> Unpacked {
-        let head = u16::from_le_bytes(self.bytes[..2].try_into().unwrap());
-        let index = u32::from_le_bytes(self.bytes[2..6].try_into().unwrap());
-        let key_fingerprint = self.bytes[6..22].try_into().unwrap();
-        let value_fingerprint = self.bytes[22..].try_into().unwrap();
-
-        let kind = head & mask(Self::KIND_BITS) as u16;
-        let bytes_per_index = (head >> Self::KIND_BITS) & mask(Self::WIDTH_BITS) as u16;
-        let len = (head as u32) >> (Self::WIDTH_BITS + Self::KIND_BITS);
-
-        Unpacked {
-            len: len.checked_sub(1),
-            bytes_per_index: bytes_per_index as usize + 1,
-            kind: DepKind::from_u16(kind),
-            index: SerializedDepNodeIndex::from_u32(index),
-            key_fingerprint: Fingerprint::from_le_bytes(key_fingerprint).into(),
-            value_fingerprint: Fingerprint::from_le_bytes(value_fingerprint),
+        let first = history.len();
+        let end = first + self.num_edges as usize;
+        let mut prev = self.index.as_u32() as i64;
+        while history.len() < end {
+            let code = d.read_u64();
+            if code & 1 != 0 {
+                let zigzag = code >> 1;
+                let target = prev + ((zigzag >> 1) as i64 ^ -((zigzag & 1) as i64));
+                let target = u32::try_from(target).expect("dep graph edge target out of range");
+                history.push(target);
+                prev = i64::from(target);
+                continue;
+            }
+            let distance = (code >> 2) as usize;
+            let at = history
+                .len()
+                .checked_sub(distance)
+                .filter(|_| distance != 0)
+                .expect("dep graph edge back-reference does not point at an earlier edge");
+            let len = if code & 0b10 != 0 { d.read_usize() + MIN_EDGE_RUN } else { 1 };
+            assert!(history.len() + len <= end, "dep graph edge run passes the end of its node");
+            for k in 0..len {
+                let target = history[at + k];
+                history.push(target);
+            }
+            prev = i64::from(*history.last().unwrap());
         }
+        let targets = &history[first..];
+        let width = edge_width(targets);
+        for target in targets {
+            out.extend_from_slice(&target.to_le_bytes()[..width]);
+        }
+        width
+    }
+
+    fn decode_ref(
+        d: &mut MemDecoder<'_>,
+        index: SerializedDepNodeIndex,
+        nodes: &IndexSlice<SerializedDepNodeIndex, DepNode>,
+    ) -> SerializedDepNodeIndex {
+        let distance = d.read_u32();
+        let target = index
+            .as_u32()
+            .checked_sub(distance)
+            .filter(|_| distance != 0)
+            .map(SerializedDepNodeIndex::from_u32)
+            .expect("dep graph back-reference does not point at an earlier node");
+        assert!(nodes[target].kind != DepKind::Null, "dep graph back-reference to a missing node");
+        target
+    }
+}
+
+/// A direct-mapped table from a fingerprint to the last node this thread
+/// wrote with it.
+struct FingerprintRefs {
+    slots: Box<[(Fingerprint, u32)]>,
+}
+
+impl FingerprintRefs {
+    const SLOTS: usize = 1 << 17;
+
+    fn new() -> Self {
+        FingerprintRefs { slots: vec![(Fingerprint::ZERO, u32::MAX); Self::SLOTS].into() }
+    }
+
+    /// Returns the last earlier node with `fingerprint`, and records `index` in its place.
+    #[inline]
+    fn replace(&mut self, fingerprint: Fingerprint, index: u32) -> Option<u32> {
+        // Both halves feed the slot, because a `DefPathHash` key has the crate id as one half.
+        let (a, b) = fingerprint.split();
+        let slot = (a.as_u64() ^ b.as_u64()) as usize & (Self::SLOTS - 1);
+        let (old_fingerprint, old_index) =
+            mem::replace(&mut self.slots[slot], (fingerprint, index));
+        (old_fingerprint == fingerprint && old_index < index).then_some(old_index)
+    }
+}
+
+/// A direct-mapped table from an edge target to the last position of an edge
+/// to it in the block.
+struct EdgePositions {
+    slots: Box<[(u32, u32)]>,
+}
+
+impl EdgePositions {
+    const SLOTS: usize = 1 << 18;
+
+    fn new() -> Self {
+        EdgePositions { slots: vec![(u32::MAX, u32::MAX); Self::SLOTS].into() }
     }
 
     #[inline]
-    fn len(&self) -> Option<u32> {
-        self.unpack().len
+    fn slot(target: u32) -> usize {
+        (target.wrapping_mul(0x9E37_79B1) >> (32 - Self::SLOTS.trailing_zeros())) as usize
+    }
+
+    /// Returns a position in `history` that holds `target`. A slot that an earlier block or
+    /// another target left fails this check, so a block start needs no clear.
+    #[inline]
+    fn get(&self, target: u32, history: &[u32]) -> Option<u32> {
+        let (slot_target, at) = self.slots[Self::slot(target)];
+        (slot_target == target && history.get(at as usize) == Some(&target)).then_some(at)
     }
 
     #[inline]
-    fn bytes_per_index(&self) -> usize {
-        self.unpack().bytes_per_index
+    fn insert(&mut self, target: u32, at: u32) {
+        self.slots[Self::slot(target)] = (target, at);
     }
+}
 
-    #[inline]
-    fn index(&self) -> SerializedDepNodeIndex {
-        self.unpack().index
-    }
+/// What a thread's encoder remembers about the nodes it already wrote.
+struct EncoderRefs {
+    /// The index of the last node in the unflushed buffer.
+    prev_index: Option<u32>,
+    keys: FingerprintRefs,
+    /// Keyed by the first half of a key, with zero as the second half.
+    key_highs: FingerprintRefs,
+    values: FingerprintRefs,
+    /// The position of an earlier edge of the unflushed buffer to a target.
+    edge_positions: EdgePositions,
+    /// The number of edges in the unflushed buffer.
+    edge_count: u32,
+    /// The targets of the edges in the unflushed buffer, in order.
+    edge_history: Vec<u32>,
+    kind_flags: KindFlags,
+}
 
-    #[inline]
-    fn value_fingerprint(&self) -> Fingerprint {
-        self.unpack().value_fingerprint
-    }
-
-    #[inline]
-    fn node(&self) -> DepNode {
-        let Unpacked { kind, key_fingerprint, .. } = self.unpack();
-        DepNode { kind, key_fingerprint }
-    }
-
-    #[inline]
-    fn edges_header(&self, edge_list_data: &[u8], num_edges: u32) -> EdgeHeader {
-        EdgeHeader {
-            repr: (edge_list_data.len() << DEP_NODE_WIDTH_BITS) | (self.bytes_per_index() - 1),
-            num_edges,
+impl EncoderRefs {
+    fn new() -> Self {
+        EncoderRefs {
+            prev_index: None,
+            keys: FingerprintRefs::new(),
+            key_highs: FingerprintRefs::new(),
+            values: FingerprintRefs::new(),
+            edge_positions: EdgePositions::new(),
+            edge_count: 0,
+            edge_history: Vec::new(),
+            kind_flags: KindFlags::new(),
         }
     }
 }
@@ -578,26 +754,161 @@ struct NodeInfo<'a> {
     edges: &'a [DepNodeIndex],
 }
 
-impl NodeInfo<'_> {
-    fn encode(&self, e: &mut MemEncoder, index: DepNodeIndex) {
-        let NodeInfo { ref node, value_fingerprint, edges } = *self;
-        // The largest index picks the byte width of the edge list.
-        let edge_max = edges.iter().map(|e| e.as_u32()).max().unwrap_or(0);
-        let header =
-            SerializedNodeHeader::new(node, index, value_fingerprint, edge_max, edges.len());
-        e.write_array(header.bytes);
+/// The bytes one encoded node spends on each part of its record.
+#[derive(Clone, Copy, Default)]
+struct NodeBytes {
+    head: u64,
+    key: u64,
+    value: u64,
+    edges: u64,
+    /// The edges that a run copies, which cost no bytes of their own. Not a byte count.
+    run_edges: u64,
+}
 
-        if header.len().is_none() {
+impl NodeBytes {
+    fn add(&mut self, other: NodeBytes) {
+        self.head += other.head;
+        self.key += other.key;
+        self.value += other.value;
+        self.edges += other.edges;
+        self.run_edges += other.run_edges;
+    }
+
+    fn total(&self) -> u64 {
+        self.head + self.key + self.value + self.edges
+    }
+}
+
+impl NodeInfo<'_> {
+    fn encode(&self, e: &mut MemEncoder, index: DepNodeIndex, refs: &mut EncoderRefs) -> NodeBytes {
+        let start = e.position();
+        let NodeInfo { ref node, value_fingerprint, edges } = *self;
+
+        let index = index.as_u32();
+        let key_fingerprint: Fingerprint = node.key_fingerprint.into();
+        let key_is_absent = node.kind.is_anon();
+        let key_ref = if key_is_absent { None } else { refs.keys.replace(key_fingerprint, index) };
+        let (key_high, key_low) = key_fingerprint.split();
+        let key_high_ref = if key_is_absent || key_ref.is_some() {
+            None
+        } else {
+            refs.key_highs.replace(Fingerprint::new(key_high, 0u64), index)
+        };
+        debug_assert_eq!(value_fingerprint, short_value_fingerprint(value_fingerprint));
+        let value_is_zero = value_fingerprint == Fingerprint::ZERO;
+        let value_ref =
+            if value_is_zero { None } else { refs.values.replace(value_fingerprint, index) };
+        let index_is_next = refs.prev_index.is_some_and(|prev| prev + 1 == index);
+        // A flush resets `prev_index`, so this node starts a block.
+        let edges_restart = refs.prev_index.is_none();
+        refs.prev_index = Some(index);
+
+        let mut flags = 0;
+        if index_is_next {
+            flags |= FLAG_INDEX_IS_NEXT;
+        }
+        if edges_restart {
+            flags |= FLAG_EDGES_RESTART;
+            refs.edge_count = 0;
+            refs.edge_history.clear();
+            refs.kind_flags.clear();
+        }
+        if key_is_absent {
+            flags |= FLAG_KEY_IS_ABSENT;
+        } else if key_ref.is_some() {
+            flags |= FLAG_KEY_IS_REF;
+        } else if key_high_ref.is_some() {
+            flags |= FLAG_KEY_HIGH_IS_REF;
+        }
+        if value_is_zero {
+            flags |= FLAG_VALUE_IS_ZERO;
+        } else if value_ref.is_some() {
+            flags |= FLAG_VALUE_IS_REF;
+        }
+
+        let kind_flags = &mut refs.kind_flags.0[node.kind.as_usize()];
+        let same_flags = index_is_next && !edges_restart && *kind_flags == Some(flags & KIND_FLAGS);
+        *kind_flags = Some(flags & KIND_FLAGS);
+        let head = NodeHead::new(node.kind, edges.len(), same_flags);
+        e.write_array(head.0.to_le_bytes());
+        if !same_flags {
+            e.emit_u8(flags);
+        }
+        if !index_is_next {
+            e.write_array(index.to_le_bytes());
+        }
+        let key_start = e.position();
+        match (key_ref, key_high_ref) {
+            _ if key_is_absent => {}
+            (Some(target), _) => e.emit_u32(index - target),
+            (None, Some(target)) => {
+                e.emit_u32(index - target);
+                e.write_array(key_low.as_u64().to_le_bytes());
+            }
+            (None, None) => e.write_array(key_fingerprint.to_le_bytes()),
+        }
+        let value_start = e.position();
+        if !value_is_zero {
+            match value_ref {
+                Some(target) => e.emit_u32(index - target),
+                None => e.write_array(value_fingerprint.split().0.as_u64().to_le_bytes()),
+            }
+        }
+        let edges_start = e.position();
+
+        if head.len().is_none() {
             // The edges are all unique and the number of unique indices is less than u32::MAX.
             e.emit_u32(edges.len().try_into().unwrap());
         }
 
-        let bytes_per_index = header.bytes_per_index();
-        for node_index in edges.iter() {
-            e.write_with(|dest| {
-                *dest = node_index.as_u32().to_le_bytes();
-                bytes_per_index
-            });
+        // Each target is the shorter of a delta from the target before and a back reference to an earlier edge of the block.
+        let mut prev = index as i64;
+        let mut run_edges = 0;
+        let mut i = 0;
+        while i < edges.len() {
+            let target = edges[i].as_u32();
+            let delta = i64::from(target) - prev;
+            let delta_code = ((((delta << 1) ^ (delta >> 63)) as u64) << 1) | 1;
+            let at = refs.edge_positions.get(target, &refs.edge_history);
+            let mut len = 1;
+            if let Some(at) = at {
+                while i + len < edges.len()
+                    && refs.edge_history.get(at as usize + len) == Some(&edges[i + len].as_u32())
+                {
+                    len += 1;
+                }
+            }
+            match at {
+                Some(at) if len >= MIN_EDGE_RUN => {
+                    let distance = u64::from(refs.edge_count - at);
+                    e.emit_u64(distance << 2 | 0b10);
+                    e.emit_usize(len - MIN_EDGE_RUN);
+                    run_edges += len as u64;
+                }
+                Some(at) if leb_len(u64::from(refs.edge_count - at) << 2) < leb_len(delta_code) => {
+                    len = 1;
+                    e.emit_u64(u64::from(refs.edge_count - at) << 2);
+                }
+                _ => {
+                    len = 1;
+                    e.emit_u64(delta_code);
+                }
+            }
+            for edge in &edges[i..i + len] {
+                refs.edge_positions.insert(edge.as_u32(), refs.edge_count);
+                debug_assert_eq!(refs.edge_history.len(), refs.edge_count as usize);
+                refs.edge_history.push(edge.as_u32());
+                refs.edge_count += 1;
+            }
+            prev = i64::from(edges[i + len - 1].as_u32());
+            i += len;
+        }
+        NodeBytes {
+            head: (key_start - start) as u64,
+            key: (value_start - key_start) as u64,
+            value: (edges_start - value_start) as u64,
+            edges: (e.position() - edges_start) as u64,
+            run_edges,
         }
     }
 }
@@ -606,14 +917,42 @@ struct Stat {
     kind: DepKind,
     node_counter: u64,
     edge_counter: u64,
+    bytes: NodeBytes,
+    /// The nodes whose key starts with this crate's id, as a `DefPathHash` of a local item does.
+    local_nodes: u64,
+    local_bytes: u64,
+}
+
+/// What happened to each node this session, for `-Zincremental-info`.
+#[derive(Clone, Copy, Default)]
+struct NodeFates {
+    /// Previous nodes marked green without a re-run.
+    promoted: u64,
+    /// Previous nodes that ran again and gave the same result.
+    rerun_green: u64,
+    /// Previous nodes that ran again and gave a different result, or have no result hash.
+    rerun_red: u64,
+    /// Nodes with no previous node.
+    new: u64,
+}
+
+impl NodeFates {
+    fn add(&mut self, other: NodeFates) {
+        self.promoted += other.promoted;
+        self.rerun_green += other.rerun_green;
+        self.rerun_red += other.rerun_red;
+        self.new += other.new;
+    }
 }
 
 struct LocalEncoderState {
     next_node_index: u32,
     remaining_node_index: u32,
     encoder: MemEncoder,
+    refs: EncoderRefs,
     node_count: usize,
     edge_count: usize,
+    fates: NodeFates,
 
     /// Stores the number of times we've encoded each dep kind.
     kind_stats: Vec<u32>,
@@ -623,6 +962,7 @@ struct LocalEncoderResult {
     node_max: u32,
     node_count: usize,
     edge_count: usize,
+    fates: NodeFates,
 
     /// Stores the number of times we've encoded each dep kind.
     kind_stats: Vec<u32>,
@@ -634,6 +974,30 @@ struct EncoderState {
     file: Lock<Option<FileEncoder<'static>>>,
     local: WorkerLocal<RefCell<LocalEncoderState>>,
     stats: Option<Lock<FxHashMap<DepKind, Stat>>>,
+    /// The first key half of a node keyed by a local item.
+    local_key_high: u64,
+    /// For `-Zincremental-info`: which nodes some edge of this session points at.
+    readers: Option<Lock<ReadStats>>,
+}
+
+/// Per node index: its kind, its bytes, and whether an edge points at it.
+#[derive(Default)]
+struct ReadStats {
+    kinds: Vec<Option<DepKind>>,
+    bytes: Vec<u32>,
+    read: Vec<bool>,
+    /// Edges by the kind of their reader and the kind of their target.
+    pairs: FxHashMap<(DepKind, Option<DepKind>), u64>,
+}
+
+impl ReadStats {
+    fn grow(&mut self, index: usize) {
+        if self.kinds.len() <= index {
+            self.kinds.resize(index + 1, None);
+            self.bytes.resize(index + 1, 0);
+            self.read.resize(index + 1, false);
+        }
+    }
 }
 
 impl EncoderState {
@@ -641,11 +1005,14 @@ impl EncoderState {
         encoder: FileEncoder<'static>,
         record_stats: bool,
         previous: Arc<SerializedDepGraph>,
+        stable_crate_id: StableCrateId,
     ) -> Self {
         Self {
             previous,
             next_node_index: AtomicU64::new(0),
             stats: record_stats.then(|| Lock::new(FxHashMap::default())),
+            local_key_high: stable_crate_id.as_u64(),
+            readers: record_stats.then(|| Lock::new(ReadStats::default())),
             file: Lock::new(Some(encoder)),
             local: WorkerLocal::new(|_| {
                 RefCell::new(LocalEncoderState {
@@ -653,7 +1020,9 @@ impl EncoderState {
                     remaining_node_index: 0,
                     edge_count: 0,
                     node_count: 0,
+                    fates: NodeFates::default(),
                     encoder: MemEncoder::new(),
+                    refs: EncoderRefs::new(),
                     kind_stats: iter::repeat_n(0, DepKind::NUM_VARIANTS).collect(),
                 })
             }),
@@ -695,6 +1064,7 @@ impl EncoderState {
         index: DepNodeIndex,
         edge_count: usize,
         edges: &[DepNodeIndex],
+        bytes: NodeBytes,
         retained_graph: &Option<Lock<RetainedDepGraph>>,
         local: &mut LocalEncoderState,
     ) {
@@ -715,14 +1085,44 @@ impl EncoderState {
 
         if let Some(stats) = &self.stats {
             let kind = node.kind;
+            let key: Fingerprint = node.key_fingerprint.into();
+            let is_local = key.split().0.as_u64() == self.local_key_high;
 
             // Outline the stats code as it's typically disabled and cold.
             outline(move || {
                 let mut stats = stats.lock();
-                let stat =
-                    stats.entry(kind).or_insert(Stat { kind, node_counter: 0, edge_counter: 0 });
+                let stat = stats.entry(kind).or_insert(Stat {
+                    kind,
+                    node_counter: 0,
+                    edge_counter: 0,
+                    bytes: NodeBytes::default(),
+                    local_nodes: 0,
+                    local_bytes: 0,
+                });
                 stat.node_counter += 1;
                 stat.edge_counter += edge_count as u64;
+                stat.bytes.add(bytes);
+                if is_local {
+                    stat.local_nodes += 1;
+                    stat.local_bytes += bytes.total();
+                }
+            });
+        }
+
+        if let Some(readers) = &self.readers {
+            outline(move || {
+                let mut readers = readers.lock();
+                let index = index.as_usize();
+                readers.grow(index);
+                readers.kinds[index] = Some(node.kind);
+                readers.bytes[index] = bytes.total().try_into().unwrap_or(u32::MAX);
+                for edge in edges {
+                    readers.grow(edge.as_usize());
+                    readers.read[edge.as_usize()] = true;
+                    // A target is encoded before its reader, so its kind is known here.
+                    let target = readers.kinds[edge.as_usize()];
+                    *readers.pairs.entry((node.kind, target)).or_default() += 1;
+                }
             });
         }
     }
@@ -730,9 +1130,11 @@ impl EncoderState {
     #[inline]
     fn flush_mem_encoder(&self, local: &mut LocalEncoderState) {
         let data = &mut local.encoder.data;
-        if data.len() > 64 * 1024 {
+        // A flush starts the edge back-references again, so a larger block finds more of them.
+        if data.len() > 1024 * 1024 {
             self.file.lock().as_mut().unwrap().emit_raw_bytes(&data[..]);
             data.clear();
+            local.refs.prev_index = None;
         }
     }
 
@@ -744,9 +1146,17 @@ impl EncoderState {
         retained_graph: &Option<Lock<RetainedDepGraph>>,
         local: &mut LocalEncoderState,
     ) {
-        node.encode(&mut local.encoder, index);
+        let bytes = node.encode(&mut local.encoder, index, &mut local.refs);
         self.flush_mem_encoder(&mut *local);
-        self.record(&node.node, index, node.edges.len(), node.edges, retained_graph, &mut *local);
+        self.record(
+            &node.node,
+            index,
+            node.edges.len(),
+            node.edges,
+            bytes,
+            retained_graph,
+            &mut *local,
+        );
     }
 
     /// Encodes a node that was promoted from the previous graph, reading the node and its
@@ -787,6 +1197,7 @@ impl EncoderState {
                 node_max: local.next_node_index,
                 node_count: local.node_count,
                 edge_count: local.edge_count,
+                fates: local.fates,
             }
         });
 
@@ -797,11 +1208,13 @@ impl EncoderState {
         let mut node_max = 0;
         let mut node_count = 0;
         let mut edge_count = 0;
+        let mut fates = NodeFates::default();
 
         for result in results {
             node_max = max(node_max, result.node_max);
             node_count += result.node_count;
             edge_count += result.edge_count;
+            fates.add(result.fates);
             for (i, stat) in result.kind_stats.iter().enumerate() {
                 kind_stats[i] += stat;
             }
@@ -828,7 +1241,7 @@ impl EncoderState {
             profiler.artifact_size("dep_graph", "dep-graph.bin", position as u64);
         }
 
-        self.print_incremental_info(current, node_count, edge_count);
+        self.print_incremental_info(current, node_count, edge_count, fates);
 
         result
     }
@@ -838,6 +1251,7 @@ impl EncoderState {
         current: &CurrentDepGraph,
         total_node_count: usize,
         total_edge_count: usize,
+        fates: NodeFates,
     ) {
         if let Some(record_stats) = &self.stats {
             let record_stats = record_stats.lock();
@@ -856,6 +1270,32 @@ impl EncoderState {
             eprintln!("[incremental]");
             eprintln!("[incremental] Total Node Count: {}", total_node_count);
             eprintln!("[incremental] Total Edge Count: {}", total_edge_count);
+            let reached = fates.promoted + fates.rerun_green + fates.rerun_red;
+            eprintln!(
+                "[incremental] node fates: previous {} promoted {} rerun-green {} rerun-red {} \
+                 unreached {} new {} pid {}",
+                self.previous.live_node_count,
+                fates.promoted,
+                fates.rerun_green,
+                fates.rerun_red,
+                (self.previous.live_node_count as u64).saturating_sub(reached),
+                fates.new,
+                // Cargo replays the stderr of a fresh crate.
+                std::process::id(),
+            );
+            let mut bytes = NodeBytes::default();
+            for stat in &stats {
+                bytes.add(stat.bytes);
+            }
+            eprintln!(
+                "[incremental] dep graph node bytes: total {} heads {} keys {} values {} edges {}",
+                bytes.total(),
+                bytes.head,
+                bytes.key,
+                bytes.value,
+                bytes.edges,
+            );
+            eprintln!("[incremental] dep graph edges that a run copies: {}", bytes.run_edges);
 
             if cfg!(debug_assertions) {
                 let total_read_count = current.total_read_count.load(Ordering::Relaxed);
@@ -867,27 +1307,79 @@ impl EncoderState {
 
             eprintln!("[incremental]");
             eprintln!(
-                "[incremental]  {:<36}| {:<17}| {:<12}| {:<17}|",
-                "Node Kind", "Node Frequency", "Node Count", "Avg. Edge Count"
+                "[incremental]  {:<36}| {:<17}| {:<12}| {:<17}| {:<12}| {:<12}| {:<12}|",
+                "Node Kind",
+                "Node Frequency",
+                "Node Count",
+                "Avg. Edge Count",
+                "Bytes",
+                "Edges",
+                "Edge Bytes"
             );
             eprintln!("{SEPARATOR}");
 
-            for stat in stats {
+            for stat in &stats {
                 let node_kind_ratio =
                     (100.0 * (stat.node_counter as f64)) / (total_node_count as f64);
                 let node_kind_avg_edges = (stat.edge_counter as f64) / (stat.node_counter as f64);
 
                 eprintln!(
-                    "[incremental]  {:<36}|{:>16.1}% |{:>12} |{:>17.1} |",
+                    "[incremental]  {:<36}|{:>16.1}% |{:>12} |{:>17.1} |{:>12} |{:>12} |{:>12} |",
                     format!("{:?}", stat.kind),
                     node_kind_ratio,
                     stat.node_counter,
                     node_kind_avg_edges,
+                    stat.bytes.total(),
+                    stat.edge_counter,
+                    stat.bytes.edges,
                 );
             }
 
             eprintln!("{SEPARATOR}");
             eprintln!("[incremental]");
+            for stat in &stats {
+                eprintln!(
+                    "[incremental] local-keyed nodes: {:?} {} {} {} {}",
+                    stat.kind,
+                    stat.node_counter,
+                    stat.bytes.total(),
+                    stat.local_nodes,
+                    stat.local_bytes,
+                );
+            }
+        }
+
+        if let Some(readers) = &self.readers {
+            let readers = readers.lock();
+            let mut unread: FxHashMap<DepKind, (u64, u64)> = FxHashMap::default();
+            for ((kind, &bytes), &read) in
+                readers.kinds.iter().zip(&readers.bytes).zip(&readers.read)
+            {
+                if let Some(kind) = *kind
+                    && !read
+                {
+                    let entry = unread.entry(kind).or_default();
+                    entry.0 += 1;
+                    entry.1 += u64::from(bytes);
+                }
+            }
+            // Sorted below.
+            #[allow(rustc::potential_query_instability)]
+            let mut unread: Vec<_> = unread.into_iter().collect();
+            unread.sort_by_key(|&(kind, (_, bytes))| (std::cmp::Reverse(bytes), kind.as_u16()));
+            for (kind, (nodes, bytes)) in unread {
+                eprintln!("[incremental] unread nodes: {kind:?} {nodes} {bytes}");
+            }
+            // Sorted below.
+            #[allow(rustc::potential_query_instability)]
+            let mut pairs: Vec<_> = readers.pairs.iter().collect();
+            pairs.sort_by_key(|&(&(reader, target), &edges)| {
+                (std::cmp::Reverse(edges), reader.as_u16(), target.map(|k| k.as_u16()))
+            });
+            for (&(reader, target), edges) in pairs.into_iter().take(60) {
+                let target = target.map_or_else(|| "Unknown".to_string(), |k| format!("{k:?}"));
+                eprintln!("[incremental] edges by kind: {reader:?} {target} {edges}");
+            }
         }
     }
 }
@@ -905,13 +1397,19 @@ impl GraphEncoder {
         encoder: FileEncoder<'static>,
         prev_index_space_len: usize,
         previous: Arc<SerializedDepGraph>,
+        stable_crate_id: StableCrateId,
     ) -> Self {
         let retained_graph = sess
             .opts
             .unstable_opts
             .query_dep_graph
             .then(|| Lock::new(RetainedDepGraph::new(prev_index_space_len)));
-        let status = EncoderState::new(encoder, sess.opts.unstable_opts.incremental_info, previous);
+        let status = EncoderState::new(
+            encoder,
+            sess.opts.unstable_opts.incremental_info,
+            previous,
+            stable_crate_id,
+        );
         GraphEncoder { status, retained_graph, profiler: sess.prof.clone() }
     }
 
@@ -932,6 +1430,7 @@ impl GraphEncoder {
         let index = self.status.next_index(&mut *local);
         self.status.bump_index(&mut *local);
         self.status.encode_node(index, &node, &self.retained_graph, &mut *local);
+        local.fates.new += 1;
         index
     }
 
@@ -965,6 +1464,11 @@ impl GraphEncoder {
 
         self.status.bump_index(&mut *local);
         self.status.encode_node(index, &node, &self.retained_graph, &mut *local);
+        if is_green {
+            local.fates.rerun_green += 1;
+        } else {
+            local.fates.rerun_red += 1;
+        }
         index
     }
 
@@ -998,6 +1502,7 @@ impl GraphEncoder {
                     &mut *local,
                     edges,
                 );
+                local.fates.promoted += 1;
                 Some(index)
             }
             TrySetColorResult::AlreadyRed => None,

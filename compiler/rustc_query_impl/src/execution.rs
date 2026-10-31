@@ -4,6 +4,7 @@ use std::num::NonZero;
 use std::sync::Arc;
 
 use parking_lot::{Condvar, Mutex};
+use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::hash_table::Entry;
 use rustc_data_structures::{defer, outline, sharded, sync};
 use rustc_errors::FatalError;
@@ -11,7 +12,7 @@ use rustc_middle::dep_graph::{
     DepGraphData, DepNode, DepNodeIndex, DepNodeKey, SerializedDepNodeIndex,
 };
 use rustc_middle::query::{
-    ActiveKeyStatus, QueryCache, QueryCycle, QueryJob, QueryJobId, QueryLatch, QueryMode,
+    ActiveKeyStatus, QueryCache, QueryCycle, QueryJob, QueryJobId, QueryKey, QueryLatch, QueryMode,
     QueryState, QueryVTable, QueryWaiter,
 };
 use rustc_middle::ty::TyCtxt;
@@ -476,8 +477,9 @@ fn execute_job_incr<'tcx, C: QueryCache>(
 ) -> (C::Value, DepNodeIndex) {
     let dep_graph_data =
         tcx.dep_graph.data().expect("should always be present in incremental mode");
+    let transparent = is_transparent(query, dep_graph_data, key);
 
-    if !query.eval_always {
+    if !query.anon && !query.eval_always && !transparent {
         // The diagnostics for this query will be promoted to the current session during
         // `try_mark_green()`, so we can ignore them here.
         if let Some(ret) = start_query(job_id, false, || try {
@@ -500,6 +502,13 @@ fn execute_job_incr<'tcx, C: QueryCache>(
     let prof_timer = tcx.prof.query_provider();
 
     let (result, dep_node_index) = start_query(job_id, query.depth_limit, || {
+        // A transparent task records its reads like an anon task, and gets no node.
+        if query.anon || transparent {
+            return dep_graph_data.with_anon_task_inner(tcx, query.dep_kind, || {
+                (query.invoke_provider_fn)(tcx, key)
+            });
+        }
+
         // Call the query provider.
         dep_graph_data.with_task(
             dep_node,
@@ -512,6 +521,25 @@ fn execute_job_incr<'tcx, C: QueryCache>(
     prof_timer.finish_with_query_invocation_id(dep_node_index.into());
 
     (result, dep_node_index)
+}
+
+/// A value on disk is found through its node, so a key the query cache stores keeps its node.
+#[inline(always)]
+fn is_transparent<'tcx, C: QueryCache>(
+    query: &'tcx QueryVTable<'tcx, C>,
+    dep_graph_data: &DepGraphData,
+    key: C::Key,
+) -> bool {
+    // The value of an item of another crate is never fed and never on disk.
+    if dep_graph_data.is_extern_item_transparent(query.dep_kind)
+        && key.key_as_def_id().is_some_and(|def_id| !def_id.is_local())
+    {
+        return true;
+    }
+    dep_graph_data.is_transparent(query.dep_kind)
+        && !query.eval_always
+        && !query.feedable
+        && !query.will_cache_on_disk_for_key(key)
 }
 
 /// Given that the dep node for this query+key is green, obtain a value for it
@@ -595,10 +623,16 @@ fn load_from_disk_or_invoke_provider_green<'tcx, C: QueryCache>(
 fn ensure_can_skip_execution<'tcx, C: QueryCache>(
     query: &'tcx QueryVTable<'tcx, C>,
     tcx: TyCtxt<'tcx>,
+    key: C::Key,
     dep_node: DepNode,
 ) -> bool {
     // Queries with `eval_always` should never skip execution.
-    if query.eval_always {
+    if query.anon || query.eval_always {
+        return false;
+    }
+    if let Some(data) = tcx.dep_graph.data()
+        && is_transparent(query, data, key)
+    {
         return false;
     }
 
@@ -613,7 +647,9 @@ fn ensure_can_skip_execution<'tcx, C: QueryCache>(
             false
         }
         Some((_, dep_node_index)) => {
-            tcx.dep_graph.read_index(dep_node_index);
+            if !query.global_input {
+                tcx.dep_graph.read_index(dep_node_index);
+            }
             tcx.prof.query_cache_hit(dep_node_index.into());
 
             // We can skip execution for this key if the
@@ -647,18 +683,25 @@ pub(super) fn execute_query_incr_inner<'tcx, C: QueryCache>(
     key: C::Key,
     mode: QueryMode,
 ) -> Option<C::Value> {
-    let dep_node = DepNode::construct(tcx, query.dep_kind, &key);
+    // An anon node takes its key from its reads, so the query key is never hashed.
+    let dep_node = if query.anon {
+        DepNode { kind: query.dep_kind, key_fingerprint: Fingerprint::ZERO.into() }
+    } else {
+        DepNode::construct(tcx, query.dep_kind, &key)
+    };
 
     // Check if query execution can be skipped, for `ensure_ok`.
     if let QueryMode::EnsureOk = mode
-        && ensure_can_skip_execution(query, tcx, dep_node)
+        && ensure_can_skip_execution(query, tcx, key, dep_node)
     {
         return None;
     }
 
     let (result, dep_node_index) =
         try_execute_query::<C, true>(query, tcx, span, key, Some(dep_node));
-    if let Some(dep_node_index) = dep_node_index {
+    if let Some(dep_node_index) = dep_node_index
+        && !query.global_input
+    {
         tcx.dep_graph.read_index(dep_node_index)
     }
     Some(result)

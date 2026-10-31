@@ -36,13 +36,17 @@ where
         KeyFingerprintStyle::Opaque
     }
 
+    /// An opaque key is only compared, and never turned back into a key. So it keeps 64 bits,
+    /// as a result fingerprint does, and the dep graph stores the zero half as a back reference.
     #[inline(always)]
     default fn to_fingerprint(&self, tcx: TyCtxt<'tcx>) -> Fingerprint {
-        tcx.with_stable_hashing_context(|mut hcx| {
+        let fingerprint: Fingerprint = tcx.with_stable_hashing_context(|mut hcx| {
             let mut hasher = StableHasher::new();
             self.stable_hash(&mut hcx, &mut hasher);
             hasher.finish()
-        })
+        });
+        let (a, b) = fingerprint.split();
+        Fingerprint::new(0u64, a.as_u64() ^ b.as_u64())
     }
 
     #[inline(always)]

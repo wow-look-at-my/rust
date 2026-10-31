@@ -115,6 +115,35 @@ declare_hooks! {
     /// Creates the MIR for a given `DefId`, including unreachable code.
     hook build_mir_inner_impl(def: LocalDefId) -> mir::Body<'tcx>;
 
+    /// Gives the optimized MIR of a green body from the metadata in `old_session_directory`, or `None`.
+    hook prev_metadata_optimized_mir(def: LocalDefId) -> Option<&'tcx mir::Body<'tcx>>;
+
+    /// Gives the CTFE MIR of a green body from the metadata in `old_session_directory`, or `None`.
+    hook prev_metadata_mir_for_ctfe(def: LocalDefId) -> Option<&'tcx mir::Body<'tcx>>;
+
+    /// Gives the promoted MIR of a green body from the metadata in `old_session_directory`, or `None`.
+    hook prev_metadata_promoted_mir(def: LocalDefId) -> Option<&'tcx rustc_index::IndexVec<mir::Promoted, mir::Body<'tcx>>>;
+
+    /// Gives the type of a green item from the metadata in `old_session_directory`, or `None`.
+    hook prev_metadata_type_of(def: LocalDefId) -> Option<ty::EarlyBinder<'tcx, Ty<'tcx>>>;
+
+    /// Gives the signature of a green item from the metadata in `old_session_directory`, or `None`.
+    hook prev_metadata_fn_sig(def: LocalDefId)
+        -> Option<ty::EarlyBinder<'tcx, ty::PolyFnSig<'tcx>>>;
+
+    /// Gives the generics of a green item from the metadata in `old_session_directory`, or `None`.
+    hook prev_metadata_generics_of(def: LocalDefId) -> Option<ty::Generics>;
+
+    /// Gives the clauses of a green item from the metadata in `old_session_directory`, or `None`.
+    hook prev_metadata_explicit_clauses_of(def: LocalDefId) -> Option<ty::GenericClauses<'tcx>>;
+
+    /// Gives the codegen attributes of a green item from the metadata in `old_session_directory`.
+    hook prev_metadata_codegen_fn_attrs(def: LocalDefId)
+        -> Option<crate::middle::codegen_fn_attrs::CodegenFnAttrs>;
+
+    /// Under `-Z incremental-info`, prints how `built` differs from the decoded body of `def`.
+    hook prev_metadata_explain_mismatch(def: LocalDefId, built: &mir::Body<'tcx>) -> ();
+
     /// Serializes all eligible query return values into the on-disk cache.
     hook encode_query_values(encoder: &mut CacheEncoder<'tcx>) -> ();
 

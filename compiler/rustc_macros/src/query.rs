@@ -136,12 +136,14 @@ struct Desc {
 /// See `rustc_middle::query::modifiers` for documentation of each query modifier.
 struct QueryModifiers {
     // tidy-alphabetical-start
+    anon: Option<Ident>,
     arena_cache: Option<Ident>,
     cache_on_disk: Option<Ident>,
     depth_limit: Option<Ident>,
     desc: Desc,
     eval_always: Option<Ident>,
     feedable: Option<Ident>,
+    global_input: Option<Ident>,
     handle_cycle_error: Option<Ident>,
     no_force: Option<Ident>,
     no_hash: Option<Ident>,
@@ -151,12 +153,14 @@ struct QueryModifiers {
 
 fn parse_query_modifiers(input: ParseStream<'_>) -> Result<QueryModifiers> {
     // tidy-alphabetical-start
+    let mut anon = None;
     let mut arena_cache = None;
     let mut cache_on_disk = None;
     let mut depth_limit = None;
     let mut desc = None;
     let mut eval_always = None;
     let mut feedable = None;
+    let mut global_input = None;
     let mut handle_cycle_error = None;
     let mut no_force = None;
     let mut no_hash = None;
@@ -175,7 +179,9 @@ fn parse_query_modifiers(input: ParseStream<'_>) -> Result<QueryModifiers> {
             };
         }
 
-        if modifier == "arena_cache" {
+        if modifier == "anon" {
+            try_insert!(anon = modifier);
+        } else if modifier == "arena_cache" {
             try_insert!(arena_cache = modifier);
         } else if modifier == "cache_on_disk" {
             try_insert!(cache_on_disk = modifier);
@@ -192,6 +198,8 @@ fn parse_query_modifiers(input: ParseStream<'_>) -> Result<QueryModifiers> {
             try_insert!(eval_always = modifier);
         } else if modifier == "feedable" {
             try_insert!(feedable = modifier);
+        } else if modifier == "global_input" {
+            try_insert!(global_input = modifier);
         } else if modifier == "handle_cycle_error" {
             try_insert!(handle_cycle_error = modifier);
         } else if modifier == "no_force" {
@@ -209,12 +217,14 @@ fn parse_query_modifiers(input: ParseStream<'_>) -> Result<QueryModifiers> {
     };
     Ok(QueryModifiers {
         // tidy-alphabetical-start
+        anon,
         arena_cache,
         cache_on_disk,
         depth_limit,
         desc,
         eval_always,
         feedable,
+        global_input,
         handle_cycle_error,
         no_force,
         no_hash,
@@ -245,12 +255,14 @@ fn returns_error_guaranteed(ret_ty: &ReturnType) -> bool {
 fn make_modifiers_stream(query: &Query) -> proc_macro2::TokenStream {
     let QueryModifiers {
         // tidy-alphabetical-start
+        anon,
         arena_cache,
         cache_on_disk,
         depth_limit,
         desc,
         eval_always,
         feedable,
+        global_input,
         handle_cycle_error,
         no_force,
         no_hash,
@@ -259,6 +271,7 @@ fn make_modifiers_stream(query: &Query) -> proc_macro2::TokenStream {
     } = &query.modifiers;
 
     // tidy-alphabetical-start
+    let anon = anon.is_some();
     let arena_cache = arena_cache.is_some();
     let cache_on_disk = cache_on_disk.is_some();
     let depth_limit = depth_limit.is_some();
@@ -276,6 +289,7 @@ fn make_modifiers_stream(query: &Query) -> proc_macro2::TokenStream {
     };
     let eval_always = eval_always.is_some();
     let feedable = feedable.is_some();
+    let global_input = global_input.is_some();
     let handle_cycle_error = handle_cycle_error.is_some();
     let no_force = no_force.is_some();
     let no_hash = no_hash.is_some();
@@ -291,12 +305,14 @@ fn make_modifiers_stream(query: &Query) -> proc_macro2::TokenStream {
         query_name_span =>
         // Search for (QMODLIST) to find all occurrences of this query modifier list.
         // tidy-alphabetical-start
+        anon: #anon,
         arena_cache: #arena_cache,
         cache_on_disk: #cache_on_disk,
         depth_limit: #depth_limit,
         desc: #desc,
         eval_always: #eval_always,
         feedable: #feedable,
+        global_input: #global_input,
         handle_cycle_error: #handle_cycle_error,
         no_force: #no_force,
         no_hash: #no_hash,
@@ -360,12 +376,14 @@ fn add_to_analyzer_stream(query: &Query, analyzer_stream: &mut proc_macro2::Toke
 
     doc_link!(
         // tidy-alphabetical-start
+        anon,
         arena_cache,
         cache_on_disk,
         depth_limit,
         // `desc` is handled above
         eval_always,
         feedable,
+        global_input,
         handle_cycle_error,
         no_force,
         no_hash,
@@ -456,6 +474,26 @@ pub(super) fn rustc_queries(input: TokenStream) -> TokenStream {
                 modifiers.eval_always.is_none(),
                 feedable.span(),
                 "Query {name} cannot be both `feedable` and `eval_always`."
+            );
+        }
+
+        if let Some(anon) = &modifiers.anon {
+            assert!(
+                modifiers.feedable.is_none()
+                    && modifiers.eval_always.is_none()
+                    && modifiers.cache_on_disk.is_none()
+                    && modifiers.global_input.is_none(),
+                anon.span(),
+                "Query {name} cannot be `anon` and `feedable`, `eval_always`, `cache_on_disk` \
+                or `global_input`."
+            );
+        }
+
+        if let Some(global_input) = &modifiers.global_input {
+            assert!(
+                modifiers.feedable.is_some(),
+                global_input.span(),
+                "Query {name} must be `feedable` to be `global_input`."
             );
         }
 
