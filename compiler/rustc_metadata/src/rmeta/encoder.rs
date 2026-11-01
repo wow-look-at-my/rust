@@ -6,6 +6,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rustc_attr_ir::{AttributeKind, EncodeCrossCrate, find_attr};
@@ -14,7 +15,7 @@ use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
 use rustc_data_structures::memmap::{Mmap, MmapMut};
 use rustc_data_structures::owned_slice::slice_owned;
 use rustc_data_structures::stable_hash::{StableHash, StableHasher};
-use rustc_data_structures::sync::{par_for_each_in, par_join};
+use rustc_data_structures::sync::{Lock, par_for_each_in, par_join};
 use rustc_data_structures::temp_dir::MaybeTempDir;
 use rustc_data_structures::thousands::usize_with_underscores;
 use rustc_hir as hir;
@@ -22,15 +23,17 @@ use rustc_hir::def_id::{CRATE_DEF_ID, LOCAL_CRATE, LocalDefId, LocalDefIdSet};
 use rustc_hir::definitions::DefPathData;
 use rustc_hir_pretty::id_to_string;
 use rustc_index::IndexVec;
-use rustc_middle::dep_graph::{DepKind, DepNode, WorkProduct, WorkProductId};
+use rustc_middle::dep_graph::{
+    DepKind, DepNode, WorkProduct, WorkProductId, hash_result, short_value_fingerprint,
+};
 use rustc_middle::hir::map::compute_hir_hash;
 use rustc_middle::middle::dependency_format::Linkage;
 use rustc_middle::mir::interpret;
 use rustc_middle::query::Providers;
 use rustc_middle::traits::specialization_graph;
-use rustc_middle::ty::AssocContainer;
 use rustc_middle::ty::codec::TyEncoder;
 use rustc_middle::ty::fast_reject::{self, TreatParams};
+use rustc_middle::ty::{AssocContainer, MirInMetadata, PrevMetadata};
 use rustc_serialize::opaque::FileEncoder;
 use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 use rustc_session::config::mitigation_coverage::DeniedPartialMitigation;
@@ -50,7 +53,9 @@ use twox_hash::XxHash3_128;
 
 use crate::diagnostics::{FailCreateFileEncoder, FailWriteFile};
 use crate::eii::EiiMapEncodedKeyValue;
-use crate::rmeta::decoder::prev_session::{PrevBody, PrevSession, exported_stable_id};
+use crate::rmeta::decoder::prev_session::{
+    PrevBody, PrevSession, exported_stable_id, mir_lint_root_bodies,
+};
 use crate::rmeta::remapped_def_id::RemappedRawDefId;
 use crate::rmeta::*;
 
@@ -1205,6 +1210,29 @@ fn should_encode_stability(def_kind: DefKind) -> bool {
     }
 }
 
+/// The `ItemLocalId` of the lint root of each source scope of `bodies`. That
+/// `ItemLocalId` is in the order of `mir_lint_root_bodies`, or `u32::MAX` where the
+/// scope has no lint root of this owner.
+fn mir_lint_roots<'a, 'tcx: 'a>(
+    tcx: TyCtxt<'tcx>,
+    def_id: LocalDefId,
+    bodies: impl IntoIterator<Item = &'a mir::Body<'tcx>>,
+) -> Vec<u32> {
+    let owner = tcx.local_def_id_to_hir_id(def_id).owner;
+    let mut lint_roots = Vec::new();
+    for body in bodies {
+        mir_lint_root_bodies(body, &mut |body| {
+            lint_roots.extend(body.source_scopes.iter().map(|scope| match &scope.local_data {
+                mir::ClearCrossCrate::Set(data) if data.lint_root.owner == owner => {
+                    data.lint_root.local_id.as_u32()
+                }
+                _ => u32::MAX,
+            }))
+        });
+    }
+    lint_roots
+}
+
 /// Whether we should encode MIR. Return a pair, resp. for CTFE and for LLVM.
 ///
 /// Computing, optimizing and encoding the MIR is a relatively expensive operation.
@@ -2034,15 +2062,19 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             let (encode_const, encode_opt) = should_encode_mir(tcx, reachable_set, def_id);
             if encode_const || encode_opt { Some((def_id, encode_const, encode_opt)) } else { None }
         });
+        let mut in_metadata = MirInMetadata::default();
         for (def_id, encode_const, encode_opt) in keys_and_jobs {
             debug_assert!(encode_const || encode_opt);
 
             debug!("EntryBuilder::encode_mir({:?})", def_id);
             if encode_opt {
+                in_metadata.optimized_mir.insert(def_id);
                 let body = self
                     .reused_body(PrevBody::OptimizedMir, def_id)
                     .unwrap_or_else(|| tcx.optimized_mir(def_id));
                 self.table_writer().optimized_mir(def_id, body);
+                let lint_roots = mir_lint_roots(tcx, def_id, [body]);
+                self.table_writer().optimized_mir_lint_roots(def_id, lint_roots);
 
                 self.table_writer()
                     .cross_crate_inlinable(def_id, tcx.cross_crate_inlinable(def_id));
@@ -2069,6 +2101,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                         .reused_body(PrevBody::MirForCtfe, def_id)
                         .unwrap_or_else(|| tcx.mir_for_ctfe(def_id));
                     self.table_writer().mir_for_ctfe(def_id, body);
+                    let lint_roots = mir_lint_roots(tcx, def_id, [body]);
+                    self.table_writer().mir_for_ctfe_lint_roots(def_id, lint_roots);
+                    in_metadata.mir_for_ctfe.insert(def_id);
                 }
 
                 // FIXME(generic_const_exprs): this feels wrong to have in `encode_mir`
@@ -2091,6 +2126,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 let promoted =
                     self.reused_promoted(def_id).unwrap_or_else(|| tcx.promoted_mir(def_id));
                 self.table_writer().promoted_mir(def_id, promoted);
+                let lint_roots = mir_lint_roots(tcx, def_id, promoted);
+                self.table_writer().promoted_mir_lint_roots(def_id, lint_roots);
+                in_metadata.promoted_mir.insert(def_id);
             }
 
             if tcx.is_coroutine(def_id.to_def_id())
@@ -2098,6 +2136,11 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             {
                 self.table_writer().mir_coroutine_witnesses(def_id, witnesses);
             }
+        }
+
+        if tcx.sess.opts.unstable_opts.incremental_rmeta_reuse && tcx.dep_graph.is_fully_enabled() {
+            // This metadata goes into the session directory.
+            let _ = tcx.mir_in_metadata.set(in_metadata);
         }
 
         if tcx.sess.opts.unstable_opts.incremental_rmeta_reuse
@@ -2718,6 +2761,263 @@ impl<D: Decoder> Decodable<D> for EncodedMetadata {
 
         Self { full_metadata, stub_metadata: stub, path: None, _temp_dir: None }
     }
+}
+
+struct PrevMetadataMir<'tcx> {
+    session: Lock<PrevSession<'tcx>>,
+    decoded: AtomicUsize,
+    rejected: AtomicUsize,
+    mismatched: AtomicUsize,
+    /// The decoded, rejected and mismatched counts for CTFE and promoted MIR.
+    const_bodies: [AtomicUsize; 3],
+    /// Under `-Z incremental-info`, the first decoded body that did not match its hash.
+    first_mismatch: Lock<Option<(LocalDefId, Fingerprint, &'tcx mir::Body<'tcx>)>>,
+}
+
+impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
+    fn optimized_mir(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<&'tcx mir::Body<'tcx>> {
+        let Some(body) = self.session.lock().body(PrevBody::OptimizedMir, def) else {
+            self.rejected.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        // A decoded body can differ from the body this crate builds, as an async
+        // body did on grok-build.
+        let hash = short_value_fingerprint(
+            tcx.with_stable_hashing_context(|mut hcx| hash_result(&mut hcx, &body)),
+        );
+        if hash != expected {
+            self.mismatched.fetch_add(1, Ordering::Relaxed);
+            if tcx.sess.opts.unstable_opts.incremental_info {
+                let mut first = self.first_mismatch.lock();
+                if first.is_none() {
+                    *first = Some((def, expected, &*tcx.arena.alloc(body)));
+                }
+            }
+            return None;
+        }
+        self.decoded.fetch_add(1, Ordering::Relaxed);
+        Some(tcx.arena.alloc(body))
+    }
+
+    fn mir_for_ctfe(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<&'tcx mir::Body<'tcx>> {
+        let body = self.session.lock().body(PrevBody::MirForCtfe, def);
+        Some(tcx.arena.alloc(self.checked(tcx, "CTFE MIR", def, body, expected)?))
+    }
+
+    fn promoted_mir(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<&'tcx IndexVec<mir::Promoted, mir::Body<'tcx>>> {
+        let promoted = self.session.lock().promoted(def);
+        Some(tcx.arena.alloc(self.checked(tcx, "promoted MIR", def, promoted, expected)?))
+    }
+
+    fn explain_mismatch(&self, tcx: TyCtxt<'tcx>, def: LocalDefId, built: &mir::Body<'tcx>) {
+        let Some((first, expected, decoded)) = *self.first_mismatch.lock() else { return };
+        if first != def {
+            return;
+        }
+        let built_hash = short_value_fingerprint(
+            tcx.with_stable_hashing_context(|mut hcx| hash_result(&mut hcx, &built)),
+        );
+        eprintln!(
+            "[incremental] codegen: mismatch of {def:?}: the built body {} the dep graph",
+            if built_hash == expected { "matches" } else { "does not match" },
+        );
+        macro_rules! fields {
+            ($($field:ident),*) => {$(
+                let a: Fingerprint = tcx.with_stable_hashing_context(|mut hcx| {
+                    let mut hasher = StableHasher::new();
+                    decoded.$field.stable_hash(&mut hcx, &mut hasher);
+                    hasher.finish()
+                });
+                let b: Fingerprint = tcx.with_stable_hashing_context(|mut hcx| {
+                    let mut hasher = StableHasher::new();
+                    built.$field.stable_hash(&mut hcx, &mut hasher);
+                    hasher.finish()
+                });
+                if a != b {
+                    let (a, b) = (format!("{:#?}", decoded.$field), format!("{:#?}", built.$field));
+                    let line = a.lines().zip(b.lines()).find(|(x, y)| x != y);
+                    eprintln!(
+                        "[incremental] codegen: field {} differs, first lines {:?}",
+                        stringify!($field),
+                        line.map(|(x, y)| (x.trim().to_owned(), y.trim().to_owned())),
+                    );
+                }
+            )*};
+        }
+        fields!(
+            basic_blocks,
+            phase,
+            pass_count,
+            source,
+            source_scopes,
+            coroutine,
+            local_decls,
+            user_type_annotations,
+            arg_count,
+            spread_arg,
+            var_debug_info,
+            span,
+            required_consts,
+            mentioned_items,
+            is_polymorphic,
+            injection_phase,
+            tainted_by_errors,
+            coverage_early_info,
+            coverage_mir_info
+        );
+        // Debug output does not show a span's parent or context, and the hash reads both.
+        struct Spans(Vec<Span>);
+        impl<'tcx> mir::visit::Visitor<'tcx> for Spans {
+            fn visit_span(&mut self, span: Span) {
+                self.0.push(span);
+            }
+        }
+        let collect = |body: &mir::Body<'tcx>| {
+            let mut spans = Spans(Vec::new());
+            mir::visit::Visitor::visit_body(&mut spans, body);
+            spans.0
+        };
+        let (a, b) = (collect(decoded), collect(built));
+        eprintln!("[incremental] codegen: spans {} decoded, {} built", a.len(), b.len());
+        if let Some((x, y)) = a.iter().zip(&b).find(|(x, y)| x != y) {
+            eprintln!(
+                "[incremental] codegen: first span differs: decoded {:?} built {:?}",
+                x.data_untracked(),
+                y.data_untracked(),
+            );
+        }
+    }
+
+    fn report(&self) {
+        eprintln!(
+            "[incremental] codegen: decoded {} MIR bodies from metadata, {} rejected, {} mismatched",
+            self.decoded.load(Ordering::Relaxed),
+            self.rejected.load(Ordering::Relaxed),
+            self.mismatched.load(Ordering::Relaxed),
+        );
+        let [decoded, rejected, mismatched] = &self.const_bodies;
+        eprintln!(
+            "[incremental] codegen: decoded {} CTFE and promoted MIR values from metadata, {} rejected, {} mismatched",
+            decoded.load(Ordering::Relaxed),
+            rejected.load(Ordering::Relaxed),
+            mismatched.load(Ordering::Relaxed),
+        );
+    }
+}
+
+impl<'tcx> PrevMetadataMir<'tcx> {
+    /// Keeps a decoded value only when its hash is the one the dep graph recorded.
+    fn checked<T: StableHash>(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        what: &str,
+        def: LocalDefId,
+        value: Option<T>,
+        expected: Fingerprint,
+    ) -> Option<T> {
+        let [decoded, rejected, mismatched] = &self.const_bodies;
+        let Some(value) = value else {
+            rejected.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        let hash = short_value_fingerprint(
+            tcx.with_stable_hashing_context(|mut hcx| hash_result(&mut hcx, &value)),
+        );
+        if hash != expected {
+            let earlier = mismatched.fetch_add(1, Ordering::Relaxed);
+            if earlier == 0 && tcx.sess.opts.unstable_opts.incremental_info {
+                eprintln!("[incremental] codegen: mismatch of the {what} of {def:?}");
+            }
+            return None;
+        }
+        decoded.fetch_add(1, Ordering::Relaxed);
+        Some(value)
+    }
+}
+
+/// Provides the `prev_metadata_explain_mismatch` hook.
+pub(crate) fn prev_metadata_explain_mismatch<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+    built: &mir::Body<'tcx>,
+) {
+    if !tcx.sess.opts.unstable_opts.incremental_info {
+        return;
+    }
+    if let Some(Some(prev)) = tcx.prev_metadata.get() {
+        prev.explain_mismatch(tcx, def, built);
+    }
+}
+
+/// Provides the `prev_metadata_optimized_mir` hook.
+pub(crate) fn prev_metadata_optimized_mir<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+) -> Option<&'tcx mir::Body<'tcx>> {
+    let (prev, expected) = prev_metadata_for(tcx, DepKind::optimized_mir, def)?;
+    prev.optimized_mir(tcx, def, expected)
+}
+
+/// Provides the `prev_metadata_mir_for_ctfe` hook.
+pub(crate) fn prev_metadata_mir_for_ctfe<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+) -> Option<&'tcx mir::Body<'tcx>> {
+    let (prev, expected) = prev_metadata_for(tcx, DepKind::mir_for_ctfe, def)?;
+    prev.mir_for_ctfe(tcx, def, expected)
+}
+
+/// Provides the `prev_metadata_promoted_mir` hook.
+pub(crate) fn prev_metadata_promoted_mir<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+) -> Option<&'tcx IndexVec<mir::Promoted, mir::Body<'tcx>>> {
+    let (prev, expected) = prev_metadata_for(tcx, DepKind::promoted_mir, def)?;
+    prev.promoted_mir(tcx, def, expected)
+}
+
+/// The session's metadata and the recorded hash of `def`'s value of the query
+/// of `kind`.
+fn prev_metadata_for<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    kind: DepKind,
+    def: LocalDefId,
+) -> Option<(&'tcx dyn PrevMetadata<'tcx>, Fingerprint)> {
+    if !tcx.sess.opts.unstable_opts.incremental_rmeta_reuse {
+        return None;
+    }
+    // A provider runs for a green node only to rebuild a value that the query cache does not hold.
+    let node = DepNode::construct(tcx, kind, &def.to_def_id());
+    let expected = tcx.dep_graph.green_value_fingerprint(&node)?;
+    let prev = tcx.prev_metadata.get_or_init(|| {
+        let session = prev_metadata_path(tcx).and_then(|path| PrevSession::load(tcx, &path))?;
+        // Leaked, because `GlobalCtxt` must not own a value whose drop can see `'tcx`.
+        let prev: &'tcx PrevMetadataMir<'tcx> = Box::leak(Box::new(PrevMetadataMir {
+            session: Lock::new(session),
+            decoded: AtomicUsize::new(0),
+            rejected: AtomicUsize::new(0),
+            mismatched: AtomicUsize::new(0),
+            const_bodies: Default::default(),
+            first_mismatch: Lock::new(None),
+        }));
+        Some(prev as &'tcx dyn PrevMetadata<'tcx>)
+    });
+    Some(((*prev)?, expected))
 }
 
 /// The metadata work product of the incremental session, if there is one.

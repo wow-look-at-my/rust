@@ -123,11 +123,31 @@ build() {
 		printf '%s\t%s\t%s\t%s\n' "$config" "$mode" "$step" "$reuse" >> "${results%.tsv}.reuse.tsv"
 		echo "rmeta reuse $mode $step: $reuse (decoded, requested, green)"
 	fi
+	# An -Zincremental-info run prints the MIR bodies codegen took from the metadata: decoded, rejected by the decoder.
+	local codegen
+	codegen=$({ grep -oE 'codegen: decoded [0-9]+ MIR bodies from metadata, [0-9]+ rejected, [0-9]+ mismatched' "$log" || true; } | tr -d ',' | awk '{d += $3; r += $8; m += $10} END {printf "%d\t%d\t%d", d, r, m}')
+	if [[ $codegen != $'0\t0\t0' ]]; then
+		echo "codegen MIR from metadata $mode $step: $codegen (decoded, rejected, mismatched)"
+		{ grep -E '^\[incremental\] codegen: (mismatch of|field |spans |first span )' "$log" || true; } | sed -n 1,30p | cut -c1-600
+	fi
+	local consts
+	consts=$({ grep -oE 'codegen: decoded [0-9]+ CTFE and promoted MIR values from metadata, [0-9]+ rejected, [0-9]+ mismatched' "$log" || true; } | tr -d ',' | awk '{d += $3; r += $11; m += $13} END {printf "%d\t%d\t%d", d, r, m}')
+	if [[ $consts != $'0\t0\t0' ]]; then
+		echo "CTFE and promoted MIR from metadata $mode $step: $consts (decoded, rejected, mismatched)"
+	fi
 	# An -Zincremental-info run also prints the bytes each crate's dep graph spends on node heads, keys, values and edges.
 	graph=$({ grep -oE 'dep graph node bytes: total [0-9]+ heads [0-9]+ keys [0-9]+ values [0-9]+ edges [0-9]+' "$log" || true; } | awk '{t += $6; h += $8; k += $10; v += $12; e += $14} END {printf "%d\t%d\t%d\t%d\t%d", t, h, k, v, e}')
 	if [[ $graph != $'0\t0\t0\t0\t0' ]]; then
 		printf '%s\t%s\t%s\t%s\n' "$config" "$mode" "$step" "$graph" >> "${results%.tsv}.graph.tsv"
 		echo "dep graph bytes $mode $step: $graph (total, heads, keys, values, edges)"
+	fi
+	if [[ $step == cold ]]; then
+		echo "query cache bytes by query $mode $step (bytes, values, query):"
+		{ grep -oE '^\[incremental\] query cache bytes: [a-z_0-9]+ [0-9]+ [0-9]+' "$log" || true; } |
+			awk '{c[$5] += $6; b[$5] += $7} END {for (q in b) printf "%d\t%d\t%s\n", b[q], c[q], q}' | sort -rn | sed -n 1,25p
+		echo "dep graph bytes by kind $mode $step (bytes, nodes, kind):"
+		{ grep -E '^\[incremental\]  [A-Za-z_0-9]+ +\|' "$log" || true; } | tr -d '|%' |
+			awk '$2 != "Node" {n[$2] += $4; b[$2] += $6} END {for (k in b) printf "%d\t%d\t%s\n", b[k], n[k], k}' | sort -rn | sed -n 1,30p
 	fi
 	# An -Zincremental-info run prints what happened to each node, summed here over the crates this step compiled.
 	local seen=$target_root/$mode.fates-seen

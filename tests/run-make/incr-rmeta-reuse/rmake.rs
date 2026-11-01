@@ -9,7 +9,8 @@ fn build_lib(incr: &str, out: &str, reuse: bool) -> String {
     cmd.input("src/lib.rs").incremental(incr).out_dir(out).emit("metadata,link");
     cmd.arg("-Zincremental-info");
     if reuse {
-        cmd.arg("-Zincremental-rmeta-reuse");
+        // The query cache does not hold MIR that the metadata holds.
+        cmd.arg("-Zincremental-rmeta-reuse").arg("-Zincremental-verify-ich");
     }
     cmd.run().stderr_utf8()
 }
@@ -31,6 +32,10 @@ fn main() {
     rfs::copy("lib_v2.rs", "src/lib.rs");
     let stderr = build_lib("incr", "reuse", true);
     assert!(decoded_count(&stderr) > 0, "no MIR body was decoded:\n{stderr}");
+    // A body that codegen decodes must hash the same as the body in the dep graph.
+    for line in stderr.lines().filter(|l| l.contains("[incremental] codegen: decoded")) {
+        assert!(line.ends_with(" 0 mismatched"), "decoded MIR did not match its hash: {line}");
+    }
 
     build_lib("fresh-incr", "fresh", false);
     assert!(

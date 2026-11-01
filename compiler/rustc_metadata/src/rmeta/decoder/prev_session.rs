@@ -6,6 +6,7 @@ use std::num::NonZero;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hashes::Hash64;
 use rustc_hir::def_id::{DefId, DefIndex, DefPathHash, LocalDefId, StableCrateId};
+use rustc_hir::{HirId, ItemLocalId};
 use rustc_middle::mir;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::hygiene::ExpnId;
@@ -43,7 +44,7 @@ pub(crate) struct PrevSession<'tcx> {
     stable_crate_id: StableCrateId,
     def_path_hash_map: DefPathHashMapRef<'static>,
     alloc_decoding_state: AllocDecodingState,
-    hygiene_context: HygieneDecodeContext,
+    hygiene_context: RefCell<HygieneDecodeContext>,
     ty_cache: RefCell<FxHashMap<usize, Ty<'tcx>>>,
     /// Old file index to the matching file of this session, `None` when it has no match.
     files: RefCell<FxHashMap<u32, Option<Arc<MatchedFile>>>>,
@@ -51,6 +52,10 @@ pub(crate) struct PrevSession<'tcx> {
     scope: Cell<Option<ItemScope>>,
     rejected: Cell<bool>,
     poisoned: Cell<bool>,
+    /// Set when the item being decoded names an expansion that this session does not have.
+    expn_missing: Cell<bool>,
+    /// The HIR owner of the item being decoded, which HIR lowering gives as the parent of its spans.
+    span_parent: Cell<Option<LocalDefId>>,
     /// Set when a dependency changed since the session.
     remap: Option<ForeignRemap>,
     pub(crate) reused: Cell<usize>,
@@ -128,6 +133,8 @@ impl<'tcx> PrevSession<'tcx> {
             scope: Cell::new(None),
             rejected: Cell::new(false),
             poisoned: Cell::new(false),
+            expn_missing: Cell::new(false),
+            span_parent: Cell::new(None),
             remap: None,
             reused: Cell::new(0),
             attempted: Cell::new(0),
@@ -261,7 +268,53 @@ impl<'tcx> PrevSession<'tcx> {
             PrevBody::OptimizedMir => self.root.tables.optimized_mir.get(&self.blob, old),
             PrevBody::MirForCtfe => self.root.tables.mir_for_ctfe.get(&self.blob, old),
         }?;
-        self.with_item_scope(def_id, old, || self.decode_at(lazy.position))
+        let mut body: mir::Body<'tcx> =
+            self.with_item_scope(def_id, old, || self.decode_at(lazy.position))?;
+        let lint_roots = match kind {
+            PrevBody::OptimizedMir => {
+                self.root.tables.optimized_mir_lint_roots.get(&self.blob, old)
+            }
+            PrevBody::MirForCtfe => self.root.tables.mir_for_ctfe_lint_roots.get(&self.blob, old),
+        };
+        self.set_lint_roots(def_id, lint_roots, [&mut body]);
+        Some(body)
+    }
+
+    /// Metadata clears the lint root of each source scope. The crate wrote them to a side
+    /// table, and this puts them back, so that the bodies are the ones the crate built.
+    fn set_lint_roots<'a>(
+        &self,
+        def_id: LocalDefId,
+        lint_roots: Option<LazyArray<u32>>,
+        bodies: impl IntoIterator<Item = &'a mut mir::Body<'tcx>>,
+    ) where
+        'tcx: 'a,
+    {
+        let Some(lazy) = lint_roots else {
+            return;
+        };
+        let mut left = lazy.num_elems;
+        if left == 0 {
+            return;
+        }
+        let mut dcx = self.decoder(lazy.position.get());
+        let owner = self.tcx.local_def_id_to_hir_id(def_id).owner;
+        for body in bodies {
+            mir_lint_root_bodies_mut(body, &mut |body| {
+                for scope in body.source_scopes.iter_mut() {
+                    if left == 0 {
+                        return;
+                    }
+                    left -= 1;
+                    let local_id = u32::decode(&mut dcx);
+                    if local_id != u32::MAX {
+                        scope.local_data = mir::ClearCrossCrate::Set(mir::SourceScopeLocalData {
+                            lint_root: HirId { owner, local_id: ItemLocalId::from_u32(local_id) },
+                        });
+                    }
+                }
+            });
+        }
     }
 
     pub(crate) fn promoted(
@@ -270,7 +323,11 @@ impl<'tcx> PrevSession<'tcx> {
     ) -> Option<IndexVec<mir::Promoted, mir::Body<'tcx>>> {
         let old = self.old_index(def_id)?;
         let lazy = self.root.tables.promoted_mir.get(&self.blob, old)?;
-        self.with_item_scope(def_id, old, || self.decode_at(lazy.position))
+        let mut promoted: IndexVec<mir::Promoted, mir::Body<'tcx>> =
+            self.with_item_scope(def_id, old, || self.decode_at(lazy.position))?;
+        let lint_roots = self.root.tables.promoted_mir_lint_roots.get(&self.blob, old);
+        self.set_lint_roots(def_id, lint_roots, promoted.iter_mut());
+        Some(promoted)
     }
 
     fn with_item_scope<R>(
@@ -284,9 +341,25 @@ impl<'tcx> PrevSession<'tcx> {
             return None;
         }
         self.scope.set(self.item_scope(def_id, old));
+        // The stable hash of a span with a parent is relative to the parent.
+        let parent = self
+            .tcx
+            .sess
+            .opts
+            .incremental
+            .is_some()
+            .then(|| self.tcx.local_def_id_to_hir_id(def_id).owner.def_id);
+        self.span_parent.set(parent);
         self.rejected.set(false);
         let r = f();
         self.scope.set(None);
+        self.span_parent.set(None);
+        if self.expn_missing.replace(false) {
+            // The hygiene cache can hold contexts built on the root fallback.
+            *self.hygiene_context.borrow_mut() = Default::default();
+            self.rejected.set(false);
+            return None;
+        }
         if self.rejected.replace(false) || self.poisoned.get() {
             return None;
         }
@@ -372,6 +445,44 @@ impl<'tcx> PrevSession<'tcx> {
         }
         self.rejected.set(true);
         (start, start)
+    }
+}
+
+/// Visits a body and the coroutine drop bodies inside it, in the order of the
+/// `optimized_mir_lint_roots` table.
+pub(crate) fn mir_lint_root_bodies<'a, 'tcx>(
+    body: &'a mir::Body<'tcx>,
+    f: &mut impl FnMut(&'a mir::Body<'tcx>),
+) {
+    f(body);
+    if let Some(info) = &body.coroutine {
+        for inner in
+            [&info.coroutine_drop, &info.coroutine_drop_async, &info.coroutine_drop_proxy_async]
+                .into_iter()
+                .flatten()
+        {
+            mir_lint_root_bodies(inner, f);
+        }
+    }
+}
+
+/// The same walk as [`mir_lint_root_bodies`], for a body to change.
+fn mir_lint_root_bodies_mut<'tcx>(
+    body: &mut mir::Body<'tcx>,
+    f: &mut impl FnMut(&mut mir::Body<'tcx>),
+) {
+    f(body);
+    if let Some(info) = &mut body.coroutine {
+        for inner in [
+            &mut info.coroutine_drop,
+            &mut info.coroutine_drop_async,
+            &mut info.coroutine_drop_proxy_async,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            mir_lint_root_bodies_mut(inner, f);
+        }
     }
 }
 
@@ -525,7 +636,7 @@ impl<'a, 'tcx> SpanDecoder for PrevDecoder<'a, 'tcx> {
         let prev = self.prev;
         rustc_span::hygiene::decode_syntax_context(
             self,
-            &prev.hygiene_context,
+            &prev.hygiene_context.borrow(),
             |_, ctxt| match prev.root.syntax_contexts.get(&prev.blob, ctxt) {
                 Some(lazy) => prev.decode_at(lazy.position),
                 None => bug!("missing syntax context {ctxt:?} in the previous metadata"),
@@ -548,17 +659,16 @@ impl<'a, 'tcx> SpanDecoder for PrevDecoder<'a, 'tcx> {
                 .map(|lazy| prev.decode_at::<ExpnHash>(lazy.position));
             return match hash.and_then(ExpnId::from_hash) {
                 Some(expn_id) => expn_id,
-                // The hygiene cache may already hold contexts built on this fallback, so no
-                // later item of this file can be trusted either.
+                // An expansion hash holds its call site, so an edit above a macro call gives
+                // the expansion a new hash. Only this item is rejected.
                 None => {
-                    prev.poisoned.set(true);
+                    prev.expn_missing.set(true);
                     ExpnId::root()
                 }
             };
         }
         let Some(index) = prev.map_foreign_expn(cnum, index) else {
-            // The hygiene cache may already hold contexts built on this fallback.
-            prev.poisoned.set(true);
+            prev.expn_missing.set(true);
             return ExpnId::root();
         };
         let tcx = prev.tcx;
@@ -577,10 +687,13 @@ impl<'a, 'tcx> SpanDecoder for PrevDecoder<'a, 'tcx> {
         let (raw, ctxt) = self.decode_raw_span_with_ctxt();
         match raw {
             RawSpan::Dummy => DUMMY_SP.with_ctxt(ctxt),
-            RawSpan::Foreign(data) => data.span(),
+            // HIR lowering gives a span from a foreign file, such as a macro of a dependency, the same parent.
+            RawSpan::Foreign(data) => {
+                SpanData { parent: self.prev.span_parent.get(), ..data }.span()
+            }
             RawSpan::Local { file, lo, hi } => {
                 let (lo, hi) = self.prev.place_local_span(file, lo, hi);
-                SpanData { lo, hi, ctxt, parent: None }.span()
+                SpanData { lo, hi, ctxt, parent: self.prev.span_parent.get() }.span()
             }
         }
     }

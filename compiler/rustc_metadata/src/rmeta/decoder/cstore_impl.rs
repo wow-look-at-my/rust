@@ -787,6 +787,12 @@ fn provide_cstore_hooks(providers: &mut Providers) {
         let cstore = CStore::from_tcx(tcx);
         cstore.get_crate_data(cnum).expn_hash_to_expn_id(tcx, index_guess, hash)
     };
+    providers.hooks.prev_metadata_optimized_mir =
+        crate::rmeta::encoder::prev_metadata_optimized_mir;
+    providers.hooks.prev_metadata_mir_for_ctfe = crate::rmeta::encoder::prev_metadata_mir_for_ctfe;
+    providers.hooks.prev_metadata_promoted_mir = crate::rmeta::encoder::prev_metadata_promoted_mir;
+    providers.hooks.prev_metadata_explain_mismatch =
+        crate::rmeta::encoder::prev_metadata_explain_mismatch;
     providers.hooks.import_source_files = |tcx, cnum| {
         let cstore = CStore::from_tcx(tcx);
         let cdata = cstore.get_crate_data(cnum);
