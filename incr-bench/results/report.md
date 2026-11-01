@@ -1,5 +1,18 @@
 # Report: unpatched compiler against this branch
 
+## Current result
+
+CI run 41281131735 measured `props-sym-mirp-sys-csc-ws` at `228eb47`. Graph plus query cache is 92% of the object files on rustc and 42% on grok, at every step, against 658% and 306% unpatched. Every median ratio of the paired legs is 1.06x of unpatched or less. The section on that run below holds the tables.
+
+```
+-Zincremental-rmeta-reuse -Zincremental-keep-configs=1 -Zincremental-extern-items -Zincremental-extern-sysroot
+-Zincremental-mir-working-set
+-Zincremental-transparent=callee_facts,is_freeze_raw,is_unpin_raw,is_unsafe_unpin_raw,adt_sizedness_constraint,codegen_select_candidate
+-Zincremental-uncache=typeck_root,mir_for_ctfe,lookup_stability,lookup_deprecation_entry,lookup_const_stability,adt_def,impl_trait_header,eval_to_const_value_raw,eval_to_allocation_raw,symbol_name
+```
+
+## Run 49
+
 The unpatched compiler is `dc44e7f2c436`. The numbers are from CI run 41094926524 (run 49), which ran the unpatched compiler and the branch at `19951ad` in one run. Config `props` uses the flags below. `props-ctfe` adds `eval_to_const_value_raw,eval_to_allocation_raw` to `-Zincremental-uncache`. Each ratio is an incremental build divided by a non-incremental build of the same step in the same job. Each job gets its own runner, and the runners differ in speed.
 
 ```
@@ -191,6 +204,49 @@ CI run 41258066342 ran `props-sym-mirp` again, and `props-sym-mirp-ioi`, which l
 Without `items_of_instance` the query cache is 34 MB smaller on rustc and on grok. The mono collector walks every body again, so each edit takes about half as long again or more. `props-sym-mirp` is within 10% of unpatched on grok at every step for the second run in a row.
 
 The breakdown that each crate prints matches run 52 on rustc. The extra 12.4 MB of query cache thus sits in compiles that print no breakdown. The next run lists the largest query caches by crate to name them.
+
+CI run 41273513773 measured `82899dd`, which adds `-Zincremental-extern-sysroot`: a metadata lookup of an item of a sysroot crate reads the hash of that crate. A push cancelled its grok legs. It has no report file. The rustc paired leg gave these means over a couple of rounds:
+
+| step | unpatched s | props-sym-mirp s | props-sym-mirp-sys s |
+|---|---:|---:|---:|
+| cold | 695.8 | 689.2 | 692.0 |
+| edit:comment | 10.2 | 10.1 | 10.1 |
+| edit:body | 10.6 | 10.5 | 10.5 |
+| edit:new-item | 10.6 | 10.6 | 10.6 |
+| edit:signature | 10.8 | 10.6 | 10.6 |
+| revert | 10.7 | 10.7 | 10.6 |
+
+| config | dep-graph.bin MB | query-cache.bin MB | *.o MB | graph+cache % of *.o |
+|---|---:|---:|---:|---:|
+| unpatched | 2098.0 | 1073.7 | 481.7 | 658% |
+| props-sym-mirp | 402.1 | 133.1 | 481.4 | 111% |
+| props-sym-mirp-sys | 384.4 | 133.1 | 481.4 | 107% |
+
+The sysroot change takes 17.7 MB out of the rustc graph at no cost in time. Of the 384.4 MB graph, edges are 214.5 MB, keys 67.5 MB, values 60.1 MB and heads 42.3 MB. `optimized_mir` is 66.7 MB of the query cache, for the bodies that the metadata lacks.
+
+CI run 41281131735 measured `228eb47`. `props-sym-mirp-sys-csc` makes `codegen_select_candidate` transparent. `props-sym-mirp-sys-csc-ws` adds `-Zincremental-mir-working-set`: promotion skips `optimized_mir` and `promoted_mir`. The cache keeps the MIR that a session used, and a session with no previous graph writes none. Median ratios of the paired legs, against unpatched on the same runner:
+
+| step | grok csc | grok csc-ws | rustc csc | rustc csc-ws |
+|---|---:|---:|---:|---:|
+| cold | 0.97x | 0.98x | 0.99x | 1.01x |
+| edit:comment | 1.00x | 1.06x | 0.98x | 1.03x |
+| edit:body | 0.83x | 0.80x | 1.00x | 1.06x |
+| edit:new-item | 0.98x | 0.95x | 1.00x | 1.02x |
+| edit:signature | 0.85x | 0.98x | 1.00x | 1.00x |
+| revert | 0.89x | 0.90x | 0.97x | 1.00x |
+
+| workload | config | dep-graph.bin MB | query-cache.bin MB | *.o MB | graph+cache % of *.o |
+|---|---|---:|---:|---:|---:|
+| grok | unpatched | 3181.5 | 2255.7 | 1777.7 | 306% |
+| grok | props-sym-mirp-sys-csc | 611.0 | 273.1 | 1775.1 | 50% |
+| grok | props-sym-mirp-sys-csc-ws | 611.1 | 129.9 | 1775.1 | 42% |
+| rustc | unpatched | 2098.0 | 1073.7 | 481.7 | 658% |
+| rustc | props-sym-mirp-sys-csc | 379.6 | 139.9 | 481.4 | 108% |
+| rustc | props-sym-mirp-sys-csc-ws | 379.6 | 64.6 | 481.4 | 92% |
+
+The rows are the body edit. `props-sym-mirp-sys-csc-ws` meets both bounds on both workloads at every step, cold included: 92% of the object files on rustc and 42% on grok. That `props-sym-mirp-sys-csc-ws` is with every median ratio at 1.06x or less. The working set takes 75.3 MB out of the rustc query cache and 143.2 MB out of grok's. The MIR of a body leaves the cache once a session stops using it. An edit rebuilds only the bodies of its red codegen units that the last session did not use.
+
+`codegen_select_candidate` as a transparent kind saves 4.8 MB of rustc graph against run 60.
 
 Both configs are within 10% of unpatched on every rustc step, and so is every round of `props-ctfe`. The rounds agree to within 5% of each other, against up to 12% between the per-config legs of run 49. `props-ctfe` meets the size bound on both workloads, with graph plus cache at 39% of the object files on grok and 94% on rustc. It meets the time bound on rustc, and not on the grok comment edit. The per-config legs of run 50 rank the two configs the other way on the grok body edit: 0.31x for `props-ctfe`, 0.26x for `props`.
 
