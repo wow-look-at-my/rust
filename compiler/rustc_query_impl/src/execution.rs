@@ -4,6 +4,7 @@ use std::num::NonZero;
 use std::sync::Arc;
 
 use parking_lot::{Condvar, Mutex};
+use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::hash_table::Entry;
 use rustc_data_structures::{defer, outline, sharded, sync};
 use rustc_errors::FatalError;
@@ -477,7 +478,7 @@ fn execute_job_incr<'tcx, C: QueryCache>(
     let dep_graph_data =
         tcx.dep_graph.data().expect("should always be present in incremental mode");
 
-    if !query.eval_always {
+    if !query.anon && !query.eval_always {
         // The diagnostics for this query will be promoted to the current session during
         // `try_mark_green()`, so we can ignore them here.
         if let Some(ret) = start_query(job_id, false, || try {
@@ -500,6 +501,12 @@ fn execute_job_incr<'tcx, C: QueryCache>(
     let prof_timer = tcx.prof.query_provider();
 
     let (result, dep_node_index) = start_query(job_id, query.depth_limit, || {
+        if query.anon {
+            return dep_graph_data.with_anon_task_inner(tcx, query.dep_kind, || {
+                (query.invoke_provider_fn)(tcx, key)
+            });
+        }
+
         // Call the query provider.
         dep_graph_data.with_task(
             dep_node,
@@ -598,7 +605,7 @@ fn ensure_can_skip_execution<'tcx, C: QueryCache>(
     dep_node: DepNode,
 ) -> bool {
     // Queries with `eval_always` should never skip execution.
-    if query.eval_always {
+    if query.anon || query.eval_always {
         return false;
     }
 
@@ -613,7 +620,9 @@ fn ensure_can_skip_execution<'tcx, C: QueryCache>(
             false
         }
         Some((_, dep_node_index)) => {
-            tcx.dep_graph.read_index(dep_node_index);
+            if !query.global_input {
+                tcx.dep_graph.read_index(dep_node_index);
+            }
             tcx.prof.query_cache_hit(dep_node_index.into());
 
             // We can skip execution for this key if the
@@ -647,7 +656,12 @@ pub(super) fn execute_query_incr_inner<'tcx, C: QueryCache>(
     key: C::Key,
     mode: QueryMode,
 ) -> Option<C::Value> {
-    let dep_node = DepNode::construct(tcx, query.dep_kind, &key);
+    // An anon node takes its key from its reads, so the query key is never hashed.
+    let dep_node = if query.anon {
+        DepNode { kind: query.dep_kind, key_fingerprint: Fingerprint::ZERO.into() }
+    } else {
+        DepNode::construct(tcx, query.dep_kind, &key)
+    };
 
     // Check if query execution can be skipped, for `ensure_ok`.
     if let QueryMode::EnsureOk = mode
@@ -658,7 +672,9 @@ pub(super) fn execute_query_incr_inner<'tcx, C: QueryCache>(
 
     let (result, dep_node_index) =
         try_execute_query::<C, true>(query, tcx, span, key, Some(dep_node));
-    if let Some(dep_node_index) = dep_node_index {
+    if let Some(dep_node_index) = dep_node_index
+        && !query.global_input
+    {
         tcx.dep_graph.read_index(dep_node_index)
     }
     Some(result)

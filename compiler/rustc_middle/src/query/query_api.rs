@@ -16,12 +16,14 @@ macro_rules! define_query_api {
                 fn $name:ident($($K:tt)*) -> $V:ty
                 {
                     // Search for (QMODLIST) to find all occurrences of this query modifier list.
+                    anon: $anon:literal,
                     arena_cache: $arena_cache:literal,
                     cache_on_disk: $cache_on_disk:literal,
                     depth_limit: $depth_limit:literal,
                     desc: $desc:expr,
                     eval_always: $eval_always:literal,
                     feedable: $feedable:literal,
+                    global_input: $global_input:literal,
                     handle_cycle_error: $handle_cycle_error:literal,
                     no_force: $no_force:literal,
                     no_hash: $no_hash:literal,

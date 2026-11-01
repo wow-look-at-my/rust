@@ -36,7 +36,12 @@ fn round_trip(entries: &[(u32, DepNode, Fingerprint, Vec<u32>)], flush_before: &
     for (index, node, value, edges) in entries {
         let record = NodeRecord::decode(&mut d, prev_index, &nodes, &values);
         assert_eq!(record.index.as_u32(), *index);
-        assert_eq!(record.node, *node);
+        if node.kind.is_anon() {
+            assert_eq!(record.node.kind, node.kind);
+            assert_eq!(record.node.key_fingerprint, Fingerprint::ZERO.into());
+        } else {
+            assert_eq!(record.node, *node);
+        }
         assert_eq!(record.value_fingerprint, *value);
         assert_eq!(record.num_edges as usize, edges.len());
         let width = record.head.bytes_per_index();
@@ -82,6 +87,15 @@ fn round_trip_long_edge_list() {
     let edges: Vec<u32> = (0..(NodeHead::MAX_INLINE_LEN as u32 + 10)).collect();
     let entries = vec![(0, node(1, 1), fp(1), vec![]), (1, node(2, 2), fp(2), edges)];
     round_trip(&entries, &[]);
+}
+
+#[test]
+fn anon_key_is_not_stored() {
+    let trait_select = DepKind::TraitSelect.as_u16();
+    let red = DepKind::Red.as_u16();
+    let anon = round_trip(&[(0, node(trait_select, 7), Fingerprint::ZERO, vec![])], &[]);
+    let keyed = round_trip(&[(0, node(red, 7), Fingerprint::ZERO, vec![])], &[]);
+    assert_eq!(keyed - anon, size_of::<Fingerprint>(), "{anon} vs {keyed} bytes");
 }
 
 #[test]
