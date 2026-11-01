@@ -798,6 +798,19 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         // encode_def_path_table.
         let proc_macro_data = stat!("proc-macro-data", || self.encode_proc_macros());
 
+        // Another crate finds an item reachable when the item is a `NonGeneric` entry of the
+        // exported symbols that the root encodes.
+        if !self.is_proc_macro {
+            use rustc_middle::middle::exported_symbols::ExportedSymbol;
+            for &(symbol, _) in tcx.exported_non_generic_symbols(LOCAL_CRATE) {
+                if let ExportedSymbol::NonGeneric(def_id) = symbol
+                    && let Some(id) = def_id.as_local()
+                {
+                    self.fingerprint_entry(id, DepKind::is_reachable_non_generic, &true);
+                }
+            }
+        }
+
         for (id, fingerprint) in mem::take(&mut self.item_fingerprints) {
             // Zero means that the crate wrote no fingerprints.
             self.table_writer().item_fingerprint(id, fingerprint.max(1));

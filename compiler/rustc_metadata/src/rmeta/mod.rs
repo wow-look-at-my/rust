@@ -4,6 +4,7 @@ use std::num::NonZero;
 use std::rc::Rc;
 
 use decoder::LazyDecoder;
+pub use decoder::read_extern_item;
 pub(crate) use decoder::{CrateMetadata, CrateNumMap, MetadataBlob, TargetModifiers};
 use def_path_hash_map::DefPathHashMapRef;
 use encoder::EncodeContext;

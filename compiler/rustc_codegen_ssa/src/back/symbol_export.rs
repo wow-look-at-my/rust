@@ -188,6 +188,14 @@ fn is_reachable_non_generic_provider_local(tcx: TyCtxt<'_>, def_id: LocalDefId) 
 }
 
 fn is_reachable_non_generic_provider_extern(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
+    // The fingerprint of the item covers its reachability. A caller that reads other entries
+    // of the item then holds one edge for all of them.
+    if tcx.sess.opts.unstable_opts.incremental_extern_items && tcx.dep_graph.is_fully_enabled() {
+        rustc_metadata::read_extern_item(tcx, def_id);
+        return tcx
+            .dep_graph
+            .with_ignore(|| tcx.reachable_non_generics(def_id.krate).contains_key(&def_id));
+    }
     tcx.reachable_non_generics(def_id.krate).contains_key(&def_id)
 }
 

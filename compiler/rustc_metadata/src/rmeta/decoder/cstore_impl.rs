@@ -149,15 +149,10 @@ macro_rules! provide_one {
             // External query providers call `crate_hash` to register a dependency on the crate metadata.
             use rustc_middle::dep_graph::{DepKind, reads_extern_item_entry};
             if $tcx.dep_graph.is_fully_enabled() {
-                let opts = &$tcx.sess.opts.unstable_opts;
-                if opts.incremental_extern_items && reads_extern_item_entry(DepKind::$name) {
-                    let per_crate = opts.incremental_extern_sysroot
-                        && CStore::from_tcx($tcx).get_crate_data($def_id.krate).from_sysroot();
-                    if per_crate {
-                        $tcx.ensure_ok().crate_hash($def_id.krate);
-                    } else {
-                        $tcx.ensure_ok().extern_item_fingerprint($def_id);
-                    }
+                if $tcx.sess.opts.unstable_opts.incremental_extern_items
+                    && reads_extern_item_entry(DepKind::$name)
+                {
+                    read_extern_item($tcx, $def_id);
                 } else if DepKind::$name != DepKind::crate_hash {
                     $tcx.ensure_ok().crate_hash($def_id.krate);
                 }
@@ -169,6 +164,19 @@ macro_rules! provide_one {
             $compute
         }
     };
+}
+
+/// Under `-Zincremental-extern-items`, records that the current task read the metadata entries of
+/// `def_id`, an item of another crate. A sysroot crate changes only as a whole, so under
+/// `-Zincremental-extern-sysroot` the read of one of its items is a read of its hash.
+pub fn read_extern_item(tcx: TyCtxt<'_>, def_id: DefId) {
+    if tcx.sess.opts.unstable_opts.incremental_extern_sysroot
+        && CStore::from_tcx(tcx).get_crate_data(def_id.krate).from_sysroot()
+    {
+        tcx.ensure_ok().crate_hash(def_id.krate);
+    } else {
+        tcx.ensure_ok().extern_item_fingerprint(def_id);
+    }
 }
 
 macro_rules! provide {

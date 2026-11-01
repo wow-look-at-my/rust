@@ -82,6 +82,7 @@ pub fn reads_extern_item_entry(kind: DepKind) -> bool {
             | DepKind::cross_crate_inlinable
             | DepKind::is_mir_available
             | DepKind::is_doc_hidden
+            | DepKind::is_reachable_non_generic
     )
 }
 
