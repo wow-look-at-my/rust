@@ -31,17 +31,22 @@ pub(crate) fn encode_query_values<'tcx>(tcx: TyCtxt<'tcx>, encoder: &mut CacheEn
     for_each_query_vtable!(CACHE_ON_DISK, tcx, |query| {
         let start = encoder.position();
         let span_start = encoder.span_bytes();
+        let kinds_start = encoder.encoded_bytes();
         let count = encode_query_values_inner(tcx, query, encoder);
         if info {
             let spans = encoder.span_bytes() - span_start;
-            sizes.push((encoder.position() - start, count, query.name, spans));
+            let kinds = encoder.encoded_bytes() - kinds_start;
+            sizes.push((encoder.position() - start, count, query.name, spans, kinds));
         }
     });
     if info {
         // A type shorthand counts against the query that encodes the type first.
-        sizes.sort_unstable_by(|a, b| b.cmp(a));
-        for (bytes, count, name, spans) in sizes.into_iter().take(20).filter(|s| s.0 > 0) {
-            eprintln!("[incremental] query cache bytes: {name} {count} {bytes} {spans}");
+        sizes.sort_unstable_by(|a, b| (b.0, b.1, b.2).cmp(&(a.0, a.1, a.2)));
+        for (bytes, count, name, spans, k) in sizes.into_iter().take(20).filter(|s| s.0 > 0) {
+            eprintln!(
+                "[incremental] query cache bytes: {name} {count} {bytes} {spans} {} {} {} {}",
+                k.types, k.type_refs, k.def_ids, k.symbols
+            );
         }
         let (refs, ref_bytes) = encoder.shorthand_refs();
         eprintln!("[incremental] query cache shorthand refs: {refs} {ref_bytes}");

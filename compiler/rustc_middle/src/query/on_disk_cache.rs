@@ -64,15 +64,46 @@ const SPAN_KIND_MASK: u8 = 0b11;
 const SPAN_SAME_CTXT: u8 = 1 << 2;
 // The parent is the parent of the span before, and is not stored.
 const SPAN_SAME_PARENT: u8 = 1 << 3;
+// The high bits of a head that are not zero name an earlier span of the
+// value: its distance back in `PrevSpan::history`.
+const SPAN_REF_SHIFT: u32 = 4;
+const SPAN_FAR_REF: u8 = 0b1111;
+// A far reference costs a head and one leb128 byte. A larger distance costs more than most spans.
+const SPAN_MAX_REF: usize = 127;
 
-/// What a span can take from the span before it. The encoder and the decoder
+/// What a span can take from the spans before it. The encoder and the decoder
 /// see the spans of one value in the same order.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct PrevSpan {
     ctxt: Option<SyntaxContext>,
     parent: Option<Option<LocalDefId>>,
     /// The start of the span before, when its start was relative to `parent`.
     lo: Option<BytePos>,
+    /// The spans of the value so far. Only the last `SPAN_MAX_REF` matter.
+    history: Vec<Span>,
+}
+
+impl PrevSpan {
+    fn push(&mut self, span: Span) {
+        if self.history.len() >= 2 * SPAN_MAX_REF {
+            self.history.drain(..SPAN_MAX_REF);
+        }
+        self.history.push(span);
+    }
+
+    /// The distance back to the last span that equals `span`.
+    fn distance_to(&self, span: Span) -> Option<usize> {
+        self.history.iter().rev().take(SPAN_MAX_REF).position(|&s| s == span).map(|i| i + 1)
+    }
+
+    /// The state after a reference to `span`, which is the same for the encoder and the decoder.
+    fn after_ref(&mut self, span: Span) {
+        let data = span.data_untracked();
+        self.ctxt = Some(data.ctxt);
+        self.parent = Some(data.parent);
+        self.lo = Some(data.lo);
+        self.push(span);
+    }
 }
 
 const TAG_SYNTAX_CONTEXT: u8 = 0;
@@ -537,6 +568,8 @@ impl OnDiskCache {
                 span_bytes: 0,
                 shorthand_refs: 0,
                 shorthand_ref_bytes: 0,
+                kind_bytes: EncodedBytes::default(),
+                shorthand_depth: 0,
                 instance_shorthands: Default::default(),
                 prev_span: PrevSpan::default(),
                 prev_span_saved: Vec::new(),
@@ -828,6 +861,8 @@ impl OnDiskCache {
                 span_bytes: 0,
                 shorthand_refs: 0,
                 shorthand_ref_bytes: 0,
+                kind_bytes: EncodedBytes::default(),
+                shorthand_depth: 0,
                 instance_shorthands: Default::default(),
                 prev_span: PrevSpan::default(),
                 prev_span_saved: Vec::new(),
@@ -1282,7 +1317,18 @@ impl<'a, 'tcx> SpanDecoder for CacheDecoder<'a, 'tcx> {
 
     fn decode_span(&mut self) -> Span {
         let head = self.read_u8();
-        let prev = self.prev_span;
+        let distance = match head >> SPAN_REF_SHIFT {
+            0 => None,
+            SPAN_FAR_REF => Some(usize::decode(self)),
+            d => Some(usize::from(d)),
+        };
+        if let Some(distance) = distance {
+            let history = &self.prev_span.history;
+            let span = history[history.len() - distance];
+            self.prev_span.after_ref(span);
+            return span;
+        }
+        let prev = PrevSpan { history: Vec::new(), ..self.prev_span };
         let ctxt = if head & SPAN_SAME_CTXT != 0 {
             prev.ctxt.expect("span repeats the context of no earlier span")
         } else {
@@ -1332,9 +1378,13 @@ impl<'a, 'tcx> SpanDecoder for CacheDecoder<'a, 'tcx> {
         };
 
         let relative = matches!(kind, TAG_RELATIVE_SPAN | TAG_PREVIOUS_SPAN);
-        self.prev_span =
-            PrevSpan { ctxt: Some(ctxt), parent: Some(parent), lo: relative.then_some(lo) };
-        Span::new(lo, hi, ctxt, parent)
+        let span = Span::new(lo, hi, ctxt, parent);
+        let prev = &mut self.prev_span;
+        prev.ctxt = Some(ctxt);
+        prev.parent = Some(parent);
+        prev.lo = relative.then_some(lo);
+        prev.push(span);
+        span
     }
 
     fn decode_crate_num(&mut self) -> CrateNum {
@@ -1468,6 +1518,10 @@ pub struct CacheEncoder<'tcx> {
     /// The type and predicate shorthand references, and their bytes, for `-Zincremental-info`.
     shorthand_refs: usize,
     shorthand_ref_bytes: usize,
+    /// The bytes by what they encode, outside any type or predicate, for `-Zincremental-info`.
+    kind_bytes: EncodedBytes,
+    /// How many full type or predicate encodings hold the current position.
+    shorthand_depth: u32,
     instance_shorthands: FxHashMap<ty::Instance<'tcx>, usize>,
     prev_span: PrevSpan,
     /// The span state of each pool item under construction, outermost first.
@@ -1505,10 +1559,37 @@ impl<'tcx> fmt::Debug for CacheEncoder<'tcx> {
 
 // Starts a pool item.
 
+/// The bytes that a part of the query cache took, by what they encode. A span
+/// counts at any depth.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct EncodedBytes {
+    pub types: usize,
+    pub type_refs: usize,
+    pub def_ids: usize,
+    pub symbols: usize,
+}
+
+impl std::ops::Sub for EncodedBytes {
+    type Output = EncodedBytes;
+    fn sub(self, other: EncodedBytes) -> EncodedBytes {
+        EncodedBytes {
+            types: self.types - other.types,
+            type_refs: self.type_refs - other.type_refs,
+            def_ids: self.def_ids - other.def_ids,
+            symbols: self.symbols - other.symbols,
+        }
+    }
+}
+
 impl<'tcx> CacheEncoder<'tcx> {
     /// The bytes that spans took so far.
     pub fn span_bytes(&self) -> usize {
         self.span_bytes
+    }
+
+    /// The bytes so far, by what they encode.
+    pub fn encoded_bytes(&self) -> EncodedBytes {
+        self.kind_bytes
     }
 
     /// The type and predicate shorthand references so far, and their bytes.
@@ -1808,8 +1889,18 @@ impl<'tcx> SpanEncoder for CacheEncoder<'tcx> {
         }
 
         let start = self.position();
+        if let Some(distance) = self.prev_span.distance_to(span) {
+            let code = u8::try_from(distance).ok().filter(|&d| d < SPAN_FAR_REF);
+            self.emit_u8(code.unwrap_or(SPAN_FAR_REF) << SPAN_REF_SHIFT);
+            if code.is_none() {
+                self.emit_usize(distance);
+            }
+            self.prev_span.after_ref(span);
+            self.span_bytes += self.position() - start;
+            return;
+        }
         let span_data = span.data_untracked();
-        let prev = self.prev_span;
+        let prev = PrevSpan { history: Vec::new(), ..self.prev_span };
         let parent = span_data
             .parent
             .map(|parent| self.source_span_cache.lookup(parent, &self.tcx.untracked().source_span));
@@ -1875,16 +1966,20 @@ impl<'tcx> SpanEncoder for CacheEncoder<'tcx> {
                 (span_data.hi - span_data.lo).encode(self);
             }
         }
-        self.prev_span = PrevSpan {
-            ctxt: Some(span_data.ctxt),
-            parent: Some(span_data.parent),
-            lo: base.map(|_| span_data.lo),
-        };
+        let prev = &mut self.prev_span;
+        prev.ctxt = Some(span_data.ctxt);
+        prev.parent = Some(span_data.parent);
+        prev.lo = base.map(|_| span_data.lo);
+        prev.push(span);
         self.span_bytes += self.position().saturating_sub(start);
     }
 
     fn encode_symbol(&mut self, sym: Symbol) {
+        let start = self.position();
         self.encode_symbol_or_byte_symbol(sym.as_u32(), |this| this.emit_str(sym.as_str()));
+        if self.shorthand_depth == 0 {
+            self.kind_bytes.symbols += self.position() - start;
+        }
     }
 
     fn encode_byte_symbol(&mut self, byte_sym: ByteSymbol) {
@@ -1898,14 +1993,18 @@ impl<'tcx> SpanEncoder for CacheEncoder<'tcx> {
     }
 
     fn encode_def_id(&mut self, def_id: DefId) {
+        let start = self.position();
         let hash = self.tcx.def_path_hash(def_id);
         if self.inplace.is_some() {
             // An inplace entry outlives this session's footer, so it carries the hash itself.
             hash.encode(self);
-            return;
+        } else {
+            let (index, _) = self.def_path_hashes.insert_full(hash);
+            self.emit_usize(index);
         }
-        let (index, _) = self.def_path_hashes.insert_full(hash);
-        self.emit_usize(index);
+        if self.shorthand_depth == 0 {
+            self.kind_bytes.def_ids += self.position() - start;
+        }
     }
 
     fn encode_def_index(&mut self, _def_index: DefIndex) {
@@ -1935,6 +2034,20 @@ impl<'tcx> TyEncoder<'tcx> for CacheEncoder<'tcx> {
     fn note_shorthand_ref(&mut self, bytes: usize) {
         self.shorthand_refs += 1;
         self.shorthand_ref_bytes += bytes;
+        if self.shorthand_depth == 0 {
+            self.kind_bytes.type_refs += bytes;
+        }
+    }
+    #[inline]
+    fn enter_full_shorthand(&mut self) {
+        self.shorthand_depth += 1;
+    }
+    #[inline]
+    fn exit_full_shorthand(&mut self, bytes: usize) {
+        self.shorthand_depth -= 1;
+        if self.shorthand_depth == 0 {
+            self.kind_bytes.types += bytes;
+        }
     }
     /// A shorthand of the inplace format points into the pool, where a distance from the
     /// value stream means nothing.

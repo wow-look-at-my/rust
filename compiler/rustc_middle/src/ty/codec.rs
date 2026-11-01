@@ -41,6 +41,12 @@ pub trait TyEncoder<'tcx>: SpanEncoder {
     /// Counts a shorthand reference that took `bytes`, for an encoder that reports its sizes.
     fn note_shorthand_ref(&mut self, _bytes: usize) {}
 
+    /// Marks the start of a full type or predicate encoding, for an encoder that reports its sizes.
+    fn enter_full_shorthand(&mut self) {}
+
+    /// Marks the end of a full encoding that took `bytes`.
+    fn exit_full_shorthand(&mut self, _bytes: usize) {}
+
     /// Whether a shorthand reference is the distance back from the reference to the full
     /// encoding, rather than the position of the full encoding.
     fn relative_shorthands(&self) -> bool {
@@ -167,8 +173,10 @@ where
     }
 
     let start = encoder.position();
+    encoder.enter_full_shorthand();
     variant.encode(encoder);
     let len = encoder.position() - start;
+    encoder.exit_full_shorthand(len);
 
     // The shorthand encoding uses the same usize as the
     // discriminant, with an offset so they can't conflict.

@@ -158,9 +158,10 @@ build() {
 		echo "dep graph edges that a run copies $mode $step: $runs"
 	fi
 	if [[ $step == cold ]]; then
-		echo "query cache bytes by query $mode $step (bytes, values, span bytes, query):"
-		{ grep -oE '^\[incremental\] query cache bytes: [a-z_0-9]+ [0-9]+ [0-9]+( [0-9]+)?' "$log" || true; } |
-			awk '{c[$5] += $6; b[$5] += $7; s[$5] += $8} END {for (q in b) printf "%d\t%d\t%d\t%s\n", b[q], c[q], s[q], q}' | sort -rn | sed -n 1,25p
+		echo "query cache bytes by query $mode $step (bytes, values, span bytes, type bytes, type ref bytes, def id bytes, symbol bytes, query):"
+		{ grep -oE '^\[incremental\] query cache bytes: [a-z_0-9]+ [0-9]+ [0-9]+( [0-9]+)*' "$log" || true; } |
+			awk '{c[$5] += $6; b[$5] += $7; s[$5] += $8; t[$5] += $9; r[$5] += $10; d[$5] += $11; y[$5] += $12}
+				END {for (q in b) printf "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\n", b[q], c[q], s[q], t[q], r[q], d[q], y[q], q}' | sort -rn | sed -n 1,25p
 		echo "query cache sections $mode $step (values, side effects, allocs, hygiene, footer, entries, def paths, ctxts, expns):"
 		{ grep -oE '^\[incremental\] query cache sections: values [0-9]+ side-effects [0-9]+ allocs [0-9]+ hygiene [0-9]+ footer [0-9]+ entries [0-9]+ def-paths [0-9]+ ctxts [0-9]+ expns [0-9]+' "$log" || true; } |
 			awk '{for (i = 6; i <= 22; i += 2) s[i] += $i} END {printf "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", s[6], s[8], s[10], s[12], s[14], s[16], s[18], s[20], s[22]}'
