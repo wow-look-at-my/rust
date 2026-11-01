@@ -146,17 +146,18 @@ macro_rules! provide_one {
             let ($def_id, $other) = def_id_arg.into_args();
             assert!(!$def_id.is_local());
 
-            // External query providers call `crate_hash` in order to register a dependency
-            // on the crate metadata. The exception is `crate_hash` itself, which obviously
-            // doesn't need to do this (and can't, as it would cause a query cycle).
-            // With `-Zincremental-extern-items`, a lookup of one item's entries depends on that
-            // item's fingerprint, which depends on `crate_hash`.
+            // External query providers call `crate_hash` to register a dependency on the crate metadata.
             use rustc_middle::dep_graph::{DepKind, reads_extern_item_entry};
             if $tcx.dep_graph.is_fully_enabled() {
-                if $tcx.sess.opts.unstable_opts.incremental_extern_items
-                    && reads_extern_item_entry(DepKind::$name)
-                {
-                    $tcx.ensure_ok().extern_item_fingerprint($def_id);
+                let opts = &$tcx.sess.opts.unstable_opts;
+                if opts.incremental_extern_items && reads_extern_item_entry(DepKind::$name) {
+                    let per_crate = opts.incremental_extern_sysroot
+                        && CStore::from_tcx($tcx).get_crate_data($def_id.krate).from_sysroot();
+                    if per_crate {
+                        $tcx.ensure_ok().crate_hash($def_id.krate);
+                    } else {
+                        $tcx.ensure_ok().extern_item_fingerprint($def_id);
+                    }
                 } else if DepKind::$name != DepKind::crate_hash {
                     $tcx.ensure_ok().crate_hash($def_id.krate);
                 }

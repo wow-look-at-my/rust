@@ -143,6 +143,8 @@ pub(crate) struct CrateMetadata {
     private_dep: bool,
     /// The hash for the host proc macro. Used to support `-Z dual-proc-macro`.
     host_hash: Option<Svh>,
+    /// Every file of the crate is in the library directory of the sysroot.
+    from_sysroot: bool,
     /// The crate was used non-speculatively.
     used: bool,
 
@@ -2014,6 +2016,13 @@ impl CrateMetadata {
         // that does not copy any data. It just does some data verification.
         let def_path_hash_map = root.def_path_hash_map.decode(&blob);
 
+        let lib_dir = &tcx.sess.target_tlib_path.dir;
+        let lib_dir = std::fs::canonicalize(lib_dir).unwrap_or_else(|_| lib_dir.to_path_buf());
+        let from_sysroot = source.paths().next().is_some()
+            && source.paths().all(|path| {
+                std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()).starts_with(&lib_dir)
+            });
+
         let mut cdata = CrateMetadata {
             blob,
             root,
@@ -2031,6 +2040,7 @@ impl CrateMetadata {
             source: Arc::new(source),
             private_dep,
             host_hash,
+            from_sysroot,
             used: false,
             extern_crate: None,
             hygiene_context: Default::default(),
@@ -2076,6 +2086,10 @@ impl CrateMetadata {
 
     pub(crate) fn source(&self) -> &CrateSource {
         &*self.source
+    }
+
+    pub(crate) fn from_sysroot(&self) -> bool {
+        self.from_sysroot
     }
 
     pub(crate) fn dep_kind(&self) -> CrateDepKind {

@@ -2586,6 +2586,9 @@ options! {
     incremental_extern_items: bool = (false, parse_bool, [TRACKED],
         "write a fingerprint of each item into the crate metadata, and give each item of another \
         crate one dep node that its metadata lookups read (default: no)"),
+    incremental_extern_sysroot: bool = (false, parse_bool, [TRACKED],
+        "with `-Zincremental-extern-items`, make a metadata lookup of an item of a sysroot crate \
+        read the hash of that crate instead of the fingerprint of the item (default: no)"),
     incremental_ignore_spans: bool = (false, parse_bool, [TRACKED],
         "ignore spans during ICH computation -- used for testing (default: no)"),
     incremental_info: bool = (false, parse_bool, [UNTRACKED],
