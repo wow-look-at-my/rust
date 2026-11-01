@@ -796,6 +796,10 @@ impl Command {
                     envp as *const _,
                 );
 
+                // The fork-exec path runs a file the kernel cannot execute through /bin/sh, as execvp does.
+                if spawn_res == libc::ENOEXEC {
+                    return Ok(None);
+                }
                 let spawn_res = cvt_nz(spawn_res);
                 if let Err(ref e) = spawn_res
                     && e.raw_os_error() == Some(libc::ENOSYS)
@@ -840,6 +844,12 @@ impl Command {
 
             #[cfg(any(target_os = "nto", target_os = "qnx"))]
             let spawn_res = spawn_res?;
+
+            // posix_spawn has no shell fallback for a file the kernel cannot
+            // execute, such as a script.
+            if spawn_res == libc::ENOEXEC {
+                return Ok(None);
+            }
 
             cvt_nz(spawn_res)?;
             Ok(Some(p))

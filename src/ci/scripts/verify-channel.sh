@@ -31,6 +31,10 @@ case "${channel}" in
 esac
 
 branch="$(ciBaseBranch)"
+# The nightly branch of this fork is `master`.
+if [[ "${channel}" = "nightly" && "${branch}" = "master" ]]; then
+    branch="${channel_branch}"
+fi
 if [[ "${branch}" != "${channel_branch}" ]]; then
     echo "error: PRs changing the \`${channel}\` channel should be sent to the \
 \`${channel_branch}\` branch!"
