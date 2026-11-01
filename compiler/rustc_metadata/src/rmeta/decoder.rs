@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::{io, mem};
 
-pub(super) use cstore_impl::{provide, read_extern_item};
+pub(super) use cstore_impl::provide;
+pub use cstore_impl::read_extern_item;
 use rustc_ast as ast;
 use rustc_attr_ir::CanonicalSymbols;
 use rustc_attr_ir::diagnostic_items::DiagnosticItems;
