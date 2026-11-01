@@ -506,6 +506,8 @@ const FLAG_KEY_IS_REF: u8 = 1 << 1;
 const FLAG_VALUE_IS_REF: u8 = 1 << 2;
 /// The value fingerprint is `Fingerprint::ZERO` and is not stored.
 const FLAG_VALUE_IS_ZERO: u8 = 1 << 3;
+/// The node is anon. Its key is never looked up again, so it is not stored and decodes as zero.
+const FLAG_KEY_IS_ABSENT: u8 = 1 << 4;
 
 /// Keeps the low 64 bits of a result fingerprint. The graph stores only those
 /// bits.
@@ -513,8 +515,6 @@ const FLAG_VALUE_IS_ZERO: u8 = 1 << 3;
 pub fn short_value_fingerprint(fingerprint: Fingerprint) -> Fingerprint {
     Fingerprint::new(fingerprint.split().0, 0u64)
 }
-/// The node is anon. Its key is never looked up again, so it is not stored and decodes as zero.
-const FLAG_KEY_IS_ABSENT: u8 = 1 << 4;
 /// The node is the first of a block that one thread wrote. Edge back-references start again here.
 const FLAG_EDGES_RESTART: u8 = 1 << 5;
 /// The first half of the key is the first half of the key of an earlier node.
