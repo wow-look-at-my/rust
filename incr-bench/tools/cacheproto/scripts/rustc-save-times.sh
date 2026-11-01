@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # ignore-tidy-linelength Prints the wall time and rustc's own save-phase times
 # for syn after a comment edit, from -Ztime-passes.
+# promotion = persist_result_cache - serialize_result_cache.
+# Usage: rustc-save-times.sh RUSTC TARGET_DIR RUNS
 set -euo pipefail
 rustc_bin=$1
 target_dir=$2
