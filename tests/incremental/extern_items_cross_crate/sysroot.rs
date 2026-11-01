@@ -1,4 +1,4 @@
-// With `-Z incremental-extern-sysroot`, a lookup of an item of a sysroot crate reads the hash of that crate.
+// With `-Z incremental-extern-sysroot`, a lookup into a sysroot crate reads the crate hash.
 
 //@ aux-build:a.rs
 //@ revisions: rpass1 rpass2

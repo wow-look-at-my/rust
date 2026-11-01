@@ -1,4 +1,4 @@
-//! The query cache writes a span that repeats an earlier span of the same value as a back reference.
+//! A span that repeats an earlier span of its value is cached as a back reference.
 
 //@ revisions: rpass1 rpass2
 //@ compile-flags: -Ccodegen-units=1
