@@ -220,7 +220,9 @@ use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::mir::interpret::{AllocId, ErrorHandled, GlobalAlloc, Scalar};
 use rustc_middle::mir::visit::Visitor as MirVisitor;
 use rustc_middle::mir::{self, Body, Location, MentionedItem, traversal};
-use rustc_middle::mono::{CollectionMode, InstantiationMode, MonoItem, NormalizationErrorInMono};
+use rustc_middle::mono::{
+    CalleeFacts, CollectionMode, InstantiationMode, MonoItem, MonoItemUse, NormalizationErrorInMono,
+};
 use rustc_middle::query::TyCtxtAt;
 use rustc_middle::ty::adjustment::{CustomCoerceUnsized, PointerCoercion};
 use rustc_middle::ty::layout::ValidityRequirement;
@@ -366,6 +368,7 @@ fn collect_items_root<'tcx>(
     collect_items_rec(
         tcx,
         starting_item,
+        None,
         state,
         &mut recursion_depths,
         recursion_limit,
@@ -377,11 +380,13 @@ fn collect_items_root<'tcx>(
 /// post-monomorphization error is encountered during a collection step.
 ///
 /// `mode` determined whether we are scanning for [used items][CollectionMode::UsedItems]
-/// or [mentioned items][CollectionMode::MentionedItems].
-#[instrument(skip(tcx, state, recursion_depths, recursion_limit), level = "debug")]
+/// or [mentioned items][CollectionMode::MentionedItems]. `user` is the instance whose items of
+/// that mode hold `starting_item`, if one does, and gives back a span that the cache dropped.
+#[instrument(skip(tcx, user, state, recursion_depths, recursion_limit), level = "debug")]
 fn collect_items_rec<'tcx>(
     tcx: TyCtxt<'tcx>,
     starting_item: Spanned<MonoItem<'tcx>>,
+    user: Option<(Instance<'tcx>, CollectionMode)>,
     state: &SharedState<'tcx>,
     recursion_depths: &mut DefIdMap<usize>,
     recursion_limit: Limit,
@@ -390,6 +395,8 @@ fn collect_items_rec<'tcx>(
     let mut used_items = MonoItems::new();
     let mut mentioned_items = MonoItems::new();
     let recursion_depth_reset;
+    // Set when the items come from `items_of_instance`, which can drop their spans.
+    let mut items_user = None;
 
     // Post-monomorphization errors MVP
     //
@@ -426,6 +433,7 @@ fn collect_items_rec<'tcx>(
             // Statics always get evaluated (which is possible because they can't be generic), so for
             // `MentionedItems` collection there's nothing to do here.
             if mode == CollectionMode::UsedItems {
+                let span = use_span(tcx, starting_item, user);
                 let instance = Instance::mono(tcx, def_id);
 
                 // Sanity check whether this ended up being collected accidentally
@@ -435,7 +443,7 @@ fn collect_items_rec<'tcx>(
                 // Nested statics have no type.
                 if !nested {
                     let ty = instance.ty(tcx, ty::TypingEnv::fully_monomorphized());
-                    visit_drop_use(tcx, ty, true, starting_item.span, &mut used_items);
+                    visit_drop_use(tcx, ty, true, span, &mut used_items);
                 }
 
                 if let Ok(alloc) = tcx.eval_static_initializer(def_id) {
@@ -446,7 +454,7 @@ fn collect_items_rec<'tcx>(
 
                 if tcx.needs_thread_local_shim(def_id) {
                     used_items.push(respan(
-                        starting_item.span,
+                        span,
                         MonoItem::Fn(Instance {
                             def: InstanceKind::Shim(ShimKind::ThreadLocal(def_id)),
                             args: GenericArgs::empty(),
@@ -467,7 +475,7 @@ fn collect_items_rec<'tcx>(
             recursion_depth_reset = Some(check_recursion_limit(
                 tcx,
                 instance,
-                starting_item.span,
+                || use_span(tcx, starting_item, user),
                 recursion_depths,
                 recursion_limit,
             ));
@@ -482,14 +490,15 @@ fn collect_items_rec<'tcx>(
                 let def_span = tcx.def_span(def_id);
                 let def_path_str = tcx.def_path_str(def_id);
                 tcx.dcx().emit_fatal(RecursionLimit {
-                    span: starting_item.span,
+                    span: use_span(tcx, starting_item, user),
                     instance,
                     def_span,
                     def_path_str,
                 });
             };
-            used_items.extend(used.into_iter().copied());
-            mentioned_items.extend(mentioned.into_iter().copied());
+            used_items.extend(used.iter().map(|u| respan(u.span, u.item)));
+            mentioned_items.extend(mentioned.iter().map(|u| respan(u.span, u.item)));
+            items_user = Some((instance, mode));
         }
         MonoItem::GlobalAsm(item_id) => {
             assert!(
@@ -549,21 +558,20 @@ fn collect_items_rec<'tcx>(
         && starting_item.node.is_generic_fn()
         && starting_item.node.is_user_defined()
     {
+        let span = use_span(tcx, starting_item, user);
         match starting_item.node {
             MonoItem::Fn(instance) => tcx.dcx().emit_note(EncounteredErrorWhileInstantiating {
-                span: starting_item.span,
+                span,
                 kind: "fn",
                 instance,
             }),
             MonoItem::Static(def_id) => tcx.dcx().emit_note(EncounteredErrorWhileInstantiating {
-                span: starting_item.span,
+                span,
                 kind: "static",
                 instance: Instance::new_raw(def_id, GenericArgs::empty()),
             }),
             MonoItem::GlobalAsm(_) => {
-                tcx.dcx().emit_note(EncounteredErrorWhileInstantiatingGlobalAsm {
-                    span: starting_item.span,
-                })
+                tcx.dcx().emit_note(EncounteredErrorWhileInstantiatingGlobalAsm { span })
             }
         }
     }
@@ -597,6 +605,7 @@ fn collect_items_rec<'tcx>(
             collect_items_rec(
                 tcx,
                 used_item,
+                items_user,
                 state,
                 recursion_depths,
                 recursion_limit,
@@ -611,6 +620,7 @@ fn collect_items_rec<'tcx>(
         collect_items_rec(
             tcx,
             mentioned_item,
+            items_user,
             state,
             recursion_depths,
             recursion_limit,
@@ -655,7 +665,7 @@ fn check_normalization_error<'tcx>(
 fn check_recursion_limit<'tcx>(
     tcx: TyCtxt<'tcx>,
     instance: Instance<'tcx>,
-    span: Span,
+    span: impl FnOnce() -> Span,
     recursion_depths: &mut DefIdMap<usize>,
     recursion_limit: Limit,
 ) -> (DefId, usize) {
@@ -677,7 +687,7 @@ fn check_recursion_limit<'tcx>(
     if !recursion_limit.value_within_limit(adjusted_recursion_depth) {
         let def_span = tcx.def_span(def_id);
         let def_path_str = tcx.def_path_str(def_id);
-        tcx.dcx().emit_fatal(RecursionLimit { span, instance, def_span, def_path_str });
+        tcx.dcx().emit_fatal(RecursionLimit { span: span(), instance, def_span, def_path_str });
     }
 
     recursion_depths.insert(def_id, recursion_depth + 1);
@@ -1003,7 +1013,7 @@ fn visit_instance_use<'tcx>(
     if !tcx.should_codegen_locally(instance) {
         return;
     }
-    if let Some(intrinsic) = tcx.intrinsic(instance.def_id()) {
+    if let Some(intrinsic) = tcx.callee_facts(instance.def_id()).intrinsic {
         if let Some(_requirement) = ValidityRequirement::from_intrinsic(intrinsic.name) {
             // The intrinsics assert_inhabited, assert_zero_valid, and assert_mem_uninitialized_valid will
             // be lowered in codegen to nothing or a call to panic_nounwind. So if we encounter any
@@ -1078,15 +1088,14 @@ fn should_codegen_locally<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> 
     let Some(def_id) = instance.def.def_id_if_not_guaranteed_local_codegen() else {
         return true;
     };
+    let facts = tcx.callee_facts(def_id);
 
-    if tcx.is_foreign_item(def_id) {
+    if facts.is_foreign_item {
         // Foreign items are always linked against, there's no way of instantiating them.
         return false;
     }
 
-    if tcx.def_kind(def_id).has_codegen_attrs()
-        && matches!(tcx.codegen_fn_attrs(def_id).inline, InlineAttr::Force { .. })
-    {
+    if facts.force_inline {
         // `#[rustc_force_inline]` items should never be codegened. This should be caught by
         // the MIR validator.
         tcx.dcx().delayed_bug("attempt to codegen `#[rustc_force_inline]` item");
@@ -1097,19 +1106,19 @@ fn should_codegen_locally<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> 
         return true;
     }
 
-    if tcx.is_reachable_non_generic(def_id) || instance.upstream_monomorphization(tcx).is_some() {
+    if facts.reachable_non_generic || instance.upstream_monomorphization(tcx).is_some() {
         // We can link to the item in question, no instance needed in this crate.
         return false;
     }
 
-    if let DefKind::Static { .. } = tcx.def_kind(def_id) {
+    if facts.is_static {
         // We cannot monomorphize statics from upstream crates.
         return false;
     }
 
     // See comment in should_encode_mir in rustc_metadata for why we don't report
     // an error for constructors.
-    if !tcx.is_mir_available(def_id) && !matches!(tcx.def_kind(def_id), DefKind::Ctor(..)) {
+    if facts.missing_mir {
         tcx.dcx().emit_fatal(NoOptimizedMir {
             span: tcx.def_span(def_id),
             crate_name: tcx.crate_name(def_id.krate),
@@ -1118,6 +1127,27 @@ fn should_codegen_locally<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> 
     }
 
     true
+}
+
+fn callee_facts(tcx: TyCtxt<'_>, def_id: DefId) -> CalleeFacts {
+    let def_kind = tcx.def_kind(def_id);
+    let local = def_id.is_local();
+    CalleeFacts {
+        is_foreign_item: tcx.is_foreign_item(def_id),
+        force_inline: def_kind.has_codegen_attrs()
+            && matches!(tcx.codegen_fn_attrs(def_id).inline, InlineAttr::Force { .. }),
+        reachable_non_generic: !local && tcx.is_reachable_non_generic(def_id),
+        is_static: matches!(def_kind, DefKind::Static { .. }),
+        missing_mir: !local
+            && !tcx.is_mir_available(def_id)
+            && !matches!(def_kind, DefKind::Ctor(..)),
+        intrinsic: tcx.intrinsic(def_id),
+        extern_abi: matches!(
+            def_kind,
+            DefKind::Fn | DefKind::AssocFn | DefKind::Ctor(_, hir::def::CtorKind::Fn)
+        )
+        .then(|| tcx.fn_sig(def_id).skip_binder().abi()),
+    }
 }
 
 /// For a given pair of source and target type that occur in an unsizing coercion,
@@ -1337,8 +1367,18 @@ fn collect_items_of_instance<'tcx>(
     // normalization first.
     // We choose to emit the error outside to provide helpful diagnostics.
     check_normalization_error(tcx, instance, body)?;
-    tcx.ensure_ok().check_mono_item(instance);
+    crate::mono_checks::check_mono_item(tcx, instance, body);
+    Ok(collect_items_of_body(tcx, instance, body, mode))
+}
 
+/// The items that the normalized `body` of `instance` uses and mentions, without the mono-time
+/// checks of `collect_items_of_instance`.
+fn collect_items_of_body<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    instance: Instance<'tcx>,
+    body: &'tcx Body<'tcx>,
+    mode: CollectionMode,
+) -> (MonoItems<'tcx>, MonoItems<'tcx>) {
     // Naively, in "used" collection mode, all functions get added to *both* `used_items` and
     // `mentioned_items`. Mentioned items processing will then notice that they have already been
     // visited, but at that point each mentioned item has been monomorphized, added to the
@@ -1388,22 +1428,41 @@ fn collect_items_of_instance<'tcx>(
         }
     }
 
-    Ok((used_items, mentioned_items))
+    (used_items, mentioned_items)
 }
 
 fn items_of_instance<'tcx>(
     tcx: TyCtxt<'tcx>,
     (instance, mode): (Instance<'tcx>, CollectionMode),
-) -> Result<
-    (&'tcx [Spanned<MonoItem<'tcx>>], &'tcx [Spanned<MonoItem<'tcx>>]),
-    NormalizationErrorInMono,
-> {
+) -> Result<(&'tcx [MonoItemUse<'tcx>], &'tcx [MonoItemUse<'tcx>]), NormalizationErrorInMono> {
     let (used_items, mentioned_items) = collect_items_of_instance(tcx, instance, mode)?;
+    let uses = |items: MonoItems<'tcx>| {
+        items.into_iter().map(|item| MonoItemUse { item: item.node, span: item.span })
+    };
 
-    let used_items = tcx.arena.alloc_from_iter(used_items);
-    let mentioned_items = tcx.arena.alloc_from_iter(mentioned_items);
+    let used_items = tcx.arena.alloc_from_iter(uses(used_items));
+    let mentioned_items = tcx.arena.alloc_from_iter(uses(mentioned_items));
 
     Ok((used_items, mentioned_items))
+}
+
+/// The span of `item`, which a use from the query cache does not hold. `user` is the instance
+/// whose items of the given mode hold `item`.
+fn use_span<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    item: Spanned<MonoItem<'tcx>>,
+    user: Option<(Instance<'tcx>, CollectionMode)>,
+) -> Span {
+    if !item.span.is_dummy() {
+        return item.span;
+    }
+    let Some((instance, mode)) = user else { return item.span };
+    let body = tcx.instance_mir(instance.def);
+    if check_normalization_error(tcx, instance, body).is_err() {
+        return item.span;
+    }
+    let (used, mentioned) = collect_items_of_body(tcx, instance, body, mode);
+    used.into_iter().chain(mentioned).find(|u| u.node == item.node).map_or(item.span, |u| u.span)
 }
 
 /// `item` must be already monomorphized.
@@ -1960,5 +2019,6 @@ pub(crate) fn collect_crate_mono_items<'tcx>(
 
 pub(crate) fn provide(providers: &mut Providers) {
     providers.hooks.should_codegen_locally = should_codegen_locally;
+    providers.queries.callee_facts = callee_facts;
     providers.queries.items_of_instance = items_of_instance;
 }

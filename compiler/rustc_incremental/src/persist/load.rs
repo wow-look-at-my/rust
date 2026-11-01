@@ -151,10 +151,12 @@ pub fn load_query_result_cache(
     };
     match file_format::open_incremental_file(sess, &path) {
         Ok(OpenFile { mmap, start_pos }) => {
-            let cache = OnDiskCache::new(sess, mmap, start_pos).unwrap_or_else(|()| {
-                sess.dcx().emit_warn(diagnostics::CorruptFile { path: &path });
-                OnDiskCache::new_empty()
-            });
+            let values_path = query_values_path(incr_comp_session);
+            let cache =
+                OnDiskCache::new(sess, mmap, start_pos, &values_path).unwrap_or_else(|()| {
+                    sess.dcx().emit_warn(diagnostics::CorruptFile { path: &path });
+                    OnDiskCache::new_empty()
+                });
             Some(cache)
         }
         Err(OpenFileError::NotFoundOrHeaderMismatch | OpenFileError::IoError { .. }) => {
@@ -249,5 +251,8 @@ pub fn setup_dep_graph(
     sess.opts.dep_tracking_hash(false).encode(&mut encoder);
     global_inputs_hash.encode(&mut encoder);
 
-    (DepGraph::new(sess, prev_graph, prev_work_products, encoder), Some(incr_comp_session))
+    (
+        DepGraph::new(sess, prev_graph, prev_work_products, encoder, stable_crate_id),
+        Some(incr_comp_session),
+    )
 }

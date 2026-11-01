@@ -25,6 +25,8 @@ type collapseStats struct {
 	big int
 	// missing counts edges whose target index holds no node. Such a target is treated as kept.
 	missing int
+	// levels is the number of levels collapsePar built, and widest is the node count of the largest one.
+	levels, widest int
 }
 
 // collapse gives each kept node, as its edges, the kept nodes it reaches through chains of dropped nodes.

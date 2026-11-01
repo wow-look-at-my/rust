@@ -1,0 +1,8 @@
+[package]
+name = "app"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+syn = { path = "../syn", features = ["full", "extra-traits", "visit", "visit-mut", "fold"] }

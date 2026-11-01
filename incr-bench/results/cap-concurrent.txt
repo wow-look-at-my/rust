@@ -1,0 +1,16 @@
+== nocap (cap none): after round 0, 431746150 bytes, 6 crate dirs
+round 1 (c d): 6.5s, 431247662 bytes, 6 crate dirs | c: node fates: previous 445388 promoted 431162 rerun-green 14212 rerun-red 12 | d: node fates: previous 445388 promoted 431162 rerun-green 14212 rerun-red 12
+round 2 (e f): 6.7s, 430749380 bytes, 6 crate dirs | e: node fates: previous 445388 promoted 431162 rerun-green 14212 rerun-red 12 | f: node fates: previous 445388 promoted 431162 rerun-green 14212 rerun-red 12
+round 3 (a b): 7.1s, 430251278 bytes, 6 crate dirs | a: node fates: previous 445388 promoted 431162 rerun-green 14212 rerun-red 12 | b: node fates: previous 445388 promoted 431162 rerun-green 14212 rerun-red 12
+round 4 (c d): 6.7s, 430380849 bytes, 6 crate dirs | c: node fates: previous 455479 promoted 435194 rerun-green 14212 rerun-red 12 | d: node fates: previous 455479 promoted 435194 rerun-green 14212 rerun-red 12
+round 5 (e f): 6.8s, 430510023 bytes, 6 crate dirs | e: node fates: previous 455479 promoted 435194 rerun-green 14212 rerun-red 12 | f: node fates: previous 455479 promoted 435194 rerun-green 14212 rerun-red 12
+round 6 (a b): 6.5s, 430639397 bytes, 6 crate dirs | a: node fates: previous 455479 promoted 435194 rerun-green 14212 rerun-red 12 | b: node fates: previous 455479 promoted 435194 rerun-green 14212 rerun-red 12
+== cap (cap 215319698): after round 0, 143911727 bytes, 2 crate dirs
+round 1 (c d): 13.3s, 143914836 bytes, 2 crate dirs | c: node fates: previous 0 promoted 0 rerun-green 0 rerun-red 0 | d: node fates: previous 0 promoted 0 rerun-green 0 rerun-red 0
+round 2 (e f): 12.5s, 143911738 bytes, 2 crate dirs | e: node fates: previous 0 promoted 0 rerun-green 0 rerun-red 0 | f: node fates: previous 0 promoted 0 rerun-green 0 rerun-red 0
+round 3 (a b): 12.2s, 143919437 bytes, 2 crate dirs | a: node fates: previous 0 promoted 0 rerun-green 0 rerun-red 0 | b: node fates: previous 0 promoted 0 rerun-green 0 rerun-red 0
+round 4 (c d): 13.1s, 143914967 bytes, 2 crate dirs | c: node fates: previous 0 promoted 0 rerun-green 0 rerun-red 0 | d: node fates: previous 0 promoted 0 rerun-green 0 rerun-red 0
+round 5 (e f): 12.3s, 143911759 bytes, 2 crate dirs | e: node fates: previous 0 promoted 0 rerun-green 0 rerun-red 0 | f: node fates: previous 0 promoted 0 rerun-green 0 rerun-red 0
+round 6 (a b): 12.1s, 143919448 bytes, 2 crate dirs | a: node fates: previous 0 promoted 0 rerun-green 0 rerun-red 0 | b: node fates: previous 0 promoted 0 rerun-green 0 rerun-red 0
+uncapped size 430639397, cap 215319698
+

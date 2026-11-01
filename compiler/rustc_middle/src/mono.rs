@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::hash::Hash;
 
+use rustc_abi::ExternAbi;
 use rustc_attr_ir::{InlineAttr, Linkage};
 use rustc_data_structures::base_n::{BaseNString, CASE_INSENSITIVE, ToBaseN};
 use rustc_data_structures::fingerprint::Fingerprint;
@@ -14,14 +15,16 @@ use rustc_hashes::Hash128;
 use rustc_hir::ItemId;
 use rustc_hir::def_id::{CrateNum, DefId, DefIdSet, LOCAL_CRATE};
 use rustc_macros::{StableHash, TyDecodable, TyEncodable};
+use rustc_serialize::{Decodable, Encodable};
 use rustc_session::config::OptLevel;
-use rustc_span::{OrdSpan, Span, Symbol};
+use rustc_span::{DUMMY_SP, OrdSpan, Span, Symbol};
 use rustc_target::spec::SymbolVisibility;
 use tracing::debug;
 
 use crate::dep_graph::dep_node::{make_compile_codegen_unit, make_compile_mono_item};
 use crate::dep_graph::{DepNode, WorkProduct, WorkProductId};
 use crate::middle::codegen_fn_attrs::CodegenFnAttrFlags;
+use crate::ty::codec::{TyDecoder, TyEncoder};
 use crate::ty::{self, GenericArgs, Instance, InstanceKind, ShimKind, SymbolName, Ty, TyCtxt};
 
 /// Describes how a monomorphization will be instantiated in object files.
@@ -52,11 +55,49 @@ pub enum InstantiationMode {
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash, StableHash, TyEncodable, TyDecodable)]
 pub struct NormalizationErrorInMono;
 
+/// What the collector reads about each callee of a collected body. One query holds all of it,
+/// so a collected body depends on one node per callee, not on each of these queries for each
+/// callee.
+#[derive(Clone, Copy, Debug, StableHash)]
+pub struct CalleeFacts {
+    pub is_foreign_item: bool,
+    /// The item has `#[rustc_force_inline]`.
+    pub force_inline: bool,
+    /// An item of another crate that this crate links to. Always false for a local item.
+    pub reachable_non_generic: bool,
+    pub is_static: bool,
+    /// An item of another crate with no MIR that is not a constructor. Always false for a local item.
+    pub missing_mir: bool,
+    pub intrinsic: Option<ty::IntrinsicDef>,
+    /// The ABI of a function item or a tuple constructor. `None` for any other item.
+    pub extern_abi: Option<ExternAbi>,
+}
+
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash, StableHash, TyEncodable, TyDecodable)]
 pub enum MonoItem<'tcx> {
     Fn(Instance<'tcx>),
     Static(DefId),
     GlobalAsm(ItemId),
+}
+
+/// A mono item that an instance uses, and the span of the use.
+#[derive(Clone, Copy, Debug, StableHash)]
+pub struct MonoItemUse<'tcx> {
+    pub item: MonoItem<'tcx>,
+    pub span: Span,
+}
+
+// Only a diagnostic reads the span, and the collector finds it again from the user.
+impl<'tcx, E: TyEncoder<'tcx>> Encodable<E> for MonoItemUse<'tcx> {
+    fn encode(&self, e: &mut E) {
+        self.item.encode(e);
+    }
+}
+
+impl<'tcx, D: TyDecoder<'tcx>> Decodable<D> for MonoItemUse<'tcx> {
+    fn decode(d: &mut D) -> Self {
+        MonoItemUse { item: MonoItem::decode(d), span: DUMMY_SP }
+    }
 }
 
 fn opt_incr_drop_glue_mode<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> InstantiationMode {
@@ -105,7 +146,7 @@ impl<'tcx> MonoItem<'tcx> {
     // change NON_INCR_MIN_CGU_SIZE as well.
     pub fn size_estimate(&self, tcx: TyCtxt<'tcx>) -> usize {
         match *self {
-            MonoItem::Fn(instance) => tcx.size_estimate(instance),
+            MonoItem::Fn(instance) => tcx.size_estimate(instance.def),
             // Conservatively estimate the size of a static declaration or
             // assembly item to be 1.
             MonoItem::Static(_) | MonoItem::GlobalAsm(_) => 1,

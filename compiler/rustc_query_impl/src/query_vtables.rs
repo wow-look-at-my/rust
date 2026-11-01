@@ -141,8 +141,11 @@ macro_rules! define_queries {
                     }
                 }
 
-                pub(crate) fn make_query_vtable<'tcx>(incremental: bool, track_present: bool)
-                    -> QueryVTable<'tcx, rustc_middle::queries::$name::Cache<'tcx>>
+                pub(crate) fn make_query_vtable<'tcx>(
+                    incremental: bool,
+                    track_present: bool,
+                    uncache: &[String],
+                ) -> QueryVTable<'tcx, rustc_middle::queries::$name::Cache<'tcx>>
                 {
                     use rustc_middle::queries::$name::Value;
                     QueryVTable {
@@ -159,7 +162,8 @@ macro_rules! define_queries {
                         } else {
                             QueryCache::without_track_present()
                         },
-                        cache_on_disk_local: $cache_on_disk,
+                        cache_on_disk_local: $cache_on_disk
+                            && !uncache.iter().any(|n| n == stringify!($name)),
                         separate_provide_extern: $separate_provide_extern,
 
                         invoke_provider_fn: self::invoke_provider_fn::__rust_begin_short_backtrace,
@@ -222,15 +226,26 @@ macro_rules! define_queries {
             }
         )*
 
-        pub(crate) fn make_query_vtables<'tcx>(incremental: bool, track_present: bool)
-            -> rustc_middle::queries::QueryVTables<'tcx>
-        {
+        pub(crate) fn make_query_vtables<'tcx>(
+            incremental: bool,
+            track_present: bool,
+            uncache: &[String],
+        ) -> rustc_middle::queries::QueryVTables<'tcx> {
             rustc_middle::queries::QueryVTables {
                 $(
-                    $name: crate::query_vtables::$name::make_query_vtable(incremental, track_present),
+                    $name: crate::query_vtables::$name::make_query_vtable(
+                        incremental,
+                        track_present,
+                        uncache,
+                    ),
                 )*
             }
         }
+
+        /// Each query name, paired with whether `-Zincremental-uncache` can drop its disk cache.
+        pub(crate) const QUERY_UNCACHEABLE: &[(&str, bool)] = &[
+            $( (stringify!($name), $cache_on_disk && !$feedable), )*
+        ];
 
         /// Given a filter condition (e.g. `ALL` or `CACHE_ON_DISK`), a `tcx`,
         /// and a closure expression that accepts `&QueryVTable`, this macro

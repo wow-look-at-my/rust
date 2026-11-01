@@ -101,3 +101,4 @@ top 20 query kinds by cached bytes:
   codegen_fn_attrs                                 36538 values |      882252 B   0.2% |    24.1 B/value
   adt_def                                           3567 values |      711379 B   0.1% |   199.4 B/value
   reachable_set                                        1 values |      625418 B   0.1% | 625418.0 B/value
+resources xai_grok_shell-1yymvei0n623d/dep-graph.bin: wall 13.3s, cpu 32.5s, peak RssAnon 550 MB

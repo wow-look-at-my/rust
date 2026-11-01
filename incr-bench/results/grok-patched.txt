@@ -1,0 +1,4 @@
+patched    cold             1801.4s graph=2.047GB qcache=1.865GB objs=1.771GB total=6.0G dirs=118 sessions=118
+patched    edit:comment      353.1s graph=2.047GB qcache=1.830GB objs=1.771GB total=5.9G dirs=118 sessions=118
+patched    edit:new-item     332.6s graph=2.048GB qcache=1.831GB objs=1.771GB total=5.9G dirs=118 sessions=118
+# -j3 on a loaded box; the baseline ran at -j4. The revert step died: disk full.
