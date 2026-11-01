@@ -8,8 +8,8 @@ use rustc_middle::dep_graph::{
 use rustc_middle::query::erase::{Erasable, Erased};
 use rustc_middle::query::on_disk_cache::{CacheDecoder, CacheEncoder};
 use rustc_middle::query::{QueryCache, QueryState, QueryVTable, erase};
-use rustc_middle::ty::TyCtxt;
 use rustc_middle::ty::codec::TyEncoder;
+use rustc_middle::ty::{InMetadata, TyCtxt};
 use rustc_middle::verify_ich::incremental_verify_ich;
 use rustc_serialize::{Decodable, Encodable};
 use rustc_span::bug;
@@ -18,6 +18,13 @@ use crate::query_vtables::for_each_query_vtable;
 
 fn all_inactive<'tcx, K>(state: &QueryState<'tcx, K>) -> bool {
     state.active.lock_shards().all(|shard| shard.is_empty())
+}
+
+/// Under `-Z incremental-mir-working-set`, the cache keeps the MIR of a body only while sessions
+/// use it. A codegen unit that stays green asks for no MIR, so its bodies leave the cache.
+fn is_mir_working_set_kind(tcx: TyCtxt<'_>, kind: DepKind) -> bool {
+    tcx.sess.opts.unstable_opts.incremental_mir_working_set
+        && (kind == DepKind::optimized_mir || kind == DepKind::promoted_mir)
 }
 
 pub(crate) fn encode_query_values<'tcx>(tcx: TyCtxt<'tcx>, encoder: &mut CacheEncoder<'tcx>) {
@@ -30,17 +37,26 @@ pub(crate) fn encode_query_values<'tcx>(tcx: TyCtxt<'tcx>, encoder: &mut CacheEn
     let mut sizes = Vec::new();
     for_each_query_vtable!(CACHE_ON_DISK, tcx, |query| {
         let start = encoder.position();
+        let span_start = encoder.span_bytes();
+        let kinds_start = encoder.encoded_bytes();
         let count = encode_query_values_inner(tcx, query, encoder);
         if info {
-            sizes.push((encoder.position() - start, count, query.name));
+            let spans = encoder.span_bytes() - span_start;
+            let kinds = encoder.encoded_bytes() - kinds_start;
+            sizes.push((encoder.position() - start, count, query.name, spans, kinds));
         }
     });
     if info {
         // A type shorthand counts against the query that encodes the type first.
-        sizes.sort_unstable_by(|a, b| b.cmp(a));
-        for (bytes, count, name) in sizes.into_iter().take(20).filter(|s| s.0 > 0) {
-            eprintln!("[incremental] query cache bytes: {name} {count} {bytes}");
+        sizes.sort_unstable_by(|a, b| (b.0, b.1, b.2).cmp(&(a.0, a.1, a.2)));
+        for (bytes, count, name, spans, k) in sizes.into_iter().take(20).filter(|s| s.0 > 0) {
+            eprintln!(
+                "[incremental] query cache bytes: {name} {count} {bytes} {spans} {} {} {} {}",
+                k.types, k.type_refs, k.def_ids, k.symbols
+            );
         }
+        let (refs, ref_bytes) = encoder.shorthand_refs();
+        eprintln!("[incremental] query cache shorthand refs: {refs} {ref_bytes}");
     }
 }
 
@@ -53,25 +69,47 @@ where
     C: QueryCache<Value = Erased<V>>,
     V: Erasable + Encodable<CacheEncoder<'tcx>>,
 {
-    let mut count = 0;
     let _timer = tcx.prof.generic_activity_with_arg("encode_query_results_for", query.name);
 
     assert!(all_inactive(&query.state));
-    let in_metadata = tcx.mir_in_metadata.get().and_then(|sets| sets.for_kind(query.dep_kind));
+    // The filter below hashes a dep node for each entry. A kind that writes nothing needs none.
+    if !query.cache_on_disk_local {
+        return 0;
+    }
+    // A session with no previous graph uses every body, so its use predicts no edit.
+    if is_mir_working_set_kind(tcx, query.dep_kind)
+        && tcx.dep_graph.data().is_some_and(|data| data.session_count() == 0)
+    {
+        return 0;
+    }
+    let in_metadata = tcx.in_metadata.get().and_then(|sets| sets.for_kind(query.dep_kind));
+    // A session that copies the metadata holds every value that it decoded
+    // from it.
+    let prev = match tcx.prev_metadata.get() {
+        Some(&Some(prev)) if InMetadata::holds_kind(query.dep_kind) => Some(prev),
+        _ => None,
+    };
+    let mut values = Vec::new();
     query.cache.for_each(&mut |key, value, dep_node| {
-        if let Some(in_metadata) = in_metadata
+        if !query.will_cache_on_disk_for_key(*key) {
+            return;
+        }
+        if (in_metadata.is_some() || prev.is_some())
             && let Some(def_id) = DepNode::construct(tcx, query.dep_kind, key).extract_def_id(tcx)
             && let Some(def_id) = def_id.as_local()
-            && in_metadata.contains(&def_id)
+            && (in_metadata.is_some_and(|set| set.contains(&def_id))
+                || prev.is_some_and(|prev| prev.decoded(query.dep_kind, def_id)))
         {
             return;
         }
-        if query.will_cache_on_disk_for_key(*key) {
-            encoder.encode_query_value::<V>(dep_node, &erase::restore_val::<V>(*value));
-            count += 1;
-        }
+        values.push((dep_node, *value));
     });
-    count
+    // In node order, the index stores each node as a small step from the one before.
+    values.sort_unstable_by_key(|&(dep_node, _)| dep_node.as_u32());
+    for &(dep_node, value) in &values {
+        encoder.encode_query_value::<V>(dep_node, &erase::restore_val::<V>(value));
+    }
+    values.len()
 }
 
 pub(crate) fn verify_query_key_hashes<'tcx>(tcx: TyCtxt<'tcx>) {
@@ -143,6 +181,11 @@ pub(crate) fn promote_from_disk_inner<'tcx, C: QueryCache>(
 ) {
     debug_assert!(tcx.dep_graph.is_green(&dep_node));
 
+    // Promotion loads a value that this session did not use.
+    if is_mir_working_set_kind(tcx, query.dep_kind) {
+        return;
+    }
+
     let key = C::Key::try_recover_key(tcx, &dep_node).unwrap_or_else(|| {
         panic!(
             "Failed to recover key for {dep_node:?} with key fingerprint {}",
@@ -175,13 +218,10 @@ pub(crate) fn promote_from_disk_inner<'tcx, C: QueryCache>(
         if tcx.sess.opts.unstable_opts.incremental_uncache.is_some() {
             return;
         }
-        // Under `-Z incremental-rmeta-reuse` the metadata holds some MIR in place of the query
-        // cache.
+        // Under `-Z incremental-rmeta-reuse` the metadata holds some MIR, types and signatures
+        // in place of the query cache.
         if tcx.sess.opts.unstable_opts.incremental_rmeta_reuse
-            && matches!(
-                query.dep_kind,
-                DepKind::optimized_mir | DepKind::mir_for_ctfe | DepKind::promoted_mir
-            )
+            && InMetadata::holds_kind(query.dep_kind)
         {
             return;
         }

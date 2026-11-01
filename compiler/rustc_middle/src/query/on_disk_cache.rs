@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::{fmt, mem};
 
+use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::flock;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexSet};
 use rustc_data_structures::memmap::Mmap;
@@ -20,38 +21,90 @@ use rustc_serialize::opaque::{FileEncodeResult, FileEncoder, IntEncodedWithFixed
 use rustc_serialize::{ContextOrd, Decodable, Decoder, Encodable, Encoder};
 use rustc_session::Session;
 use rustc_span::hygiene::{
-    ExpnId, HygieneDecodeContext, HygieneEncodeContext, SyntaxContext, SyntaxContextKey,
+    ExpnId, ExpnKind, HygieneDecodeContext, HygieneEncodeContext, SyntaxContext, SyntaxContextKey,
 };
 use rustc_span::{
     BlobDecoder, BytePos, ByteSymbol, CachingSourceMapView, ExpnData, ExpnHash, RelativeBytePos,
-    SourceFile, Span, SpanDecoder, SpanEncoder, Spanned, StableSourceFileId, Symbol, bug,
+    SourceFile, Span, SpanDecoder, SpanEncoder, StableSourceFileId, Symbol, bug,
 };
 
 use crate::dep_graph::{DepNodeIndex, QuerySideEffect, SerializedDepNodeIndex};
 use crate::ich::SourceSpanCache;
 use crate::mir::interpret::{AllocDecodingSession, AllocDecodingState};
 use crate::mir::{self, interpret};
-use crate::mono::MonoItem;
+use crate::mono::MonoItemUse;
 use crate::ty::codec::{
     RefDecodable, SHORTHAND_OFFSET, TyDecoder, TyEncoder, forward_all_decoder_methods_to,
 };
 use crate::ty::{self, Ty, TyCtxt};
+
+#[cfg(test)]
+mod tests;
 
 const TAG_FILE_FOOTER: u128 = 0xC0FFEE_C0FFEE_C0FFEE_C0FFEE_C0FFEE;
 /// The footer of a session file whose values live in the shared values and pool files.
 const TAG_FILE_FOOTER_INPLACE: u128 = 0xC0FFEE_C0FFEE_C0FFEE_C0FFEE_1F1AC2;
 
 /// The first bytes of a values file and of a pool file. An 8-byte id follows each.
-const VALUES_MAGIC: &[u8; 8] = b"RSQVALS2";
-const POOL_MAGIC: &[u8; 8] = b"RSQPOOL2";
+const VALUES_MAGIC: &[u8; 8] = b"RSQVALS3";
+const POOL_MAGIC: &[u8; 8] = b"RSQPOOL3";
 const HEADER_LEN: usize = 16;
 const POOL_FILENAME: &str = "query-pool.bin";
 
-// A normal span encoded with both location information and a `SyntaxContext`
+// A span starts with a head byte. `SPAN_KIND_MASK` picks its kind out of it.
 const TAG_FULL_SPAN: u8 = 0;
 // A partial span with no location information, encoded only with a `SyntaxContext`
 const TAG_PARTIAL_SPAN: u8 = 1;
+// The start is an offset from the start of the parent.
 const TAG_RELATIVE_SPAN: u8 = 2;
+// The start is an offset from the start of the span before, which has the same parent.
+const TAG_PREVIOUS_SPAN: u8 = 3;
+const SPAN_KIND_MASK: u8 = 0b11;
+// The context is the context of the span before, and is not stored.
+const SPAN_SAME_CTXT: u8 = 1 << 2;
+// The parent is the parent of the span before, and is not stored.
+const SPAN_SAME_PARENT: u8 = 1 << 3;
+// The high bits of a head that are not zero name an earlier span of the
+// value: its distance back in `PrevSpan::history`.
+const SPAN_REF_SHIFT: u32 = 4;
+const SPAN_FAR_REF: u8 = 0b1111;
+// A far reference costs a head and one leb128 byte. A larger distance costs more than most spans.
+const SPAN_MAX_REF: usize = 127;
+
+/// What a span can take from the spans before it. The encoder and the decoder
+/// see the spans of one value in the same order.
+#[derive(Clone, Default)]
+struct PrevSpan {
+    ctxt: Option<SyntaxContext>,
+    parent: Option<Option<LocalDefId>>,
+    /// The start of the span before, when its start was relative to `parent`.
+    lo: Option<BytePos>,
+    /// The spans of the value so far. Only the last `SPAN_MAX_REF` matter.
+    history: Vec<Span>,
+}
+
+impl PrevSpan {
+    fn push(&mut self, span: Span) {
+        if self.history.len() >= 2 * SPAN_MAX_REF {
+            self.history.drain(..SPAN_MAX_REF);
+        }
+        self.history.push(span);
+    }
+
+    /// The distance back to the last span that equals `span`.
+    fn distance_to(&self, span: Span) -> Option<usize> {
+        self.history.iter().rev().take(SPAN_MAX_REF).position(|&s| s == span).map(|i| i + 1)
+    }
+
+    /// The state after a reference to `span`, which is the same for the encoder and the decoder.
+    fn after_ref(&mut self, span: Span) {
+        let data = span.data_untracked();
+        self.ctxt = Some(data.ctxt);
+        self.parent = Some(data.parent);
+        self.lo = Some(data.lo);
+        self.push(span);
+    }
+}
 
 const TAG_SYNTAX_CONTEXT: u8 = 0;
 const TAG_EXPN_DATA: u8 = 1;
@@ -75,12 +128,12 @@ pub struct OnDiskCache {
     file_index_to_file: Lock<FxHashMap<SourceFileIndex, Arc<SourceFile>>>,
 
     /// For query dep nodes that have a disk-cached return value, maps the node
-    /// index to the position of its serialized value in `serialized_data`.
-    query_values_index: FxHashMap<SerializedDepNodeIndex, AbsoluteBytePos>,
+    /// to the position and length of its serialized value in `serialized_data`.
+    query_values_index: FxHashMap<SerializedDepNodeIndex, (AbsoluteBytePos, u32)>,
 
     /// For `DepKind::SideEffect` dep nodes, maps the node index to the position
-    /// of its serialized [`QuerySideEffect`] in `serialized_data`.
-    side_effects_index: FxHashMap<SerializedDepNodeIndex, AbsoluteBytePos>,
+    /// and length of its serialized [`QuerySideEffect`] in `serialized_data`.
+    side_effects_index: FxHashMap<SerializedDepNodeIndex, (AbsoluteBytePos, u32)>,
 
     alloc_decoding_state: AllocDecodingState,
 
@@ -107,6 +160,8 @@ pub struct OnDiskCache {
     // we try to map an `ExpnHash` to its value in the current
     // compilation session.
     foreign_expn_data: UnhashMap<ExpnHash, u32>,
+    /// The `DefPathHash` of each `DefId` index in the file. Empty in the inplace format, which writes the hash itself.
+    def_path_hashes: Vec<DefPathHash>,
 
     /// Set when the loaded `query-cache.bin` indexes the shared values file.
     inplace: Option<InplaceState>,
@@ -146,6 +201,12 @@ struct IndexEntry {
     index: SerializedDepNodeIndex,
     pos: AbsoluteBytePos,
     len: u32,
+}
+
+impl IndexEntry {
+    fn span(&self) -> (SerializedDepNodeIndex, (AbsoluteBytePos, u32)) {
+        (self.index, (self.pos, self.len))
+    }
 }
 
 /// Index entries sorted by node index, with the index stored as a delta.
@@ -209,12 +270,99 @@ fn map_checked(path: &Path, magic: &[u8; 8], id: u64, len: usize) -> Result<Mmap
     Ok(data)
 }
 
+/// The values of a session file, in file order.
+struct ValuesIndex(Vec<IndexEntry>);
+
+impl<E: Encoder> Encodable<E> for ValuesIndex {
+    fn encode(&self, e: &mut E) {
+        e.emit_usize(self.0.len());
+        let Some(first) = self.0.first() else { return };
+        e.emit_u64(first.pos.0);
+        let mut prev_index = 0u32;
+        let mut next_pos = first.pos.0;
+        for x in &self.0 {
+            assert_eq!(x.pos.0, next_pos, "query cache values are not contiguous");
+            let step = i64::from(x.index.as_u32()) - i64::from(prev_index);
+            e.emit_u64(((step << 1) ^ (step >> 63)) as u64);
+            e.emit_u32(x.len);
+            prev_index = x.index.as_u32();
+            next_pos += u64::from(x.len);
+        }
+    }
+}
+
+impl<D: Decoder> Decodable<D> for ValuesIndex {
+    fn decode(d: &mut D) -> Self {
+        let n = d.read_usize();
+        if n == 0 {
+            return ValuesIndex(Vec::new());
+        }
+        let mut pos = d.read_u64();
+        let mut index = 0i64;
+        ValuesIndex(
+            (0..n)
+                .map(|_| {
+                    let zigzag = d.read_u64();
+                    index += ((zigzag >> 1) as i64) ^ -((zigzag & 1) as i64);
+                    let len = d.read_u32();
+                    let entry = IndexEntry {
+                        index: SerializedDepNodeIndex::from_u32(index as u32),
+                        pos: AbsoluteBytePos(pos),
+                        len,
+                    };
+                    pos += u64::from(len);
+                    entry
+                })
+                .collect(),
+        )
+    }
+}
+
+/// The `DefPathHash` of each `DefId` index in the file.
+struct DefPathHashes(Vec<DefPathHash>);
+
+impl<E: Encoder> Encodable<E> for DefPathHashes {
+    fn encode(&self, e: &mut E) {
+        let mut crates = FxIndexSet::default();
+        let crate_indices: Vec<usize> =
+            self.0.iter().map(|h| crates.insert_full(h.stable_crate_id().as_u64()).0).collect();
+        e.emit_usize(crates.len());
+        for krate in &crates {
+            e.emit_raw_bytes(&krate.to_le_bytes());
+        }
+        e.emit_usize(self.0.len());
+        for (hash, krate) in self.0.iter().zip(crate_indices) {
+            e.emit_usize(krate);
+            e.emit_raw_bytes(&hash.local_hash().as_u64().to_le_bytes());
+        }
+    }
+}
+
+impl<D: Decoder> Decodable<D> for DefPathHashes {
+    fn decode(d: &mut D) -> Self {
+        fn read_u64_raw<D: Decoder>(d: &mut D) -> u64 {
+            u64::from_le_bytes(d.read_raw_bytes(8).try_into().unwrap())
+        }
+        let crates: Vec<u64> = (0..d.read_usize()).map(|_| read_u64_raw(d)).collect();
+        let n = d.read_usize();
+        DefPathHashes(
+            (0..n)
+                .map(|_| {
+                    let krate = crates[d.read_usize()];
+                    DefPathHash(Fingerprint::new(krate, read_u64_raw(d)))
+                })
+                .collect(),
+        )
+    }
+}
+
 // This type is used only for serialization and deserialization.
-#[derive(Encodable, Decodable)]
+// `CacheEncoder::encode_footer` writes the fields in the order `Decodable` reads them.
+#[derive(Decodable)]
 struct Footer {
     file_index_to_stable_id: FxHashMap<SourceFileIndex, EncodedSourceFileId>,
-    query_values_index: Vec<(SerializedDepNodeIndex, AbsoluteBytePos)>,
-    side_effects_index: Vec<(SerializedDepNodeIndex, AbsoluteBytePos)>,
+    query_values_index: ValuesIndex,
+    side_effects_index: ValuesIndex,
     // The location of all allocations.
     // Most uses only need values up to u32::MAX, but benchmarking indicates that we can use a u64
     // without measurable overhead. This permits larger const allocations without ICEing.
@@ -224,6 +372,8 @@ struct Footer {
     // See `OnDiskCache.expn_data`
     expn_data: UnhashMap<ExpnHash, AbsoluteBytePos>,
     foreign_expn_data: UnhashMap<ExpnHash, u32>,
+    // Each `DefId` in the file is an index into this table.
+    def_path_hashes: DefPathHashes,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Encodable, Decodable)]
@@ -299,12 +449,13 @@ impl OnDiskCache {
             serialized_data: RwLock::new(Some(data)),
             file_index_to_stable_id: footer.file_index_to_stable_id,
             file_index_to_file: Default::default(),
-            query_values_index: footer.query_values_index.into_iter().collect(),
-            side_effects_index: footer.side_effects_index.into_iter().collect(),
+            query_values_index: footer.query_values_index.0.iter().map(IndexEntry::span).collect(),
+            side_effects_index: footer.side_effects_index.0.iter().map(IndexEntry::span).collect(),
             alloc_decoding_state: AllocDecodingState::new(footer.interpret_alloc_index),
             syntax_contexts: footer.syntax_contexts,
             expn_data: footer.expn_data,
             foreign_expn_data: footer.foreign_expn_data,
+            def_path_hashes: footer.def_path_hashes.0,
             hygiene_context: Default::default(),
             inplace: None,
             pool_data: RwLock::new(None),
@@ -333,8 +484,8 @@ impl OnDiskCache {
         let pool_path = values_path.with_file_name(POOL_FILENAME);
         let pool = map_checked(&pool_path, POOL_MAGIC, state.pool_id, state.pool_len)?;
         let mut cache = Self::new_empty();
-        cache.query_values_index = state.query_values.iter().map(|x| (x.index, x.pos)).collect();
-        cache.side_effects_index = state.side_effects.iter().map(|x| (x.index, x.pos)).collect();
+        cache.query_values_index = state.query_values.iter().map(IndexEntry::span).collect();
+        cache.side_effects_index = state.side_effects.iter().map(IndexEntry::span).collect();
         cache.serialized_data = RwLock::new(Some(values));
         cache.pool_data = RwLock::new(Some(pool));
         cache.inplace = Some(state);
@@ -361,6 +512,7 @@ impl OnDiskCache {
             syntax_contexts: FxHashMap::default(),
             expn_data: UnhashMap::default(),
             foreign_expn_data: UnhashMap::default(),
+            def_path_hashes: Vec::new(),
             hygiene_context: Default::default(),
             inplace: None,
             pool_data: RwLock::new(None),
@@ -412,18 +564,30 @@ impl OnDiskCache {
                 source_span_cache: Default::default(),
                 query_values_index: Default::default(),
                 side_effects_index: Default::default(),
+                def_path_hashes: Default::default(),
+                span_bytes: 0,
+                shorthand_refs: 0,
+                shorthand_ref_bytes: 0,
+                kind_bytes: EncodedBytes::default(),
+                shorthand_depth: 0,
+                instance_shorthands: Default::default(),
+                prev_span: PrevSpan::default(),
+                prev_span_saved: Vec::new(),
                 inplace: None,
             };
 
+            let values_start = encoder.position();
             // Encode query return values.
             tcx.sess.time("encode_query_values", || {
                 tcx.encode_query_values(&mut encoder);
             });
+            let values_end = encoder.position();
 
             // Encode side effects.
             for (&dep_node_index, side_effect) in tcx.query_system.side_effects.borrow().iter() {
                 encoder.encode_side_effect(dep_node_index, side_effect);
             }
+            let side_effects_end = encoder.position();
 
             let interpret_alloc_index = {
                 let mut interpret_alloc_index = Vec::new();
@@ -440,16 +604,21 @@ impl OnDiskCache {
                         let id = encoder.interpret_allocs[idx];
                         let pos: u64 = encoder.position().try_into().unwrap();
                         interpret_alloc_index.push(pos);
+                        // The decoder reads each allocation from a jump, with fresh span state.
+                        encoder.prev_span = PrevSpan::default();
                         interpret::specialized_encode_alloc_id(&mut encoder, tcx, id);
                     }
                     n = new_n;
                 }
                 interpret_alloc_index
             };
+            let allocs_end = encoder.position();
 
             let mut syntax_contexts = FxHashMap::default();
             let mut expn_data = UnhashMap::default();
             let mut foreign_expn_data = UnhashMap::default();
+            let mut ctxt_bytes = 0;
+            let mut expn_bytes = 0;
 
             // Encode all hygiene data (`SyntaxContextData` and `ExpnData`) from the current
             // session.
@@ -460,12 +629,20 @@ impl OnDiskCache {
                 |encoder, ctxt, ctxt_data| {
                     let pos = AbsoluteBytePos::new(encoder.position());
                     encoder.encode_tagged(TAG_SYNTAX_CONTEXT, ctxt_data);
+                    ctxt_bytes += encoder.position() - pos.to_usize();
                     syntax_contexts.insert(ctxt.as_u32(), pos);
                 },
                 |encoder, expn_id, data, hash| {
                     if expn_id.krate == LOCAL_CRATE {
+                        let data = data.expect("local expn");
+                        // Macro expansion runs in full in every session,
+                        // before a query reads this cache.
+                        if matches!(data.kind, ExpnKind::Macro(..) | ExpnKind::AstPass(_)) {
+                            return;
+                        }
                         let pos = AbsoluteBytePos::new(encoder.position());
-                        encoder.encode_tagged(TAG_EXPN_DATA, data.expect("local expn"));
+                        encoder.encode_tagged(TAG_EXPN_DATA, data);
+                        expn_bytes += encoder.position() - pos.to_usize();
                         expn_data.insert(hash, pos);
                     } else {
                         foreign_expn_data.insert(hash, expn_id.local_id.as_u32());
@@ -475,20 +652,60 @@ impl OnDiskCache {
 
             // Encode the file footer.
             let footer_pos = encoder.position() as u64;
-            let query_values_index = mem::take(&mut encoder.query_values_index);
-            let side_effects_index = mem::take(&mut encoder.side_effects_index);
-            encoder.encode_tagged(
-                TAG_FILE_FOOTER,
-                &Footer {
-                    file_index_to_stable_id,
-                    query_values_index,
-                    side_effects_index,
-                    interpret_alloc_index,
-                    syntax_contexts,
-                    expn_data,
-                    foreign_expn_data,
-                },
+            let query_values_index = ValuesIndex(mem::take(&mut encoder.query_values_index));
+            let side_effects_index = ValuesIndex(mem::take(&mut encoder.side_effects_index));
+            let def_path_hashes: Vec<_> =
+                mem::take(&mut encoder.def_path_hashes).into_iter().collect();
+            let counts = (
+                query_values_index.0.len(),
+                def_path_hashes.len(),
+                syntax_contexts.len(),
+                expn_data.len(),
             );
+            let footer_parts = encoder.encode_footer(&Footer {
+                file_index_to_stable_id,
+                query_values_index,
+                side_effects_index,
+                interpret_alloc_index,
+                syntax_contexts,
+                expn_data,
+                foreign_expn_data,
+                def_path_hashes: DefPathHashes(def_path_hashes),
+            });
+            if tcx.sess.opts.unstable_opts.incremental_info {
+                let footer_end = encoder.position();
+                let (values, def_paths, ctxts, expns) = counts;
+                let [
+                    files,
+                    values_index,
+                    side_effects_index,
+                    allocs_index,
+                    ctxts_map,
+                    expns_map,
+                    foreign_expns,
+                    def_paths_table,
+                ] = footer_parts;
+                eprintln!(
+                    "[incremental] query cache footer: files {files} values-index {values_index} \
+                     side-effects-index {side_effects_index} allocs-index {allocs_index} \
+                     ctxts {ctxts_map} expns {expns_map} foreign-expns {foreign_expns} \
+                     def-paths {def_paths_table}"
+                );
+                eprintln!(
+                    "[incremental] query cache hygiene: ctxt-data {ctxt_bytes} \
+                     expn-data {expn_bytes}"
+                );
+                eprintln!(
+                    "[incremental] query cache sections: values {} side-effects {} allocs {} \
+                     hygiene {} footer {} entries {values} def-paths {def_paths} \
+                     ctxts {ctxts} expns {expns}",
+                    values_end - values_start,
+                    side_effects_end - values_end,
+                    allocs_end - side_effects_end,
+                    footer_pos as usize - allocs_end,
+                    footer_end - footer_pos as usize,
+                );
+            }
 
             // Encode the position of the footer as the last 8 bytes of the
             // file so we know where to look for it.
@@ -640,6 +857,15 @@ impl OnDiskCache {
                 source_span_cache: Default::default(),
                 query_values_index: Default::default(),
                 side_effects_index: Default::default(),
+                def_path_hashes: Default::default(),
+                span_bytes: 0,
+                shorthand_refs: 0,
+                shorthand_ref_bytes: 0,
+                kind_bytes: EncodedBytes::default(),
+                shorthand_depth: 0,
+                instance_shorthands: Default::default(),
+                prev_span: PrevSpan::default(),
+                prev_span_saved: Vec::new(),
                 inplace: Some(Box::new(inplace)),
             };
             tcx.sess.time("encode_query_values", || tcx.encode_query_values(&mut cache_encoder));
@@ -701,16 +927,16 @@ impl OnDiskCache {
         &self,
         tcx: TyCtxt<'tcx>,
         dep_node_index: SerializedDepNodeIndex,
-        index: &FxHashMap<SerializedDepNodeIndex, AbsoluteBytePos>,
+        index: &FxHashMap<SerializedDepNodeIndex, (AbsoluteBytePos, u32)>,
     ) -> Option<T>
     where
         T: for<'a> Decodable<CacheDecoder<'a, 'tcx>>,
     {
-        let pos = index.get(&dep_node_index).cloned()?;
+        let (pos, len) = index.get(&dep_node_index).cloned()?;
         if self.inplace.is_some() {
             return Some(self.with_entry_decoder(tcx, pos, |decoder| T::decode(decoder)));
         }
-        let value = self.with_decoder(tcx, pos, |decoder| decode_tagged(decoder, dep_node_index));
+        let value = self.with_decoder(tcx, pos, |decoder| decode_value(decoder, len));
         Some(value)
     }
 
@@ -742,6 +968,8 @@ impl OnDiskCache {
             foreign_expn_data: &self.foreign_expn_data,
             hygiene_context: &self.hygiene_context,
             source_span_cache: SourceSpanCache::default(),
+            def_path_hashes: None,
+            prev_span: PrevSpan::default(),
         };
         f(&mut decoder)
     }
@@ -770,6 +998,8 @@ impl OnDiskCache {
             foreign_expn_data: &self.foreign_expn_data,
             hygiene_context: &self.hygiene_context,
             source_span_cache: SourceSpanCache::default(),
+            def_path_hashes: self.inplace.is_none().then_some(&self.def_path_hashes[..]),
+            prev_span: PrevSpan::default(),
         };
         f(&mut decoder)
     }
@@ -793,7 +1023,10 @@ pub struct CacheDecoder<'a, 'tcx> {
     expn_data: &'a UnhashMap<ExpnHash, AbsoluteBytePos>,
     foreign_expn_data: &'a UnhashMap<ExpnHash, u32>,
     hygiene_context: &'a HygieneDecodeContext,
+    /// The table that a `DefId` index refers to, or `None` when the bytes hold the hash itself.
+    def_path_hashes: Option<&'a [DefPathHash]>,
     source_span_cache: SourceSpanCache,
+    prev_span: PrevSpan,
 }
 
 impl<'a, 'tcx> CacheDecoder<'a, 'tcx> {
@@ -908,8 +1141,27 @@ where
     value
 }
 
+/// Decodes a value that `encode_value` wrote. The index names the value and holds its
+/// length, which catches a decoder that reads more or less than the encoder wrote.
+fn decode_value<D: Decoder, V: Decodable<D>>(decoder: &mut D, len: u32) -> V {
+    let start_pos = decoder.position();
+    let value = V::decode(decoder);
+    assert_eq!(decoder.position() - start_pos, len as usize);
+    value
+}
+
 impl<'a, 'tcx> TyDecoder<'tcx> for CacheDecoder<'a, 'tcx> {
     const CLEAR_CROSS_CRATE: bool = false;
+
+    #[inline]
+    fn relative_shorthands(&self) -> bool {
+        self.pool.is_none()
+    }
+
+    #[inline]
+    fn instance_shorthands(&self) -> bool {
+        self.pool.is_none()
+    }
 
     fn cached_ty_for_shorthand<F>(&mut self, shorthand: usize, or_insert_with: F) -> Ty<'tcx>
     where
@@ -941,8 +1193,10 @@ impl<'a, 'tcx> TyDecoder<'tcx> for CacheDecoder<'a, 'tcx> {
             }
         };
         let old_opaque = mem::replace(&mut self.opaque, new_opaque);
+        let old_prev_span = mem::take(&mut self.prev_span);
         let r = f(self);
         self.opaque = old_opaque;
+        self.prev_span = old_prev_span;
         r
     }
 
@@ -1062,23 +1316,47 @@ impl<'a, 'tcx> SpanDecoder for CacheDecoder<'a, 'tcx> {
     }
 
     fn decode_span(&mut self) -> Span {
-        let ctxt = SyntaxContext::decode(self);
-        let parent = Option::<LocalDefId>::decode(self);
-        let tag: u8 = Decodable::decode(self);
+        let head = self.read_u8();
+        let distance = match head >> SPAN_REF_SHIFT {
+            0 => None,
+            SPAN_FAR_REF => Some(usize::decode(self)),
+            d => Some(usize::from(d)),
+        };
+        if let Some(distance) = distance {
+            let history = &self.prev_span.history;
+            let span = history[history.len() - distance];
+            self.prev_span.after_ref(span);
+            return span;
+        }
+        let prev = PrevSpan { history: Vec::new(), ..self.prev_span };
+        let ctxt = if head & SPAN_SAME_CTXT != 0 {
+            prev.ctxt.expect("span repeats the context of no earlier span")
+        } else {
+            SyntaxContext::decode(self)
+        };
+        let parent = if head & SPAN_SAME_PARENT != 0 {
+            prev.parent.expect("span repeats the parent of no earlier span")
+        } else {
+            Option::<LocalDefId>::decode(self)
+        };
+        let kind = head & SPAN_KIND_MASK;
 
-        let (lo, hi) = match tag {
+        let (lo, hi) = match kind {
             TAG_PARTIAL_SPAN => (BytePos(0), BytePos(0)),
-            TAG_RELATIVE_SPAN => {
-                let dlo = u32::decode(self);
-                let dto = u32::decode(self);
+            TAG_RELATIVE_SPAN | TAG_PREVIOUS_SPAN => {
+                let zigzag = u32::decode(self);
+                let dlo = ((zigzag >> 1) as i32 ^ -((zigzag & 1) as i32)) as u32;
+                let len = u32::decode(self);
 
-                let enclosing = self
-                    .source_span_cache
-                    .lookup(parent.unwrap(), &self.tcx.untracked().source_span);
-                (
-                    BytePos(enclosing.lo.0.wrapping_add(dlo)),
-                    BytePos(enclosing.lo.0.wrapping_add(dto)),
-                )
+                let base = if kind == TAG_PREVIOUS_SPAN {
+                    prev.lo.expect("span is relative to no earlier span")
+                } else {
+                    self.source_span_cache
+                        .lookup(parent.unwrap(), &self.tcx.untracked().source_span)
+                        .lo
+                };
+                let lo = base.0.wrapping_add(dlo);
+                (BytePos(lo), BytePos(lo.wrapping_add(len)))
             }
             TAG_FULL_SPAN => {
                 let file_lo_index = SourceFileIndex::decode(self);
@@ -1099,7 +1377,14 @@ impl<'a, 'tcx> SpanDecoder for CacheDecoder<'a, 'tcx> {
             _ => unreachable!(),
         };
 
-        Span::new(lo, hi, ctxt, parent)
+        let relative = matches!(kind, TAG_RELATIVE_SPAN | TAG_PREVIOUS_SPAN);
+        let span = Span::new(lo, hi, ctxt, parent);
+        let prev = &mut self.prev_span;
+        prev.ctxt = Some(ctxt);
+        prev.parent = Some(parent);
+        prev.lo = relative.then_some(lo);
+        prev.push(span);
+        span
     }
 
     fn decode_crate_num(&mut self) -> CrateNum {
@@ -1113,7 +1398,10 @@ impl<'a, 'tcx> SpanDecoder for CacheDecoder<'a, 'tcx> {
     // sessions, to map the old `DefId` to the new one.
     fn decode_def_id(&mut self) -> DefId {
         // Load the `DefPathHash` which is was we encoded the `DefId` as.
-        let def_path_hash = DefPathHash::decode(self);
+        let def_path_hash = match self.def_path_hashes {
+            Some(table) => table[self.read_usize()],
+            None => DefPathHash::decode(self),
+        };
 
         // Using the `DefPathHash`, we can lookup the new `DefId`.
         // Subtle: We only encode a `DefId` as part of a query result.
@@ -1197,7 +1485,7 @@ impl_decodable_via_ref_decodable_for_foreign_types! {
     )],
     &'tcx [(ty::Clause<'tcx>, Span)],
     &'tcx [DefId],
-    &'tcx [Spanned<MonoItem<'tcx>>],
+    &'tcx [MonoItemUse<'tcx>],
     &'tcx [rustc_middle::middle::dead_code::DeadCodeBodyUse],
     &'tcx [rustc_middle::middle::reachable::ReachableBodyRef],
     &'tcx [ty::Variance],
@@ -1221,8 +1509,23 @@ pub struct CacheEncoder<'tcx> {
     symbol_index_table: FxHashMap<u32, usize>,
     source_span_cache: SourceSpanCache,
 
-    query_values_index: Vec<(SerializedDepNodeIndex, AbsoluteBytePos)>,
-    side_effects_index: Vec<(SerializedDepNodeIndex, AbsoluteBytePos)>,
+    query_values_index: Vec<IndexEntry>,
+    side_effects_index: Vec<IndexEntry>,
+    /// The `DefPathHash` of each `DefId` index written so far, outside the inplace format.
+    def_path_hashes: FxIndexSet<DefPathHash>,
+    /// The bytes that spans took, for `-Zincremental-info`.
+    span_bytes: usize,
+    /// The type and predicate shorthand references, and their bytes, for `-Zincremental-info`.
+    shorthand_refs: usize,
+    shorthand_ref_bytes: usize,
+    /// The bytes by what they encode, outside any type or predicate, for `-Zincremental-info`.
+    kind_bytes: EncodedBytes,
+    /// How many full type or predicate encodings hold the current position.
+    shorthand_depth: u32,
+    instance_shorthands: FxHashMap<ty::Instance<'tcx>, usize>,
+    prev_span: PrevSpan,
+    /// The span state of each pool item under construction, outermost first.
+    prev_span_saved: Vec<PrevSpan>,
 
     inplace: Option<Box<InplaceEncode>>,
 }
@@ -1256,7 +1559,44 @@ impl<'tcx> fmt::Debug for CacheEncoder<'tcx> {
 
 // Starts a pool item.
 
+/// The bytes that a part of the query cache took, by what they encode. A span
+/// counts at any depth.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct EncodedBytes {
+    pub types: usize,
+    pub type_refs: usize,
+    pub def_ids: usize,
+    pub symbols: usize,
+}
+
+impl std::ops::Sub for EncodedBytes {
+    type Output = EncodedBytes;
+    fn sub(self, other: EncodedBytes) -> EncodedBytes {
+        EncodedBytes {
+            types: self.types - other.types,
+            type_refs: self.type_refs - other.type_refs,
+            def_ids: self.def_ids - other.def_ids,
+            symbols: self.symbols - other.symbols,
+        }
+    }
+}
+
 impl<'tcx> CacheEncoder<'tcx> {
+    /// The bytes that spans took so far.
+    pub fn span_bytes(&self) -> usize {
+        self.span_bytes
+    }
+
+    /// The bytes so far, by what they encode.
+    pub fn encoded_bytes(&self) -> EncodedBytes {
+        self.kind_bytes
+    }
+
+    /// The type and predicate shorthand references so far, and their bytes.
+    pub fn shorthand_refs(&self) -> (usize, usize) {
+        (self.shorthand_refs, self.shorthand_ref_bytes)
+    }
+
     #[inline]
     fn source_file_index(&mut self, source_file: Arc<SourceFile>) -> SourceFileIndex {
         if self.inplace.is_some() {
@@ -1306,11 +1646,14 @@ impl<'tcx> CacheEncoder<'tcx> {
 
     /// Starts a pool item. Writes go to it until `end_pool_item`.
     fn begin_pool_item(&mut self) {
+        let prev_span = mem::take(&mut self.prev_span);
+        self.prev_span_saved.push(prev_span);
         self.inplace.as_mut().unwrap().stack.push(MemEncoder::new());
     }
 
     /// Writes the innermost pool item to the pool and returns its pool position.
     fn end_pool_item(&mut self) -> usize {
+        self.prev_span = self.prev_span_saved.pop().unwrap();
         let inplace = self.inplace.as_mut().unwrap();
         let bytes = inplace.stack.pop().unwrap().finish();
         let pos = inplace.pool.position();
@@ -1332,6 +1675,7 @@ impl<'tcx> CacheEncoder<'tcx> {
         }
         let start = self.encoder.position();
         self.interpret_allocs.clear();
+        self.prev_span = PrevSpan::default();
         value.encode(self);
         let mut interpret_alloc_index = Vec::new();
         let mut idx = 0;
@@ -1356,14 +1700,53 @@ impl<'tcx> CacheEncoder<'tcx> {
     /// encode the specified tag, then the given value, then the number of
     /// bytes taken up by tag and value. On decoding, we can then verify that
     /// we get the expected tag and read the expected number of bytes.
+    /// Writes `footer` as `encode_tagged` does, and returns the bytes of each field.
+    fn encode_footer(&mut self, footer: &Footer) -> [usize; 8] {
+        let start_pos = self.position();
+        self.prev_span = PrevSpan::default();
+        TAG_FILE_FOOTER.encode(self);
+        let fields: [&dyn Fn(&mut Self); 8] = [
+            &|e| footer.file_index_to_stable_id.encode(e),
+            &|e| footer.query_values_index.encode(e),
+            &|e| footer.side_effects_index.encode(e),
+            &|e| footer.interpret_alloc_index.encode(e),
+            &|e| footer.syntax_contexts.encode(e),
+            &|e| footer.expn_data.encode(e),
+            &|e| footer.foreign_expn_data.encode(e),
+            &|e| footer.def_path_hashes.encode(e),
+        ];
+        let sizes = fields.map(|field| {
+            let at = self.position();
+            field(self);
+            self.position() - at
+        });
+        let end_pos = self.position();
+        ((end_pos - start_pos) as u64).encode(self);
+        sizes
+    }
+
     fn encode_tagged<T: Encodable<Self>, V: Encodable<Self>>(&mut self, tag: T, value: &V) {
         let start_pos = self.position();
+        self.prev_span = PrevSpan::default();
 
         tag.encode(self);
         value.encode(self);
 
         let end_pos = self.position();
         ((end_pos - start_pos) as u64).encode(self);
+    }
+
+    /// Writes `value` for `decode_value`, and returns its index entry.
+    fn encode_value<V: Encodable<Self>>(
+        &mut self,
+        index: SerializedDepNodeIndex,
+        value: &V,
+    ) -> IndexEntry {
+        let start_pos = self.position();
+        self.prev_span = PrevSpan::default();
+        value.encode(self);
+        let len = (self.position() - start_pos).try_into().expect("query value over 4 GiB");
+        IndexEntry { index, pos: AbsoluteBytePos::new(start_pos), len }
     }
 
     pub fn encode_query_value<V: Encodable<Self>>(&mut self, index: DepNodeIndex, value: &V) {
@@ -1377,8 +1760,8 @@ impl<'tcx> CacheEncoder<'tcx> {
             return;
         }
 
-        self.query_values_index.push((index, AbsoluteBytePos::new(self.position())));
-        self.encode_tagged(index, value);
+        let entry = self.encode_value(index, value);
+        self.query_values_index.push(entry);
     }
 
     fn encode_side_effect(&mut self, index: DepNodeIndex, side_effect: &QuerySideEffect) {
@@ -1392,8 +1775,8 @@ impl<'tcx> CacheEncoder<'tcx> {
             return;
         }
 
-        self.side_effects_index.push((index, AbsoluteBytePos::new(self.position())));
-        self.encode_tagged(index, side_effect);
+        let entry = self.encode_value(index, side_effect);
+        self.side_effects_index.push(entry);
     }
 
     // copy&paste impl from rustc_metadata
@@ -1498,53 +1881,105 @@ impl<'tcx> SpanEncoder for CacheEncoder<'tcx> {
     }
 
     fn encode_span(&mut self, span: Span) {
-        let span_data = span.data_untracked();
-        span_data.ctxt.encode(self);
-        span_data.parent.encode(self);
-
-        if span_data.is_dummy() {
-            return TAG_PARTIAL_SPAN.encode(self);
+        enum Pos {
+            Partial,
+            /// The start of the parent.
+            Relative(BytePos),
+            Full(SourceFileIndex, usize, RelativeBytePos),
         }
 
+        let start = self.position();
+        if let Some(distance) = self.prev_span.distance_to(span) {
+            let code = u8::try_from(distance).ok().filter(|&d| d < SPAN_FAR_REF);
+            self.emit_u8(code.unwrap_or(SPAN_FAR_REF) << SPAN_REF_SHIFT);
+            if code.is_none() {
+                self.emit_usize(distance);
+            }
+            self.prev_span.after_ref(span);
+            self.span_bytes += self.position() - start;
+            return;
+        }
+        let span_data = span.data_untracked();
+        let prev = PrevSpan { history: Vec::new(), ..self.prev_span };
         let parent = span_data
             .parent
             .map(|parent| self.source_span_cache.lookup(parent, &self.tcx.untracked().source_span));
-        if let Some(parent) = parent
+        let pos = if span_data.is_dummy() {
+            Pos::Partial
+        } else if let Some(parent) = parent
             && parent.contains(span_data)
         {
-            TAG_RELATIVE_SPAN.encode(self);
-            (span_data.lo.0.wrapping_sub(parent.lo.0)).encode(self);
-            (span_data.hi.0.wrapping_sub(parent.lo.0)).encode(self);
-            return;
-        }
-
-        let Some((file_lo, line_lo, col_lo)) =
-            self.caching_source_map_view.byte_pos_to_line_and_col(span_data.lo)
-        else {
-            return TAG_PARTIAL_SPAN.encode(self);
+            Pos::Relative(parent.lo)
+        } else {
+            match self.caching_source_map_view.byte_pos_to_line_and_col(span_data.lo) {
+                None => Pos::Partial,
+                Some((file_lo, ..)) if parent.is_some_and(|parent| file_lo.contains(parent.lo)) => {
+                    Pos::Relative(parent.unwrap().lo)
+                }
+                Some((file_lo, line_lo, col_lo)) => {
+                    Pos::Full(self.source_file_index(file_lo), line_lo, col_lo)
+                }
+            }
         };
 
-        if let Some(parent) = parent
-            && file_lo.contains(parent.lo)
-        {
-            TAG_RELATIVE_SPAN.encode(self);
-            (span_data.lo.0.wrapping_sub(parent.lo.0)).encode(self);
-            (span_data.hi.0.wrapping_sub(parent.lo.0)).encode(self);
-            return;
+        let same_ctxt = prev.ctxt == Some(span_data.ctxt);
+        let same_parent = prev.parent == Some(span_data.parent);
+        let (kind, base) = match pos {
+            Pos::Partial => (TAG_PARTIAL_SPAN, None),
+            Pos::Full(..) => (TAG_FULL_SPAN, None),
+            Pos::Relative(parent_lo) => match prev.lo.filter(|_| same_parent) {
+                Some(prev_lo)
+                    if prev_lo.0.abs_diff(span_data.lo.0)
+                        < parent_lo.0.abs_diff(span_data.lo.0) =>
+                {
+                    (TAG_PREVIOUS_SPAN, Some(prev_lo))
+                }
+                _ => (TAG_RELATIVE_SPAN, Some(parent_lo)),
+            },
+        };
+        let mut head = kind;
+        if same_ctxt {
+            head |= SPAN_SAME_CTXT;
         }
-
-        let len = span_data.hi - span_data.lo;
-        let source_file_index = self.source_file_index(file_lo);
-
-        TAG_FULL_SPAN.encode(self);
-        source_file_index.encode(self);
-        line_lo.encode(self);
-        col_lo.encode(self);
-        len.encode(self);
+        if same_parent {
+            head |= SPAN_SAME_PARENT;
+        }
+        head.encode(self);
+        if !same_ctxt {
+            span_data.ctxt.encode(self);
+        }
+        if !same_parent {
+            span_data.parent.encode(self);
+        }
+        match pos {
+            Pos::Partial => {}
+            // A span can start before its base, so the offset is zigzag. The end is a length.
+            Pos::Relative(_) => {
+                let dlo = span_data.lo.0.wrapping_sub(base.unwrap().0) as i32;
+                (((dlo << 1) ^ (dlo >> 31)) as u32).encode(self);
+                span_data.hi.0.wrapping_sub(span_data.lo.0).encode(self);
+            }
+            Pos::Full(source_file_index, line_lo, col_lo) => {
+                source_file_index.encode(self);
+                line_lo.encode(self);
+                col_lo.encode(self);
+                (span_data.hi - span_data.lo).encode(self);
+            }
+        }
+        let prev = &mut self.prev_span;
+        prev.ctxt = Some(span_data.ctxt);
+        prev.parent = Some(span_data.parent);
+        prev.lo = base.map(|_| span_data.lo);
+        prev.push(span);
+        self.span_bytes += self.position().saturating_sub(start);
     }
 
     fn encode_symbol(&mut self, sym: Symbol) {
+        let start = self.position();
         self.encode_symbol_or_byte_symbol(sym.as_u32(), |this| this.emit_str(sym.as_str()));
+        if self.shorthand_depth == 0 {
+            self.kind_bytes.symbols += self.position() - start;
+        }
     }
 
     fn encode_byte_symbol(&mut self, byte_sym: ByteSymbol) {
@@ -1558,7 +1993,18 @@ impl<'tcx> SpanEncoder for CacheEncoder<'tcx> {
     }
 
     fn encode_def_id(&mut self, def_id: DefId) {
-        self.tcx.def_path_hash(def_id).encode(self);
+        let start = self.position();
+        let hash = self.tcx.def_path_hash(def_id);
+        if self.inplace.is_some() {
+            // An inplace entry outlives this session's footer, so it carries the hash itself.
+            hash.encode(self);
+        } else {
+            let (index, _) = self.def_path_hashes.insert_full(hash);
+            self.emit_usize(index);
+        }
+        if self.shorthand_depth == 0 {
+            self.kind_bytes.def_ids += self.position() - start;
+        }
     }
 
     fn encode_def_index(&mut self, _def_index: DefIndex) {
@@ -1585,6 +2031,31 @@ impl<'tcx> TyEncoder<'tcx> for CacheEncoder<'tcx> {
         &mut self.predicate_shorthands
     }
     #[inline]
+    fn note_shorthand_ref(&mut self, bytes: usize) {
+        self.shorthand_refs += 1;
+        self.shorthand_ref_bytes += bytes;
+        if self.shorthand_depth == 0 {
+            self.kind_bytes.type_refs += bytes;
+        }
+    }
+    #[inline]
+    fn enter_full_shorthand(&mut self) {
+        self.shorthand_depth += 1;
+    }
+    #[inline]
+    fn exit_full_shorthand(&mut self, bytes: usize) {
+        self.shorthand_depth -= 1;
+        if self.shorthand_depth == 0 {
+            self.kind_bytes.types += bytes;
+        }
+    }
+    /// A shorthand of the inplace format points into the pool, where a distance from the
+    /// value stream means nothing.
+    #[inline]
+    fn relative_shorthands(&self) -> bool {
+        self.inplace.is_none()
+    }
+    #[inline]
     fn encode_alloc_id(&mut self, alloc_id: &interpret::AllocId) {
         let (index, _) = self.interpret_allocs.insert_full(*alloc_id);
 
@@ -1601,6 +2072,13 @@ impl<'tcx> TyEncoder<'tcx> for CacheEncoder<'tcx> {
 
     fn end_full_encoding(&mut self) -> usize {
         self.end_pool_item()
+    }
+
+    fn instance_shorthands(&mut self) -> Option<&mut FxHashMap<ty::Instance<'tcx>, usize>> {
+        if self.inplace.is_some() {
+            return None;
+        }
+        Some(&mut self.instance_shorthands)
     }
 }
 

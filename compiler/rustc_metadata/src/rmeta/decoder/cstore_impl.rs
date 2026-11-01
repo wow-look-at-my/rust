@@ -146,12 +146,16 @@ macro_rules! provide_one {
             let ($def_id, $other) = def_id_arg.into_args();
             assert!(!$def_id.is_local());
 
-            // External query providers call `crate_hash` in order to register a dependency
-            // on the crate metadata. The exception is `crate_hash` itself, which obviously
-            // doesn't need to do this (and can't, as it would cause a query cycle).
-            use rustc_middle::dep_graph::DepKind;
-            if DepKind::$name != DepKind::crate_hash && $tcx.dep_graph.is_fully_enabled() {
-                $tcx.ensure_ok().crate_hash($def_id.krate);
+            // External query providers call `crate_hash` to register a dependency on the crate metadata.
+            use rustc_middle::dep_graph::{DepKind, reads_extern_item_entry};
+            if $tcx.dep_graph.is_fully_enabled() {
+                if $tcx.sess.opts.unstable_opts.incremental_extern_items
+                    && reads_extern_item_entry(DepKind::$name)
+                {
+                    read_extern_item($tcx, $def_id);
+                } else if DepKind::$name != DepKind::crate_hash {
+                    $tcx.ensure_ok().crate_hash($def_id.krate);
+                }
             }
 
             let cstore = CStore::from_tcx($tcx);
@@ -160,6 +164,19 @@ macro_rules! provide_one {
             $compute
         }
     };
+}
+
+/// Under `-Zincremental-extern-items`, records that the current task read the metadata entries of
+/// `def_id`, an item of another crate. A sysroot crate changes only as a whole, so under
+/// `-Zincremental-extern-sysroot` the read of one of its items is a read of its hash.
+pub fn read_extern_item(tcx: TyCtxt<'_>, def_id: DefId) {
+    if tcx.sess.opts.unstable_opts.incremental_extern_sysroot
+        && CStore::from_tcx(tcx).get_crate_data(def_id.krate).from_sysroot()
+    {
+        tcx.ensure_ok().crate_hash(def_id.krate);
+    } else {
+        tcx.ensure_ok().extern_item_fingerprint(def_id);
+    }
 }
 
 macro_rules! provide {
@@ -377,6 +394,16 @@ provide! { tcx, def_id, other, cdata,
     native_libraries => { cdata.get_native_libraries(tcx).collect() }
     foreign_modules => { cdata.get_foreign_modules(tcx).map(|m| (m.def_id, m)).collect() }
     crate_hash => { cdata.hash() }
+    extern_item_fingerprint => {
+        // A crate written without the fingerprints changes all its items with its hash.
+        match cdata.root.tables.item_fingerprint.get(cdata, def_id.index) {
+            0 => {
+                let hash = cdata.hash().as_u128();
+                hash as u64 ^ (hash >> 64) as u64
+            }
+            fingerprint => fingerprint,
+        }
+    }
     crate_host_hash => { cdata.host_hash }
     crate_name => { cdata.root.header.name }
     num_extern_def_ids => { cdata.num_def_ids() }
@@ -791,6 +818,13 @@ fn provide_cstore_hooks(providers: &mut Providers) {
         crate::rmeta::encoder::prev_metadata_optimized_mir;
     providers.hooks.prev_metadata_mir_for_ctfe = crate::rmeta::encoder::prev_metadata_mir_for_ctfe;
     providers.hooks.prev_metadata_promoted_mir = crate::rmeta::encoder::prev_metadata_promoted_mir;
+    providers.hooks.prev_metadata_type_of = crate::rmeta::encoder::prev_metadata_type_of;
+    providers.hooks.prev_metadata_fn_sig = crate::rmeta::encoder::prev_metadata_fn_sig;
+    providers.hooks.prev_metadata_generics_of = crate::rmeta::encoder::prev_metadata_generics_of;
+    providers.hooks.prev_metadata_explicit_clauses_of =
+        crate::rmeta::encoder::prev_metadata_explicit_clauses_of;
+    providers.hooks.prev_metadata_codegen_fn_attrs =
+        crate::rmeta::encoder::prev_metadata_codegen_fn_attrs;
     providers.hooks.prev_metadata_explain_mismatch =
         crate::rmeta::encoder::prev_metadata_explain_mismatch;
     providers.hooks.import_source_files = |tcx, cnum| {

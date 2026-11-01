@@ -251,5 +251,8 @@ pub fn setup_dep_graph(
     sess.opts.dep_tracking_hash(false).encode(&mut encoder);
     global_inputs_hash.encode(&mut encoder);
 
-    (DepGraph::new(sess, prev_graph, prev_work_products, encoder), Some(incr_comp_session))
+    (
+        DepGraph::new(sess, prev_graph, prev_work_products, encoder, stable_crate_id),
+        Some(incr_comp_session),
+    )
 }

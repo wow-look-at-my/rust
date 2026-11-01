@@ -50,8 +50,10 @@ rustc)
 esac
 
 if [[ $workload == rustc ]]; then
-	# Bootstrap runs its own rustc shim and passes RUSTFLAGS_NOT_BOOTSTRAP to the compiles of a local rebuild.
-	export RUSTFLAGS_NOT_BOOTSTRAP="$flags"
+	# Bootstrap's rustc shim adds MAGIC_EXTRA_RUSTFLAGS to every compile, host crates included. An empty value is one empty argument.
+	[[ -z $flags ]] || export MAGIC_EXTRA_RUSTFLAGS="$flags"
+	# x.py compiles bootstrap itself with the same compiler, outside the shim.
+	export RUSTFLAGS_BOOTSTRAP="$flags"
 	# The stage1 toolchain has no cargo, and bootstrap looks for one next to build.rustc. Use the cargo that src/stage0 pins.
 	host=$("$rustc_bin" -vV | sed -n 's/^host: //p')
 	date=$(sed -n 's/^compiler_date=//p' "$src/src/stage0")
@@ -94,6 +96,11 @@ measure() {
 		total=$(( $(sum_sizes "${inc[@]}") - linked ))
 		crate_dirs=$(find "${inc[@]}" -mindepth 1 -maxdepth 1 -type d | wc -l)
 		sessions=$(find "${inc[@]}" -mindepth 2 -maxdepth 2 -type d -name 's-*' | wc -l)
+		if [[ $mode == incr && $step == edit:body ]]; then
+			echo "largest query caches $mode $step (bytes, crate dir):"
+			find "${inc[@]}" -name query-cache.bin -printf '%s\t%h\n' | sort -rn | head -n 15 |
+				awk -F'\t' '{n = split($2, p, "/"); print $1 "\t" p[n - 5] "/" p[n - 1]}'
+		fi
 	fi
 	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.1f\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n' \
 		"$workload" "$config" "$compiler" "$toolchain" "$flags" "$mode" "$step" "$secs" \
@@ -130,6 +137,13 @@ build() {
 		echo "codegen MIR from metadata $mode $step: $codegen (decoded, rejected, mismatched)"
 		{ grep -E '^\[incremental\] codegen: (mismatch of|field |spans |first span )' "$log" || true; } | sed -n 1,30p | cut -c1-600
 	fi
+	# An -Zincremental-info run names why the decoder gave up on each item it could not reuse.
+	local causes
+	causes=$({ grep -oE '^\[incremental\] (metadata|codegen): items the decoder rejected, by cause: .*' "$log" || true; } |
+		awk '{for (i = 9; i < NF; i += 2) s[$2 " " $i] += $(i + 1)} END {for (k in s) printf "%s %d; ", k, s[k]}')
+	if [[ -n $causes ]]; then
+		echo "items the decoder rejected $mode $step, by cause: $causes"
+	fi
 	local consts
 	consts=$({ grep -oE 'codegen: decoded [0-9]+ CTFE and promoted MIR values from metadata, [0-9]+ rejected, [0-9]+ mismatched' "$log" || true; } | tr -d ',' | awk '{d += $3; r += $11; m += $13} END {printf "%d\t%d\t%d", d, r, m}')
 	if [[ $consts != $'0\t0\t0' ]]; then
@@ -140,14 +154,39 @@ build() {
 	if [[ $graph != $'0\t0\t0\t0\t0' ]]; then
 		printf '%s\t%s\t%s\t%s\n' "$config" "$mode" "$step" "$graph" >> "${results%.tsv}.graph.tsv"
 		echo "dep graph bytes $mode $step: $graph (total, heads, keys, values, edges)"
+		runs=$({ grep -oE 'dep graph edges that a run copies: [0-9]+' "$log" || true; } | awk '{s += $8} END {printf "%d", s}')
+		echo "dep graph edges that a run copies $mode $step: $runs"
 	fi
 	if [[ $step == cold ]]; then
-		echo "query cache bytes by query $mode $step (bytes, values, query):"
-		{ grep -oE '^\[incremental\] query cache bytes: [a-z_0-9]+ [0-9]+ [0-9]+' "$log" || true; } |
-			awk '{c[$5] += $6; b[$5] += $7} END {for (q in b) printf "%d\t%d\t%s\n", b[q], c[q], q}' | sort -rn | sed -n 1,25p
-		echo "dep graph bytes by kind $mode $step (bytes, nodes, kind):"
+		echo "query cache bytes by query $mode $step (bytes, values, span bytes, type bytes, type ref bytes, def id bytes, symbol bytes, query):"
+		{ grep -oE '^\[incremental\] query cache bytes: [a-z_0-9]+ [0-9]+ [0-9]+( [0-9]+)*' "$log" || true; } |
+			awk '{c[$5] += $6; b[$5] += $7; s[$5] += $8; t[$5] += $9; r[$5] += $10; d[$5] += $11; y[$5] += $12}
+				END {for (q in b) printf "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\n", b[q], c[q], s[q], t[q], r[q], d[q], y[q], q}' | sort -rn | sed -n 1,25p
+		echo "query cache sections $mode $step (values, side effects, allocs, hygiene, footer, entries, def paths, ctxts, expns):"
+		{ grep -oE '^\[incremental\] query cache sections: values [0-9]+ side-effects [0-9]+ allocs [0-9]+ hygiene [0-9]+ footer [0-9]+ entries [0-9]+ def-paths [0-9]+ ctxts [0-9]+ expns [0-9]+' "$log" || true; } |
+			awk '{for (i = 6; i <= 22; i += 2) s[i] += $i} END {printf "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", s[6], s[8], s[10], s[12], s[14], s[16], s[18], s[20], s[22]}'
+		echo "query cache footer $mode $step (files, values index, side effects index, allocs index, ctxts, expns, foreign expns, def paths):"
+		{ grep -oE '^\[incremental\] query cache footer: files [0-9]+ values-index [0-9]+ side-effects-index [0-9]+ allocs-index [0-9]+ ctxts [0-9]+ expns [0-9]+ foreign-expns [0-9]+ def-paths [0-9]+' "$log" || true; } |
+			awk '{for (i = 6; i <= 20; i += 2) s[i] += $i} END {printf "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", s[6], s[8], s[10], s[12], s[14], s[16], s[18], s[20]}'
+		echo "query cache hygiene $mode $step (syntax context data, expansion data):"
+		{ grep -oE '^\[incremental\] query cache hygiene: ctxt-data [0-9]+ expn-data [0-9]+' "$log" || true; } |
+			awk '{c += $6; x += $8} END {printf "%d\t%d\n", c, x}'
+		echo "query cache type and predicate shorthand refs $mode $step (refs, bytes):"
+		{ grep -oE '^\[incremental\] query cache shorthand refs: [0-9]+ [0-9]+' "$log" || true; } |
+			awk '{r += $6; b += $7} END {printf "%d\t%d\n", r, b}'
+		echo "dep graph bytes by kind $mode $step (bytes, nodes, edges, edge bytes, kind):"
 		{ grep -E '^\[incremental\]  [A-Za-z_0-9]+ +\|' "$log" || true; } | tr -d '|%' |
-			awk '$2 != "Node" {n[$2] += $4; b[$2] += $6} END {for (k in b) printf "%d\t%d\t%s\n", b[k], n[k], k}' | sort -rn | sed -n 1,30p
+			awk '$2 != "Node" {n[$2] += $4; b[$2] += $6; e[$2] += $7; eb[$2] += $8} END {for (k in b) printf "%d\t%d\t%d\t%d\t%s\n", b[k], n[k], e[k], eb[k], k}' | sort -rn | sed -n 1,40p
+		echo "dep graph nodes no edge points at $mode $step (bytes, nodes, kind):"
+		{ grep -oE '^\[incremental\] unread nodes: [A-Za-z_0-9]+ [0-9]+ [0-9]+' "$log" || true; } |
+			awk '{n[$4] += $5; b[$4] += $6} END {for (k in b) printf "%d\t%d\t%s\n", b[k], n[k], k}' | sort -rn | sed -n 1,40p
+		echo "dep graph edges by reader and target kind $mode $step (edges, reader, target):"
+		{ grep -oE '^\[incremental\] edges by kind: [A-Za-z_0-9]+ [A-Za-z_0-9]+ [0-9]+' "$log" || true; } |
+			awk '{e[$5 " " $6] += $7} END {for (k in e) printf "%d\t%s\n", e[k], k}' | sort -rn | sed -n 1,50p
+		# A node keyed by a DefPathHash of another crate's item is a lookup into that crate.
+		echo "dep graph nodes keyed by an item of the crate $mode $step (bytes, nodes, local bytes, local nodes, kind):"
+		{ grep -oE '^\[incremental\] local-keyed nodes: [A-Za-z_0-9]+ [0-9]+ [0-9]+ [0-9]+ [0-9]+' "$log" || true; } |
+			awk '{n[$4] += $5; b[$4] += $6; ln[$4] += $7; lb[$4] += $8} END {for (k in b) printf "%d\t%d\t%d\t%d\t%s\n", b[k], n[k], lb[k], ln[k], k}' | sort -rn | sed -n 1,40p
 	fi
 	# An -Zincremental-info run prints what happened to each node, summed here over the crates this step compiled.
 	local seen=$target_root/$mode.fates-seen
@@ -250,9 +289,10 @@ run_mode() {
 	done
 	git checkout -q -- .
 	build "$tdir" "$mode" revert
-	if [[ $mode == incr && -n $profile_crates ]] && command -v summarize > /dev/null; then
+	if [[ $mode == incr && -n $profile_crates && ${BENCH_PROFILE:-1} == 1 ]] && command -v summarize > /dev/null; then
 		profile_edit "$tdir" body
 		profile_edit "$tdir" comment
+		profile_edit "$tdir" new-item
 		# The signature edit changes the item that the new-item edit adds. Build that item unprofiled first.
 		edit new-item
 		if ! CARGO_TARGET_DIR="$tdir" CARGO_INCREMENTAL=1 "${cmd[@]}" > "$target_root/profile.log" 2>&1; then
@@ -264,12 +304,14 @@ run_mode() {
 	fi
 	# A changed profile or feature set is a new build configuration, and cargo
 	# gives it new crate dirs.
-	if [[ $workload != rustc ]]; then
+	if [[ $workload != rustc && ${BENCH_CONFIG_CHANGE:-1} == 1 ]]; then
 		CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false build "$tdir" "$mode" config-change
 	fi
 	rm -rf "$tdir"
 }
 
 "$rustc_bin" -vV
-run_mode incr
-run_mode noincr
+# A paired leg runs only the incremental mode. It compares compilers on one runner, so a non-incremental build has nothing to divide.
+for m in ${BENCH_MODES:-incr noincr}; do
+	run_mode "$m"
+done

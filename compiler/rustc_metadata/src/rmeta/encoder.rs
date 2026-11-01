@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::mem;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -11,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use rustc_attr_ir::{AttributeKind, EncodeCrossCrate, find_attr};
 use rustc_data_structures::fingerprint::Fingerprint;
-use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
+use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_data_structures::memmap::{Mmap, MmapMut};
 use rustc_data_structures::owned_slice::slice_owned;
 use rustc_data_structures::stable_hash::{StableHash, StableHasher};
@@ -33,7 +34,7 @@ use rustc_middle::query::Providers;
 use rustc_middle::traits::specialization_graph;
 use rustc_middle::ty::codec::TyEncoder;
 use rustc_middle::ty::fast_reject::{self, TreatParams};
-use rustc_middle::ty::{AssocContainer, MirInMetadata, PrevMetadata};
+use rustc_middle::ty::{AssocContainer, InMetadata, PrevMetadata};
 use rustc_serialize::opaque::FileEncoder;
 use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 use rustc_session::config::mitigation_coverage::DeniedPartialMitigation;
@@ -54,7 +55,7 @@ use twox_hash::XxHash3_128;
 use crate::diagnostics::{FailCreateFileEncoder, FailWriteFile};
 use crate::eii::EiiMapEncodedKeyValue;
 use crate::rmeta::decoder::prev_session::{
-    PrevBody, PrevSession, exported_stable_id, mir_lint_root_bodies,
+    PrevBody, PrevSession, RejectCause, exported_stable_id, mir_lint_root_bodies,
 };
 use crate::rmeta::remapped_def_id::RemappedRawDefId;
 use crate::rmeta::*;
@@ -95,6 +96,10 @@ pub(super) struct EncodeContext<'a, 'tcx> {
     prev_session: Option<PrevSession<'tcx>>,
     /// Each foreign reference this metadata writes by position.
     foreign_refs: Option<ForeignRefsBuilder>,
+    /// Under `-Zincremental-extern-items`, the sum of the fingerprints of the entries of each item that `reads_extern_item_entry` names.
+    item_fingerprints: FxIndexMap<LocalDefId, u64>,
+    /// The local values this metadata holds, which the query cache then leaves out.
+    in_metadata: InMetadata,
 }
 
 #[derive(Default)]
@@ -760,6 +765,11 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
 
         _ = stat!("def-ids", || self.encode_def_ids());
 
+        if tcx.sess.opts.unstable_opts.incremental_rmeta_reuse && tcx.dep_graph.is_fully_enabled() {
+            // This metadata goes into the session directory.
+            let _ = tcx.in_metadata.set(mem::take(&mut self.in_metadata));
+        }
+
         let interpret_alloc_index = stat!("interpret-alloc-index", || {
             let mut interpret_alloc_index = Vec::new();
             let mut n = 0;
@@ -787,6 +797,24 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         // encode the tables. This overwrites def_keys, so it must happen after
         // encode_def_path_table.
         let proc_macro_data = stat!("proc-macro-data", || self.encode_proc_macros());
+
+        // Another crate finds an item reachable when the item is a `NonGeneric` entry of the
+        // exported symbols that the root encodes.
+        if !self.is_proc_macro {
+            use rustc_middle::middle::exported_symbols::ExportedSymbol;
+            for &(symbol, _) in tcx.exported_non_generic_symbols(LOCAL_CRATE) {
+                if let ExportedSymbol::NonGeneric(def_id) = symbol
+                    && let Some(id) = def_id.as_local()
+                {
+                    self.fingerprint_entry(id, DepKind::is_reachable_non_generic, &true);
+                }
+            }
+        }
+
+        for (id, fingerprint) in mem::take(&mut self.item_fingerprints) {
+            // Zero means that the crate wrote no fingerprints.
+            self.table_writer().item_fingerprint(id, fingerprint.max(1));
+        }
 
         let tables = stat!("tables", || self.tables.encode(&mut self.opaque));
 
@@ -1421,6 +1449,14 @@ fn should_encode_type(tcx: TyCtxt<'_>, def_id: LocalDefId, def_kind: DefKind) ->
     }
 }
 
+/// Whether a query creates the definition and feeds its spans, generics, clauses and codegen
+/// attributes. No provider can rebuild a fed value that the query cache does not hold.
+fn is_fed(tcx: TyCtxt<'_>, def_id: LocalDefId, def_kind: DefKind) -> bool {
+    matches!(def_kind, DefKind::Static { nested: true, .. } | DefKind::SyntheticCoroutineBody)
+        || matches!(tcx.def_key(def_id).disambiguated_data.data, DefPathData::OpaqueLifetime(_))
+        || tcx.opt_rpitit_info(def_id.to_def_id()).is_some()
+}
+
 fn should_encode_fn_sig(def_kind: DefKind) -> bool {
     match def_kind {
         DefKind::Fn | DefKind::AssocFn | DefKind::Ctor(_, CtorKind::Fn) => true,
@@ -1551,6 +1587,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             attr_flags |= AttrFlags::IS_DOC_HIDDEN;
         }
 
+        self.fingerprint_entry(def_id, DepKind::is_doc_hidden, &attr_flags.bits());
         self.table_writer().attr_flags(def_id, attr_flags);
     }
 
@@ -1561,6 +1598,21 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
     /// that require encoding as `LazyValue`/`LazyArray` first.
     fn table_writer(&mut self) -> super::TableWriter<'a, 'tcx, '_> {
         super::TableWriter { encoder: self }
+    }
+
+    /// Under `-Zincremental-extern-items`, adds `value`, the entry of `kind` of `id`, to the
+    /// fingerprint of `id`. Call it at each write of an entry that `reads_extern_item_entry`
+    /// names, or another crate reuses a stale value of that entry.
+    fn fingerprint_entry<V: StableHash>(&mut self, id: LocalDefId, kind: DepKind, value: &V) {
+        if !self.tcx.sess.opts.unstable_opts.incremental_extern_items {
+            return;
+        }
+        let fingerprint = self.tcx.with_stable_hashing_context(|mut hcx| {
+            hash_result(&mut hcx, &(kind.as_usize(), value))
+        });
+        // A sum, so the order of the writes does not change it.
+        let sum = self.item_fingerprints.entry(id).or_insert(0);
+        *sum = sum.wrapping_add(fingerprint.to_smaller_hash().as_u64());
     }
 
     fn encode_def_ids(&mut self) {
@@ -1576,6 +1628,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         for local_id in self.local_defs_remapping.iter_sorted_local_ids() {
             let def_id = local_id.to_def_id();
             let def_kind = tcx.def_kind(local_id);
+            self.fingerprint_entry(local_id, DepKind::def_kind, &def_kind);
             self.table_writer().def_kind(local_id, def_kind);
 
             // The `DefCollector` will sometimes create unnecessary `DefId`s
@@ -1602,7 +1655,12 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
 
             if should_encode_span(def_kind) {
                 let def_span = tcx.def_span(local_id);
+                self.fingerprint_entry(local_id, DepKind::def_span, &def_span);
                 self.table_writer().def_span(local_id, def_span);
+                // The provider reads the span out of the HIR again, which costs less than a cache entry.
+                if !is_fed(tcx, local_id, def_kind) {
+                    self.in_metadata.def_span.insert(local_id);
+                }
             }
             if should_encode_attrs(def_kind) {
                 self.encode_attrs(local_id);
@@ -1613,10 +1671,19 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             if should_encode_span(def_kind)
                 && let Some(ident_span) = tcx.def_ident_span(def_id)
             {
+                self.fingerprint_entry(local_id, DepKind::def_ident_span, &ident_span);
                 self.table_writer().def_ident_span(local_id, ident_span);
+                if !is_fed(tcx, local_id, def_kind) {
+                    self.in_metadata.def_ident_span.insert(local_id);
+                }
             }
             if def_kind.has_codegen_attrs() {
-                self.table_writer().codegen_fn_attrs(local_id, tcx.codegen_fn_attrs(def_id));
+                let attrs = tcx.codegen_fn_attrs(def_id);
+                self.fingerprint_entry(local_id, DepKind::codegen_fn_attrs, attrs);
+                self.table_writer().codegen_fn_attrs(local_id, attrs);
+                if !is_fed(tcx, local_id, def_kind) {
+                    self.in_metadata.codegen_fn_attrs.insert(local_id);
+                }
             }
             if should_encode_visibility(def_kind) {
                 let vis = tcx.local_visibility(local_id).map_id(|mod_id| mod_id.to_local_def_id());
@@ -1630,16 +1697,28 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             }
             if should_encode_variances(tcx, def_id, def_kind) {
                 let v = tcx.variances_of(def_id);
+                self.fingerprint_entry(local_id, DepKind::variances_of, &v);
                 self.table_writer().variances_of(local_id, v);
             }
             if should_encode_fn_sig(def_kind) {
-                self.table_writer().fn_sig(local_id, tcx.fn_sig(def_id));
+                let fn_sig = tcx.fn_sig(def_id);
+                self.fingerprint_entry(local_id, DepKind::fn_sig, &fn_sig);
+                self.table_writer().fn_sig(local_id, fn_sig);
+                self.in_metadata.fn_sig.insert(local_id);
             }
             if should_encode_generics(def_kind) {
                 let g = tcx.generics_of(def_id);
+                self.fingerprint_entry(local_id, DepKind::generics_of, g);
                 self.table_writer().generics_of(local_id, g);
-                self.table_writer().explicit_clauses_of(local_id, tcx.explicit_clauses_of(def_id));
+                let clauses = tcx.explicit_clauses_of(def_id);
+                self.fingerprint_entry(local_id, DepKind::explicit_clauses_of, &clauses);
+                self.table_writer().explicit_clauses_of(local_id, clauses);
+                if !is_fed(tcx, local_id, def_kind) {
+                    self.in_metadata.generics_of.insert(local_id);
+                    self.in_metadata.explicit_clauses_of.insert(local_id);
+                }
                 let inferred_outlives = tcx.inferred_outlives_of(def_id);
+                self.fingerprint_entry(local_id, DepKind::inferred_outlives_of, &inferred_outlives);
                 self.table_writer().inferred_outlives_of(local_id, inferred_outlives);
 
                 for param in &g.own_params {
@@ -1654,24 +1733,36 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 self.table_writer().const_conditions(local_id, tcx.const_conditions(def_id));
             }
             if should_encode_type(tcx, local_id, def_kind) {
-                self.table_writer().type_of(local_id, tcx.type_of(def_id));
+                let ty = tcx.type_of(def_id);
+                self.fingerprint_entry(local_id, DepKind::type_of, &ty);
+                self.table_writer().type_of(local_id, ty);
+                // A fed type has no provider that can rebuild it when the metadata fails.
+                if !matches!(def_kind, DefKind::AnonConst | DefKind::SyntheticCoroutineBody) {
+                    self.in_metadata.type_of.insert(local_id);
+                }
             }
             if should_encode_constness(def_kind) {
                 let constness = tcx.constness(def_id);
+                self.fingerprint_entry(local_id, DepKind::constness, &constness);
                 self.table_writer().constness(local_id, constness);
             }
             if let DefKind::Fn | DefKind::AssocFn = def_kind {
                 let asyncness = tcx.asyncness(def_id);
+                self.fingerprint_entry(local_id, DepKind::asyncness, &asyncness);
                 self.table_writer().asyncness(local_id, asyncness);
                 self.table_writer().fn_arg_idents(local_id, tcx.fn_arg_idents(def_id));
             }
-            self.table_writer().intrinsic(local_id, tcx.intrinsic(def_id));
+            let intrinsic = tcx.intrinsic(def_id);
+            self.fingerprint_entry(local_id, DepKind::intrinsic_raw, &intrinsic);
+            self.table_writer().intrinsic(local_id, intrinsic);
             if let DefKind::TyParam | DefKind::Trait = def_kind {
                 let default = tcx.object_lifetime_default(def_id);
                 self.table_writer().object_lifetime_default(local_id, default);
             }
             if let DefKind::Trait = def_kind {
-                self.table_writer().trait_def(local_id, tcx.trait_def(def_id));
+                let trait_def = tcx.trait_def(def_id);
+                self.fingerprint_entry(local_id, DepKind::trait_def, trait_def);
+                self.table_writer().trait_def(local_id, trait_def);
                 self.table_writer().explicit_super_clauses_of(
                     local_id,
                     tcx.explicit_super_clauses_of(def_id).skip_binder(),
@@ -1693,7 +1784,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 }
             }
             if let DefKind::TraitAlias = def_kind {
-                self.table_writer().trait_def(local_id, tcx.trait_def(def_id));
+                let trait_def = tcx.trait_def(def_id);
+                self.fingerprint_entry(local_id, DepKind::trait_def, trait_def);
+                self.table_writer().trait_def(local_id, trait_def);
                 self.table_writer().explicit_super_clauses_of(
                     local_id,
                     tcx.explicit_super_clauses_of(def_id).skip_binder(),
@@ -1904,6 +1997,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             if let Some((CtorKind::Fn, ctor_def_id)) = variant.ctor {
                 let fn_sig = tcx.fn_sig(ctor_def_id);
                 // FIXME only encode signature for ctor_def_id
+                self.fingerprint_entry(variant_id, DepKind::fn_sig, &fn_sig);
                 self.table_writer().fn_sig(variant_id, fn_sig);
             }
         }
@@ -1971,9 +2065,13 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
     fn encode_info_for_assoc_item(&mut self, def_id: LocalDefId) {
         let tcx = self.tcx;
         let item = tcx.associated_item(def_id);
+        // Another crate decodes the item from several tables. Each of them holds a part of it.
+        self.fingerprint_entry(def_id, DepKind::associated_item, &item);
 
         if matches!(item.container, AssocContainer::Trait | AssocContainer::TraitImpl(_)) {
-            self.table_writer().defaultness(def_id, item.defaultness(tcx));
+            let defaultness = item.defaultness(tcx);
+            self.fingerprint_entry(def_id, DepKind::defaultness, &defaultness);
+            self.table_writer().defaultness(def_id, defaultness);
         }
 
         self.table_writer().assoc_container(def_id, item.container);
@@ -2062,7 +2160,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             let (encode_const, encode_opt) = should_encode_mir(tcx, reachable_set, def_id);
             if encode_const || encode_opt { Some((def_id, encode_const, encode_opt)) } else { None }
         });
-        let mut in_metadata = MirInMetadata::default();
+        let mut in_metadata = mem::take(&mut self.in_metadata);
         for (def_id, encode_const, encode_opt) in keys_and_jobs {
             debug_assert!(encode_const || encode_opt);
 
@@ -2073,11 +2171,14 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                     .reused_body(PrevBody::OptimizedMir, def_id)
                     .unwrap_or_else(|| tcx.optimized_mir(def_id));
                 self.table_writer().optimized_mir(def_id, body);
+                // Another crate reads the presence of this entry as `is_mir_available`.
+                self.fingerprint_entry(def_id, DepKind::is_mir_available, &true);
                 let lint_roots = mir_lint_roots(tcx, def_id, [body]);
                 self.table_writer().optimized_mir_lint_roots(def_id, lint_roots);
 
-                self.table_writer()
-                    .cross_crate_inlinable(def_id, tcx.cross_crate_inlinable(def_id));
+                let inlinable = tcx.cross_crate_inlinable(def_id);
+                self.fingerprint_entry(def_id, DepKind::cross_crate_inlinable, &inlinable);
+                self.table_writer().cross_crate_inlinable(def_id, inlinable);
 
                 self.table_writer().closure_saved_names_of_captured_variables(
                     def_id,
@@ -2138,21 +2239,24 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             }
         }
 
-        if tcx.sess.opts.unstable_opts.incremental_rmeta_reuse && tcx.dep_graph.is_fully_enabled() {
-            // This metadata goes into the session directory.
-            let _ = tcx.mir_in_metadata.set(in_metadata);
-        }
+        self.in_metadata = in_metadata;
 
         if tcx.sess.opts.unstable_opts.incremental_rmeta_reuse
             && tcx.sess.opts.unstable_opts.incremental_info
         {
             match &self.prev_session {
-                Some(prev) => eprintln!(
-                    "[incremental] metadata: decoded {} of {} MIR bodies from the previous session ({} marked green)",
-                    prev.reused.get(),
-                    prev.requested.get(),
-                    prev.attempted.get(),
-                ),
+                Some(prev) => {
+                    eprintln!(
+                        "[incremental] metadata: decoded {} of {} MIR bodies from the previous session ({} marked green)",
+                        prev.reused.get(),
+                        prev.requested.get(),
+                        prev.attempted.get(),
+                    );
+                    eprintln!(
+                        "[incremental] metadata: items the decoder rejected, by cause: {}",
+                        reject_causes(prev)
+                    );
+                }
                 None => {
                     eprintln!("[incremental] metadata: no previous metadata to decode MIR from")
                 }
@@ -2183,6 +2287,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         // the stability attributes are even enabled before using their queries.
         if self.feat.staged_api() || self.tcx.sess.opts.unstable_opts.force_unstable_if_unmarked {
             if let Some(stab) = self.tcx.lookup_stability(def_id) {
+                self.fingerprint_entry(def_id, DepKind::lookup_stability, &stab);
                 self.table_writer().lookup_stability(def_id, stab);
             }
         }
@@ -2213,6 +2318,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
     #[instrument(level = "debug", skip(self))]
     fn encode_deprecation(&mut self, def_id: LocalDefId) {
         if let Some(depr) = self.tcx.lookup_deprecation(def_id.to_def_id()) {
+            self.fingerprint_entry(def_id, DepKind::lookup_deprecation_entry, &depr);
             self.table_writer().lookup_deprecation_entry(def_id, depr);
         }
     }
@@ -2276,12 +2382,16 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
 
             let stability = tcx.lookup_stability(CRATE_DEF_ID);
 
+            let crate_span = tcx.def_span(CRATE_DEF_ID.to_def_id());
+            self.fingerprint_entry(CRATE_DEF_ID, DepKind::def_kind, &DefKind::Mod);
             self.table_writer().def_kind(CRATE_DEF_ID, DefKind::Mod);
-            self.table_writer().def_span(CRATE_DEF_ID, tcx.def_span(CRATE_DEF_ID.to_def_id()));
+            self.fingerprint_entry(CRATE_DEF_ID, DepKind::def_span, &crate_span);
+            self.table_writer().def_span(CRATE_DEF_ID, crate_span);
             self.encode_attrs(CRATE_DEF_ID);
             let vis = tcx.local_visibility(CRATE_DEF_ID).map_id(|mod_id| mod_id.to_local_def_id());
             self.table_writer().visibility(CRATE_DEF_ID, vis);
             if let Some(stability) = stability {
+                self.fingerprint_entry(CRATE_DEF_ID, DepKind::lookup_stability, &stability);
                 self.table_writer().lookup_stability(CRATE_DEF_ID, stability);
             }
             self.encode_deprecation(CRATE_DEF_ID);
@@ -2332,14 +2442,19 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 let mut def_key = tcx.hir_def_key(id);
                 def_key.disambiguated_data.data = DefPathData::MacroNs(name);
 
-                self.table_writer().def_kind(id, DefKind::Macro(macro_kind.into()));
+                let def_kind = DefKind::Macro(macro_kind.into());
+                self.fingerprint_entry(id, DepKind::def_kind, &def_kind);
+                self.table_writer().def_kind(id, def_kind);
 
                 self.encode_attrs(id);
                 self.table_writer().def_keys(id, def_key);
+                self.fingerprint_entry(id, DepKind::def_ident_span, &span);
                 self.table_writer().def_ident_span(id, span);
+                self.fingerprint_entry(id, DepKind::def_span, &span);
                 self.table_writer().def_span(id, span);
                 self.table_writer().visibility(id, ty::Visibility::Public);
                 if let Some(stability) = stability {
+                    self.fingerprint_entry(id, DepKind::lookup_stability, &stability);
                     self.table_writer().lookup_stability(id, stability);
                 }
             }
@@ -2508,6 +2623,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
 
             if of_trait {
                 let header = tcx.impl_trait_header(local_id);
+                self.fingerprint_entry(local_id, DepKind::impl_trait_header, &header);
                 self.table_writer().impl_trait_header(local_id, header);
 
                 let impl_is_fully_generic_for_reflection =
@@ -2517,7 +2633,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                     local_id,
                     impl_is_fully_generic_for_reflection,
                 );
-                self.table_writer().defaultness(local_id, tcx.defaultness(local_id));
+                let defaultness = tcx.defaultness(local_id);
+                self.fingerprint_entry(local_id, DepKind::defaultness, &defaultness);
+                self.table_writer().defaultness(local_id, defaultness);
 
                 let trait_ref = header.trait_ref.instantiate_identity().skip_norm_wip();
                 let simplified_self_ty = fast_reject::simplify_type(
@@ -2772,9 +2890,67 @@ struct PrevMetadataMir<'tcx> {
     const_bodies: [AtomicUsize; 3],
     /// Under `-Z incremental-info`, the first decoded body that did not match its hash.
     first_mismatch: Lock<Option<(LocalDefId, Fingerprint, &'tcx mir::Body<'tcx>)>>,
+    /// The decoded, rejected and mismatched counts for types and signatures.
+    signatures: [AtomicUsize; 3],
+    /// Each value that a query took from this metadata.
+    taken: Lock<FxHashSet<(DepKind, LocalDefId)>>,
 }
 
 impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
+    fn type_of(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<ty::EarlyBinder<'tcx, Ty<'tcx>>> {
+        let ty = self.session.lock().type_of(def);
+        self.checked(tcx, &self.signatures, DepKind::type_of, def, ty, expected)
+    }
+
+    fn fn_sig(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<ty::EarlyBinder<'tcx, ty::PolyFnSig<'tcx>>> {
+        let sig = self.session.lock().fn_sig(def);
+        self.checked(tcx, &self.signatures, DepKind::fn_sig, def, sig, expected)
+    }
+
+    fn generics_of(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<ty::Generics> {
+        let generics = self.session.lock().generics_of(def);
+        self.checked(tcx, &self.signatures, DepKind::generics_of, def, generics, expected)
+    }
+
+    fn explicit_clauses_of(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<ty::GenericClauses<'tcx>> {
+        let clauses = self.session.lock().explicit_clauses_of(def);
+        self.checked(tcx, &self.signatures, DepKind::explicit_clauses_of, def, clauses, expected)
+    }
+
+    fn codegen_fn_attrs(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<CodegenFnAttrs> {
+        let attrs = self.session.lock().codegen_fn_attrs(def);
+        self.checked(tcx, &self.signatures, DepKind::codegen_fn_attrs, def, attrs, expected)
+    }
+
+    fn decoded(&self, kind: DepKind, def: LocalDefId) -> bool {
+        self.taken.lock().contains(&(kind, def))
+    }
+
     fn optimized_mir(
         &self,
         tcx: TyCtxt<'tcx>,
@@ -2801,6 +2977,7 @@ impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
             return None;
         }
         self.decoded.fetch_add(1, Ordering::Relaxed);
+        self.taken.lock().insert((DepKind::optimized_mir, def));
         Some(tcx.arena.alloc(body))
     }
 
@@ -2811,7 +2988,9 @@ impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
         expected: Fingerprint,
     ) -> Option<&'tcx mir::Body<'tcx>> {
         let body = self.session.lock().body(PrevBody::MirForCtfe, def);
-        Some(tcx.arena.alloc(self.checked(tcx, "CTFE MIR", def, body, expected)?))
+        let body =
+            self.checked(tcx, &self.const_bodies, DepKind::mir_for_ctfe, def, body, expected);
+        Some(tcx.arena.alloc(body?))
     }
 
     fn promoted_mir(
@@ -2821,7 +3000,9 @@ impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
         expected: Fingerprint,
     ) -> Option<&'tcx IndexVec<mir::Promoted, mir::Body<'tcx>>> {
         let promoted = self.session.lock().promoted(def);
-        Some(tcx.arena.alloc(self.checked(tcx, "promoted MIR", def, promoted, expected)?))
+        let promoted =
+            self.checked(tcx, &self.const_bodies, DepKind::promoted_mir, def, promoted, expected);
+        Some(tcx.arena.alloc(promoted?))
     }
 
     fn explain_mismatch(&self, tcx: TyCtxt<'tcx>, def: LocalDefId, built: &mir::Body<'tcx>) {
@@ -2910,9 +3091,20 @@ impl<'tcx> PrevMetadata<'tcx> for PrevMetadataMir<'tcx> {
             self.rejected.load(Ordering::Relaxed),
             self.mismatched.load(Ordering::Relaxed),
         );
+        eprintln!(
+            "[incremental] codegen: items the decoder rejected, by cause: {}",
+            reject_causes(&self.session.lock())
+        );
         let [decoded, rejected, mismatched] = &self.const_bodies;
         eprintln!(
             "[incremental] codegen: decoded {} CTFE and promoted MIR values from metadata, {} rejected, {} mismatched",
+            decoded.load(Ordering::Relaxed),
+            rejected.load(Ordering::Relaxed),
+            mismatched.load(Ordering::Relaxed),
+        );
+        let [decoded, rejected, mismatched] = &self.signatures;
+        eprintln!(
+            "[incremental] codegen: decoded {} types and signatures from metadata, {} rejected, {} mismatched",
             decoded.load(Ordering::Relaxed),
             rejected.load(Ordering::Relaxed),
             mismatched.load(Ordering::Relaxed),
@@ -2925,12 +3117,13 @@ impl<'tcx> PrevMetadataMir<'tcx> {
     fn checked<T: StableHash>(
         &self,
         tcx: TyCtxt<'tcx>,
-        what: &str,
+        counts: &[AtomicUsize; 3],
+        kind: DepKind,
         def: LocalDefId,
         value: Option<T>,
         expected: Fingerprint,
     ) -> Option<T> {
-        let [decoded, rejected, mismatched] = &self.const_bodies;
+        let [decoded, rejected, mismatched] = counts;
         let Some(value) = value else {
             rejected.fetch_add(1, Ordering::Relaxed);
             return None;
@@ -2941,11 +3134,12 @@ impl<'tcx> PrevMetadataMir<'tcx> {
         if hash != expected {
             let earlier = mismatched.fetch_add(1, Ordering::Relaxed);
             if earlier == 0 && tcx.sess.opts.unstable_opts.incremental_info {
-                eprintln!("[incremental] codegen: mismatch of the {what} of {def:?}");
+                eprintln!("[incremental] codegen: mismatch of the {kind:?} of {def:?}");
             }
             return None;
         }
         decoded.fetch_add(1, Ordering::Relaxed);
+        self.taken.lock().insert((kind, def));
         Some(value)
     }
 }
@@ -2962,6 +3156,12 @@ pub(crate) fn prev_metadata_explain_mismatch<'tcx>(
     if let Some(Some(prev)) = tcx.prev_metadata.get() {
         prev.explain_mismatch(tcx, def, built);
     }
+}
+
+/// The items the session's decoder rejected, as `cause count` pairs.
+fn reject_causes(prev: &PrevSession<'_>) -> String {
+    let counts = RejectCause::NAMES.iter().zip(&prev.rejects);
+    counts.map(|(name, count)| format!("{name} {}", count.get())).collect::<Vec<_>>().join(" ")
 }
 
 /// Provides the `prev_metadata_optimized_mir` hook.
@@ -2991,6 +3191,51 @@ pub(crate) fn prev_metadata_promoted_mir<'tcx>(
     prev.promoted_mir(tcx, def, expected)
 }
 
+/// Provides the `prev_metadata_type_of` hook.
+pub(crate) fn prev_metadata_type_of<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+) -> Option<ty::EarlyBinder<'tcx, Ty<'tcx>>> {
+    let (prev, expected) = prev_metadata_for(tcx, DepKind::type_of, def)?;
+    prev.type_of(tcx, def, expected)
+}
+
+/// Provides the `prev_metadata_fn_sig` hook.
+pub(crate) fn prev_metadata_fn_sig<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+) -> Option<ty::EarlyBinder<'tcx, ty::PolyFnSig<'tcx>>> {
+    let (prev, expected) = prev_metadata_for(tcx, DepKind::fn_sig, def)?;
+    prev.fn_sig(tcx, def, expected)
+}
+
+/// Provides the `prev_metadata_generics_of` hook.
+pub(crate) fn prev_metadata_generics_of<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+) -> Option<ty::Generics> {
+    let (prev, expected) = prev_metadata_for(tcx, DepKind::generics_of, def)?;
+    prev.generics_of(tcx, def, expected)
+}
+
+/// Provides the `prev_metadata_explicit_clauses_of` hook.
+pub(crate) fn prev_metadata_explicit_clauses_of<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+) -> Option<ty::GenericClauses<'tcx>> {
+    let (prev, expected) = prev_metadata_for(tcx, DepKind::explicit_clauses_of, def)?;
+    prev.explicit_clauses_of(tcx, def, expected)
+}
+
+/// Provides the `prev_metadata_codegen_fn_attrs` hook.
+pub(crate) fn prev_metadata_codegen_fn_attrs<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: LocalDefId,
+) -> Option<CodegenFnAttrs> {
+    let (prev, expected) = prev_metadata_for(tcx, DepKind::codegen_fn_attrs, def)?;
+    prev.codegen_fn_attrs(tcx, def, expected)
+}
+
 /// The session's metadata and the recorded hash of `def`'s value of the query
 /// of `kind`.
 fn prev_metadata_for<'tcx>(
@@ -3014,6 +3259,8 @@ fn prev_metadata_for<'tcx>(
             mismatched: AtomicUsize::new(0),
             const_bodies: Default::default(),
             first_mismatch: Lock::new(None),
+            signatures: Default::default(),
+            taken: Default::default(),
         }));
         Some(prev as &'tcx dyn PrevMetadata<'tcx>)
     });
@@ -3220,6 +3467,8 @@ fn with_encode_metadata_header(
         prev_session: None,
         // A proc-macro crate encodes no foreign references.
         foreign_refs: (!tcx.crate_types().contains(&CrateType::ProcMacro)).then(Default::default),
+        item_fingerprints: Default::default(),
+        in_metadata: Default::default(),
     };
 
     // Encode the rustc version string in a predictable location.

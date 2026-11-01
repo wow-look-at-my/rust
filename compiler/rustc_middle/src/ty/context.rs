@@ -804,30 +804,62 @@ pub struct GlobalCtxt<'tcx> {
     /// Stores memory for globals (statics/consts).
     pub(crate) alloc_map: interpret::AllocMap<'tcx>,
 
-    /// Under `-Z incremental-rmeta-reuse`, the bodies whose MIR this session's metadata holds.
-    pub mir_in_metadata: OnceLock<MirInMetadata>,
+    /// Under `-Z incremental-rmeta-reuse`, the local values that this session's metadata holds.
+    pub in_metadata: OnceLock<InMetadata>,
 
-    /// The metadata in `old_session_directory`. It gives green bodies their MIR.
+    /// The metadata in `old_session_directory`. It gives green items their MIR, type and signature.
     pub prev_metadata: OnceLock<Option<&'tcx dyn PrevMetadata<'tcx>>>,
 
     current_gcx: CurrentGcx,
 }
 
-/// The bodies whose MIR the metadata of this session holds, per query.
+/// The local values that the metadata of this session holds, per query.
 #[derive(Default)]
-pub struct MirInMetadata {
+pub struct InMetadata {
     pub optimized_mir: FxHashSet<LocalDefId>,
     pub mir_for_ctfe: FxHashSet<LocalDefId>,
     pub promoted_mir: FxHashSet<LocalDefId>,
+    pub type_of: FxHashSet<LocalDefId>,
+    pub fn_sig: FxHashSet<LocalDefId>,
+    pub generics_of: FxHashSet<LocalDefId>,
+    pub explicit_clauses_of: FxHashSet<LocalDefId>,
+    pub codegen_fn_attrs: FxHashSet<LocalDefId>,
+    pub def_span: FxHashSet<LocalDefId>,
+    pub def_ident_span: FxHashSet<LocalDefId>,
 }
 
-impl MirInMetadata {
+impl InMetadata {
+    /// The queries whose values the query cache leaves out when the metadata holds them. A
+    /// provider gives such a value back from the metadata, or builds it again from the HIR.
+    pub fn holds_kind(kind: DepKind) -> bool {
+        matches!(
+            kind,
+            DepKind::optimized_mir
+                | DepKind::mir_for_ctfe
+                | DepKind::promoted_mir
+                | DepKind::type_of
+                | DepKind::fn_sig
+                | DepKind::generics_of
+                | DepKind::explicit_clauses_of
+                | DepKind::codegen_fn_attrs
+                | DepKind::def_span
+                | DepKind::def_ident_span
+        )
+    }
+
     /// The set for the query of `kind`, if the metadata holds values of that query.
     pub fn for_kind(&self, kind: DepKind) -> Option<&FxHashSet<LocalDefId>> {
         match kind {
             DepKind::optimized_mir => Some(&self.optimized_mir),
             DepKind::mir_for_ctfe => Some(&self.mir_for_ctfe),
             DepKind::promoted_mir => Some(&self.promoted_mir),
+            DepKind::type_of => Some(&self.type_of),
+            DepKind::fn_sig => Some(&self.fn_sig),
+            DepKind::generics_of => Some(&self.generics_of),
+            DepKind::explicit_clauses_of => Some(&self.explicit_clauses_of),
+            DepKind::codegen_fn_attrs => Some(&self.codegen_fn_attrs),
+            DepKind::def_span => Some(&self.def_span),
+            DepKind::def_ident_span => Some(&self.def_ident_span),
             _ => None,
         }
     }
@@ -858,6 +890,49 @@ pub trait PrevMetadata<'tcx>: DynSend + DynSync {
         def: LocalDefId,
         expected: Fingerprint,
     ) -> Option<&'tcx IndexVec<Promoted, Body<'tcx>>>;
+
+    /// The type of a green node, if it decodes and its hash is `expected`.
+    fn type_of(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<ty::EarlyBinder<'tcx, Ty<'tcx>>>;
+
+    /// The signature of a green node, if it decodes and its hash is `expected`.
+    fn fn_sig(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<ty::EarlyBinder<'tcx, ty::PolyFnSig<'tcx>>>;
+
+    /// The generics of a green node, if they decode and their hash is `expected`.
+    fn generics_of(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<ty::Generics>;
+
+    /// The clauses of a green node, if they decode and their hash is `expected`.
+    fn explicit_clauses_of(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<ty::GenericClauses<'tcx>>;
+
+    /// The codegen attributes of a green node, if they decode and their hash is `expected`.
+    fn codegen_fn_attrs(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        def: LocalDefId,
+        expected: Fingerprint,
+    ) -> Option<CodegenFnAttrs>;
+
+    /// Whether this session decoded the value of `def` for the query of `kind`.
+    fn decoded(&self, kind: DepKind, def: LocalDefId) -> bool;
 
     /// Prints how many bodies decoded, and how many did not, under `-Z incremental-info`.
     fn report(&self);
@@ -1064,7 +1139,7 @@ impl<'tcx> TyCtxt<'tcx> {
             caches: Default::default(),
             data_layout,
             alloc_map: interpret::AllocMap::new(),
-            mir_in_metadata: OnceLock::new(),
+            in_metadata: OnceLock::new(),
             prev_metadata: OnceLock::new(),
             current_gcx,
         });

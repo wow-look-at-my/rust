@@ -2583,6 +2583,12 @@ options! {
     incremental_explain_red: Option<Vec<String>> = (None, parse_opt_comma_list, [UNTRACKED],
         "comma-separated dep kinds: for each node of these kinds that cannot be marked green, \
         print the chain of red dependencies down to the input that changed (default: none)"),
+    incremental_extern_items: bool = (false, parse_bool, [TRACKED],
+        "write a fingerprint of each item into the crate metadata, and give each item of another \
+        crate one dep node that its metadata lookups read (default: no)"),
+    incremental_extern_sysroot: bool = (false, parse_bool, [TRACKED],
+        "with `-Zincremental-extern-items`, make a metadata lookup of an item of a sysroot crate \
+        read the hash of that crate instead of the fingerprint of the item (default: no)"),
     incremental_ignore_spans: bool = (false, parse_bool, [TRACKED],
         "ignore spans during ICH computation -- used for testing (default: no)"),
     incremental_info: bool = (false, parse_bool, [UNTRACKED],
@@ -2594,6 +2600,9 @@ options! {
     incremental_keep_configs: Option<usize> = (None, parse_opt_number, [UNTRACKED],
         "number of build configurations of a crate to keep in the incremental directory, \
         most recently used first (default: keep all)"),
+    incremental_mir_working_set: bool = (false, parse_bool, [TRACKED],
+        "write the `optimized_mir` and `promoted_mir` of a body to the query cache only when this \
+        session used it, and none in a session with no previous dep graph (default: no)"),
     incremental_rmeta_reuse: bool = (false, parse_bool, [UNTRACKED],
         "decode the MIR of unchanged items from the previous session's crate metadata \
         instead of recomputing it (default: no)"),
@@ -2605,6 +2614,9 @@ options! {
         "when a crate has more codegen units than the limit, merge each into a bucket picked \
         by a hash of its name instead of by size, so a size change renames no other unit \
         (default: no)"),
+    incremental_transparent: Option<Vec<String>> = (None, parse_opt_comma_list, [TRACKED],
+        "comma-separated dep kinds that get no dep node of their own: each task of such a kind \
+        hands its reads to the task that reads it (default: none)"),
     incremental_uncache: Option<Vec<String>> = (None, parse_opt_comma_list, [UNTRACKED],
         "comma-separated query names to treat as not cache_on_disk: the query cache does not \
         write or load their values, so they recompute when needed (default: none)"),

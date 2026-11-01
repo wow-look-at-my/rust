@@ -49,12 +49,12 @@ pub fn query_system<'tcx>(
     }
 }
 
-/// Returns the names in `uncache` that are not `cache_on_disk` queries.
+/// Returns the names in `uncache` that are not `cache_on_disk` queries, or that are fed.
 pub fn unknown_uncache_names(uncache: &[String]) -> Vec<&str> {
     uncache
         .iter()
         .map(String::as_str)
-        .filter(|n| !query_vtables::QUERY_CACHE_ON_DISK.iter().any(|&(q, c)| c && q == *n))
+        .filter(|n| !query_vtables::QUERY_UNCACHEABLE.iter().any(|&(q, c)| c && q == *n))
         .collect()
 }
 

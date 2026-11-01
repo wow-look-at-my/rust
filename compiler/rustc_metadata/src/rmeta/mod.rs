@@ -4,6 +4,7 @@ use std::num::NonZero;
 use std::rc::Rc;
 
 use decoder::LazyDecoder;
+pub use decoder::read_extern_item;
 pub(crate) use decoder::{CrateMetadata, CrateNumMap, MetadataBlob, TargetModifiers};
 use def_path_hash_map::DefPathHashMapRef;
 use encoder::EncodeContext;
@@ -72,7 +73,7 @@ pub(crate) fn rustc_version(cfg_version: &'static str) -> String {
 /// Metadata encoding version.
 /// N.B., increment this if you change the format of metadata such that
 /// the rustc version can't be found to compare with `rustc_version()`.
-const METADATA_VERSION: u8 = 11;
+const METADATA_VERSION: u8 = 12;
 
 /// Metadata header which includes `METADATA_VERSION`.
 ///
@@ -649,6 +650,8 @@ define_tables! {
     // Note also that this table is fully populated (no gaps) as every DefIndex should have a
     // corresponding DefPathHash.
     def_path_hashes: Table<u64>,
+    // With `-Zincremental-extern-items`, the fingerprint of the entries of each item that `reads_extern_item_entry` names.
+    item_fingerprint: Table<u64>,
     explicit_item_bounds: Table<LazyArray<(ty::Clause<'static>, Span)>>,
     explicit_item_self_bounds: Table<LazyArray<(ty::Clause<'static>, Span)>>,
     inferred_outlives_of: Table<LazyArray<(ty::Clause<'static>, Span)>>,

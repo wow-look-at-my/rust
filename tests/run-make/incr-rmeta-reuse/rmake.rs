@@ -24,6 +24,22 @@ fn decoded_count(stderr: &str) -> usize {
     rest.split(' ').next().unwrap().parse().unwrap()
 }
 
+fn signatures_count(stderr: &str) -> usize {
+    let line = stderr
+        .lines()
+        .find(|l| l.contains("types and signatures from metadata"))
+        .unwrap_or_else(|| panic!("no report of decoded types in:\n{stderr}"));
+    let rest = line.split("decoded ").nth(1).unwrap();
+    rest.split(' ').next().unwrap().parse().unwrap()
+}
+
+fn assert_no_mismatch(stderr: &str) {
+    // A value that a query decodes must hash the same as the value in the dep graph.
+    for line in stderr.lines().filter(|l| l.contains("[incremental] codegen: decoded")) {
+        assert!(line.ends_with(" 0 mismatched"), "a decoded value did not match its hash: {line}");
+    }
+}
+
 fn main() {
     rfs::create_dir("src");
     rfs::copy("lib_v1.rs", "src/lib.rs");
@@ -32,10 +48,12 @@ fn main() {
     rfs::copy("lib_v2.rs", "src/lib.rs");
     let stderr = build_lib("incr", "reuse", true);
     assert!(decoded_count(&stderr) > 0, "no MIR body was decoded:\n{stderr}");
-    // A body that codegen decodes must hash the same as the body in the dep graph.
-    for line in stderr.lines().filter(|l| l.contains("[incremental] codegen: decoded")) {
-        assert!(line.ends_with(" 0 mismatched"), "decoded MIR did not match its hash: {line}");
-    }
+    assert!(signatures_count(&stderr) > 0, "no type or signature was decoded:\n{stderr}");
+    assert_no_mismatch(&stderr);
+
+    // Nothing changed, so this session copies the metadata and still needs the decoded values.
+    let stderr = build_lib("incr", "reuse", true);
+    assert_no_mismatch(&stderr);
 
     build_lib("fresh-incr", "fresh", false);
     assert!(

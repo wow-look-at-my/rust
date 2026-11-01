@@ -242,9 +242,9 @@ macro_rules! define_queries {
             }
         }
 
-        /// Each query name, paired with its static `cache_on_disk` modifier.
-        pub(crate) const QUERY_CACHE_ON_DISK: &[(&str, bool)] = &[
-            $( (stringify!($name), $cache_on_disk), )*
+        /// Each query name, paired with whether `-Zincremental-uncache` can drop its disk cache.
+        pub(crate) const QUERY_UNCACHEABLE: &[(&str, bool)] = &[
+            $( (stringify!($name), $cache_on_disk && !$feedable), )*
         ];
 
         /// Given a filter condition (e.g. `ALL` or `CACHE_ON_DISK`), a `tcx`,
