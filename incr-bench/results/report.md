@@ -161,6 +161,23 @@ CI run 41229132297 passed the flags to the bootstrap tool as well. Medians over 
 
 `props-sym` now meets both bounds on rustc at every step, and on grok at the comment and body edits. The profile of the grok new-item edit shows `typeck_root` running again in `xai_grok_shell` under `props-sym-mir`, for 7.34 s of self time. The source is `promoted_mir` (`compiler/rustc_mir_transform/src/lib.rs:870`): for a body the `.rmeta` lacks, it runs `mir_borrowck` and `mir_promoted` again, and those typeck the body. On that edit the codegen side rejected 550 promoted and CTFE bodies. The next run caches `promoted_mir` as well.
 
+CI run 41245662560 measured `props-sym-mirp`, which caches `promoted_mir` too, again only for the bodies the metadata lacks. Medians over the rounds, against unpatched:
+
+| step | grok props-sym-mir | grok props-sym-mirp | rustc props-sym-mir | rustc props-sym-mirp |
+|---|---:|---:|---:|---:|
+| edit:comment | 1.00x | 0.93x | 0.99x | 0.97x |
+| edit:body | 1.03x | 0.91x | 1.02x | 0.99x |
+| edit:new-item | 1.07x | 0.97x | 1.02x | 0.99x |
+| edit:signature | 1.01x | 0.89x | 0.99x | 0.97x |
+| revert | 1.01x | 0.90x | 0.99x | 0.97x |
+
+| workload | config | dep-graph.bin MB | query-cache.bin MB | *.o MB | graph+cache % of *.o |
+|---|---|---:|---:|---:|---:|
+| grok | props-sym-mirp | 640.3 | 291.2 | 1774.6 | 52% |
+| rustc | props-sym-mirp | 402.1 | 145.1 | 481.4 | 114% |
+
+On grok `props-sym-mirp` is faster than unpatched at every step, at 52% of the object files. On rustc it is within 10% of unpatched at every step and over the size bound, at 114%. On rustc `props-sym` meets both bounds, at 95%. The rustc query cache under `props-sym-mirp` holds 77.7 MB of `optimized_mir` for 44,887 bodies, a third of it spans, and 30.0 MB of `items_of_instance`. The spans are already relative to the parent or the previous span. The rustc graph is 402.1 MB, so `props-sym-mirp` fits rustc only with about 66 MB less graph or cache.
+
 The breakdown that each crate prints matches run 52 on rustc. The extra 12.4 MB of query cache thus sits in compiles that print no breakdown. The next run lists the largest query caches by crate to name them.
 
 Both configs are within 10% of unpatched on every rustc step, and so is every round of `props-ctfe`. The rounds agree to within 5% of each other, against up to 12% between the per-config legs of run 49. `props-ctfe` meets the size bound on both workloads, with graph plus cache at 39% of the object files on grok and 94% on rustc. It meets the time bound on rustc, and not on the grok comment edit. The per-config legs of run 50 rank the two configs the other way on the grok body edit: 0.31x for `props-ctfe`, 0.26x for `props`.
