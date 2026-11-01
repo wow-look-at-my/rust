@@ -1,4 +1,5 @@
 //@ run-pass
+//@ edition: 2021
 //@ needs-subprocess
 //@ only-unix
 //@ ignore-fuchsia no /bin/sh
