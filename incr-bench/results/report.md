@@ -178,6 +178,18 @@ CI run 41245662560 measured `props-sym-mirp`, which caches `promoted_mir` too, a
 
 On grok `props-sym-mirp` is faster than unpatched at every step, at 52% of the object files. On rustc it is within 10% of unpatched at every step and over the size bound, at 114%. On rustc `props-sym` meets both bounds, at 95%. The rustc query cache under `props-sym-mirp` holds 77.7 MB of `optimized_mir` for 44,887 bodies, a third of it spans, and 30.0 MB of `items_of_instance`. The spans are already relative to the parent or the previous span. The rustc graph is 402.1 MB, so `props-sym-mirp` fits rustc only with about 66 MB less graph or cache.
 
+CI run 41258066342 ran `props-sym-mirp` again, and `props-sym-mirp-ioi`, which leaves `items_of_instance` out of the query cache. Medians over the rounds, against unpatched:
+
+| step | grok props-sym-mirp | grok props-sym-mirp-ioi | rustc props-sym-mirp | rustc props-sym-mirp-ioi |
+|---|---:|---:|---:|---:|
+| edit:comment | 0.92x | 1.47x | 0.96x | 1.70x |
+| edit:body | 0.88x | 1.36x | 0.97x | 1.66x |
+| edit:new-item | 1.05x | 1.55x | 0.99x | 1.63x |
+| edit:signature | 0.91x | 1.34x | 0.96x | 1.65x |
+| revert | 0.99x | 1.43x | 0.94x | 1.54x |
+
+Without `items_of_instance` the query cache is 34 MB smaller on rustc and on grok. The mono collector walks every body again, so each edit takes about half as long again or more. `props-sym-mirp` is within 10% of unpatched on grok at every step for the second run in a row.
+
 The breakdown that each crate prints matches run 52 on rustc. The extra 12.4 MB of query cache thus sits in compiles that print no breakdown. The next run lists the largest query caches by crate to name them.
 
 Both configs are within 10% of unpatched on every rustc step, and so is every round of `props-ctfe`. The rounds agree to within 5% of each other, against up to 12% between the per-config legs of run 49. `props-ctfe` meets the size bound on both workloads, with graph plus cache at 39% of the object files on grok and 94% on rustc. It meets the time bound on rustc, and not on the grok comment edit. The per-config legs of run 50 rank the two configs the other way on the grok body edit: 0.31x for `props-ctfe`, 0.26x for `props`.
