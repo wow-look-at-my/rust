@@ -2600,6 +2600,9 @@ options! {
     incremental_keep_configs: Option<usize> = (None, parse_opt_number, [UNTRACKED],
         "number of build configurations of a crate to keep in the incremental directory, \
         most recently used first (default: keep all)"),
+    incremental_mir_working_set: bool = (false, parse_bool, [TRACKED],
+        "write the `optimized_mir` and `promoted_mir` of a body to the query cache only when this \
+        session used it, and none in a session with no previous dep graph (default: no)"),
     incremental_rmeta_reuse: bool = (false, parse_bool, [UNTRACKED],
         "decode the MIR of unchanged items from the previous session's crate metadata \
         instead of recomputing it (default: no)"),

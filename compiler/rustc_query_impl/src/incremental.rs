@@ -3,7 +3,7 @@ use rustc_data_structures::unord::UnordMap;
 #[expect(unused_imports, reason = "used by doc comments")]
 use rustc_middle::dep_graph::DepKindVTable;
 use rustc_middle::dep_graph::{
-    DepGraphData, DepNode, DepNodeIndex, DepNodeKey, SerializedDepNodeIndex,
+    DepGraphData, DepKind, DepNode, DepNodeIndex, DepNodeKey, SerializedDepNodeIndex,
 };
 use rustc_middle::query::erase::{Erasable, Erased};
 use rustc_middle::query::on_disk_cache::{CacheDecoder, CacheEncoder};
@@ -18,6 +18,13 @@ use crate::query_vtables::for_each_query_vtable;
 
 fn all_inactive<'tcx, K>(state: &QueryState<'tcx, K>) -> bool {
     state.active.lock_shards().all(|shard| shard.is_empty())
+}
+
+/// Under `-Z incremental-mir-working-set`, the cache keeps the MIR of a body only while sessions
+/// use it. A codegen unit that stays green asks for no MIR, so its bodies leave the cache.
+fn is_mir_working_set_kind(tcx: TyCtxt<'_>, kind: DepKind) -> bool {
+    tcx.sess.opts.unstable_opts.incremental_mir_working_set
+        && (kind == DepKind::optimized_mir || kind == DepKind::promoted_mir)
 }
 
 pub(crate) fn encode_query_values<'tcx>(tcx: TyCtxt<'tcx>, encoder: &mut CacheEncoder<'tcx>) {
@@ -67,6 +74,12 @@ where
     assert!(all_inactive(&query.state));
     // The filter below hashes a dep node for each entry. A kind that writes nothing needs none.
     if !query.cache_on_disk_local {
+        return 0;
+    }
+    // A session with no previous graph uses every body, so its use predicts no edit.
+    if is_mir_working_set_kind(tcx, query.dep_kind)
+        && tcx.dep_graph.data().is_some_and(|data| data.session_count() == 0)
+    {
         return 0;
     }
     let in_metadata = tcx.in_metadata.get().and_then(|sets| sets.for_kind(query.dep_kind));
@@ -167,6 +180,11 @@ pub(crate) fn promote_from_disk_inner<'tcx, C: QueryCache>(
     dep_node_index: DepNodeIndex,
 ) {
     debug_assert!(tcx.dep_graph.is_green(&dep_node));
+
+    // Promotion loads a value that this session did not use.
+    if is_mir_working_set_kind(tcx, query.dep_kind) {
+        return;
+    }
 
     let key = C::Key::try_recover_key(tcx, &dep_node).unwrap_or_else(|| {
         panic!(
