@@ -506,6 +506,9 @@ pub(super) fn explicit_clauses_of<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: LocalDefId,
 ) -> ty::GenericClauses<'tcx> {
+    if let Some(clauses) = tcx.prev_metadata_explicit_clauses_of(def_id) {
+        return clauses;
+    }
     let def_kind = tcx.def_kind(def_id);
     if let DefKind::Trait = def_kind {
         // Remove bounds on associated types from the clauses, they will be

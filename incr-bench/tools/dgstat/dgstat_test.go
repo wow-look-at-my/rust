@@ -121,7 +121,7 @@ func TestRun(t *testing.T) {
 	require.NoError(t, os.WriteFile(kinds, []byte(strings.Join(names, "\n")), 0o644))
 
 	var out bytes.Buffer
-	require.NoError(t, run(&out, []string{kinds, dg}))
+	require.NoError(t, run(&out, []string{kinds, dg}, 2))
 	s := out.String()
 	require.Contains(t, s, "nodes 4 (index space 5), edges 5")
 	require.Contains(t, s, "names mapped")
@@ -131,21 +131,22 @@ func TestRun(t *testing.T) {
 	// A session without a query cache still reports the graph.
 	require.NoError(t, os.Remove(filepath.Join(dir, "query-cache.bin")))
 	out.Reset()
-	require.NoError(t, run(&out, []string{kinds, dg}))
+	require.NoError(t, run(&out, []string{kinds, dg}, 2))
 	require.Contains(t, out.String(), "(no query-cache.bin)")
 }
 
 func TestErrors(t *testing.T) {
-	require.Error(t, run(&bytes.Buffer{}, nil))
-	require.Error(t, run(&bytes.Buffer{}, []string{"/nonexistent", "x"}))
+	require.Error(t, run(&bytes.Buffer{}, nil, 1))
+	require.Error(t, run(&bytes.Buffer{}, []string{"/nonexistent", "x"}, 1))
+	require.ErrorContains(t, run(&bytes.Buffer{}, []string{"k", "x"}, 0), "--workers")
 	g := testGraph()
-	_, err := parseGraph(g[:len(g)-30])
+	_, err := parseCompact(g[:len(g)-30])
 	require.Error(t, err)
-	_, err = parseGraph([]byte("RSIC"))
+	_, err = parseCompact([]byte("RSIC"))
 	require.Error(t, err)
 	_, _, err = leb([]byte{0x80}, 0)
 	require.Error(t, err)
-	gr, err := parseGraph(g)
+	gr, err := parseCompact(g)
 	require.NoError(t, err)
 	require.Error(t, analyzeQueryCache(&bytes.Buffer{}, nil, "q", []byte("short"), gr))
 	q := testQueryCache()

@@ -76,18 +76,18 @@ use rustc_middle::middle::resolve::TypeRelativeDelegationRes;
 use rustc_session::Limits;
 use rustc_session::config::{EntryFnType, OptLevel, OutputFilenames, SymbolManglingVersion};
 use rustc_span::def_id::{LOCAL_CRATE, ModId};
-use rustc_span::{DUMMY_SP, LocalExpnId, Span, Spanned, Symbol};
+use rustc_span::{DUMMY_SP, LocalExpnId, Span, Symbol};
 use rustc_target::spec::PanicStrategy;
 
 use crate::infer::canonical::{self, Canonical};
 use crate::lint::LintExpectation;
 use crate::middle::codegen_fn_attrs::{CodegenFnAttrs, SanitizerFnAttrs};
-use crate::middle::dead_code::DeadCodeLivenessSummary;
+use crate::middle::dead_code::{DeadCodeBodyUse, DeadCodeLivenessSummary};
 use crate::middle::debugger_visualizer::DebuggerVisualizerFile;
 use crate::middle::deduced_param_attrs::DeducedParamAttrs;
 use crate::middle::exported_symbols::{ExportedSymbol, SymbolExportInfo};
 use crate::middle::lib_features::LibFeatures;
-use crate::middle::privacy::EffectiveVisibilities;
+use crate::middle::privacy::{EffectiveVisibilities, EffectiveVisibility};
 use crate::middle::resolve::{
     AstOwner, DocLinkResMap, ModChild, ResolverAstLowering, ResolverGlobalCtxt,
 };
@@ -98,7 +98,7 @@ use crate::mir::interpret::{
     EvalToValTreeResult, GlobalId,
 };
 use crate::mono::{
-    CodegenUnit, CollectionMode, MonoItem, MonoItemPartitions, NormalizationErrorInMono,
+    CodegenUnit, CollectionMode, MonoItemPartitions, MonoItemUse, NormalizationErrorInMono,
 };
 use crate::query::query_api::{define_query_api, maybe_into_query_key};
 use crate::traits::query::{
@@ -698,6 +698,7 @@ rustc_queries! {
     query closure_saved_names_of_captured_variables(def_id: DefId) -> &'tcx IndexVec<abi::FieldIdx, Symbol> {
         arena_cache
         desc { "computing debuginfo for closure `{}`", tcx.def_path_str(def_id) }
+        cache_on_disk
         separate_provide_extern
     }
 
@@ -706,6 +707,13 @@ rustc_queries! {
         desc { "coroutine witness types for `{}`", tcx.def_path_str(key) }
         cache_on_disk
         separate_provide_extern
+    }
+
+    /// The final layout of a coroutine, as `optimized_mir` stores it.
+    query coroutine_layout_from_mir(key: DefId) -> Option<&'tcx mir::CoroutineLayout<'tcx>> {
+        arena_cache
+        desc { "finding the coroutine layout of `{}`", tcx.def_path_str(key) }
+        cache_on_disk
     }
 
     query check_coroutine_obligations(key: LocalDefId) -> Result<(), ErrorGuaranteed> {
@@ -1235,6 +1243,12 @@ rustc_queries! {
         desc { "finding live symbols in crate" }
     }
 
+    /// The uses that the body of `key` adds to the dead-code worklist.
+    query dead_code_body_uses(key: LocalDefId) -> Result<&'tcx [DeadCodeBodyUse], ErrorGuaranteed> {
+        desc { "finding the dead-code uses in `{}`", tcx.def_path_str(key) }
+        cache_on_disk
+    }
+
     query check_mod_deathness(key: LocalModId) {
         desc { "checking deathness of variables in {}", describe_as_module(key, tcx) }
     }
@@ -1425,6 +1439,11 @@ rustc_queries! {
         eval_always
         desc { "checking effective visibilities" }
     }
+
+    /// The effective visibility of one item.
+    query effective_visibility(def_id: LocalDefId) -> Option<&'tcx EffectiveVisibility> {
+        desc { "getting the effective visibility of `{}`", tcx.def_path_str(def_id) }
+    }
     query check_private_in_public(module_def_id: LocalModId) {
         desc {
             "checking for private elements in public interfaces for {}",
@@ -1435,6 +1454,12 @@ rustc_queries! {
     query reachable_set(_: ()) -> &'tcx LocalDefIdSet {
         arena_cache
         desc { "reachability" }
+        cache_on_disk
+    }
+
+    /// The local items that the body of `key` refers to. Only `reachable_set` calls it.
+    query reachable_body_refs(key: LocalDefId) -> &'tcx [rustc_middle::middle::reachable::ReachableBodyRef] {
+        desc { "finding the items that `{}` refers to", tcx.def_path_str(key) }
         cache_on_disk
     }
 
@@ -1458,6 +1483,7 @@ rustc_queries! {
     /// look up the correct symbol name of instances from upstream crates.
     query symbol_name(key: ty::Instance<'tcx>) -> ty::SymbolName<'tcx> {
         desc { "computing the symbol for `{}`", key }
+        cache_on_disk
     }
 
     query def_kind(def_id: DefId) -> DefKind {
@@ -1956,6 +1982,10 @@ rustc_queries! {
         cache_on_disk
         separate_provide_extern
     }
+    /// What the mono item collector needs to know about `def_id` as a callee.
+    query callee_facts(def_id: DefId) -> rustc_middle::mono::CalleeFacts {
+        desc { "collecting what the mono item collector reads about `{}`", tcx.def_path_str(def_id) }
+    }
     query is_unreachable_local_definition(def_id: LocalDefId) -> bool {
         desc {
             "checking whether `{}` is reachable from outside the crate",
@@ -2064,6 +2094,12 @@ rustc_queries! {
     query crate_hash(_: CrateNum) -> Svh {
         eval_always
         desc { "looking up the hash of a crate" }
+        separate_provide_extern
+    }
+
+    /// A fingerprint of the metadata entries of an item of another crate that the lookups `dep_graph::reads_extern_item_entry` names read.
+    query extern_item_fingerprint(def_id: DefId) -> u64 {
+        desc { "looking up the fingerprint of `{}`", tcx.def_path_str(def_id) }
         separate_provide_extern
     }
 
@@ -2799,21 +2835,19 @@ rustc_queries! {
         separate_provide_extern
     }
 
-    /// Perform monomorphization-time checking on this item.
-    /// This is used for lints/errors that can only be checked once the instance is fully
-    /// monomorphized.
-    query check_mono_item(key: ty::Instance<'tcx>) {
-        desc { "monomorphization-time checking" }
-    }
-
-    query items_of_instance(key: (ty::Instance<'tcx>, CollectionMode)) -> Result<(&'tcx [Spanned<MonoItem<'tcx>>], &'tcx [Spanned<MonoItem<'tcx>>]), NormalizationErrorInMono> {
+    query items_of_instance(key: (ty::Instance<'tcx>, CollectionMode)) -> Result<(&'tcx [MonoItemUse<'tcx>], &'tcx [MonoItemUse<'tcx>]), NormalizationErrorInMono> {
         desc { "collecting items used by `{}`", key.0 }
         cache_on_disk
+        // Only the `eval_always` mono item collection reads it, and an `eval_always` task records no edges.
+        no_hash
     }
 
-    query size_estimate(key: ty::Instance<'tcx>) -> usize {
-        desc { "estimating codegen size of `{}`", key }
+    /// The estimate counts the statements of the MIR of `key`.
+    query size_estimate(key: ty::InstanceKind<'tcx>) -> usize {
+        desc { "estimating codegen size of `{}`", tcx.def_path_str(key.def_id()) }
         cache_on_disk
+        // Only the `eval_always` partitioning reads it, so a hash of it is never compared.
+        no_hash
     }
 
     query anon_const_kind(def_id: DefId) -> ty::AnonConstKind {

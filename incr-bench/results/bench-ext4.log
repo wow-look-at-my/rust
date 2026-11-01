@@ -1,0 +1,19 @@
+query-cache.bin /home/user/grok-target-patched/debug/incremental/xai_grok_shell-1yymvei0n623d/s-hnjeghgybr-05uesdq-1pza34lzf2js4mjmwhsymlarv/query-cache.bin (448263661 B), dep-graph.bin /home/user/grok-target-patched/debug/incremental/xai_grok_shell-1yymvei0n623d/s-hnjeghgybr-05uesdq-1pza34lzf2js4mjmwhsymlarv/dep-graph.bin
+query values N = 1874477 (408202661 B, median 8 B, p99 2343 B, max 11793978 B); side effects 23; allocs 27781; hygiene 339729; values with no dep node 0; kind bits 9
+
+| step | min ms | median ms | bytes written | note |
+|---|---:|---:|---:|---|
+| today: load footer index (HashMap of N) | 232.5 | 312.7 | 0 | N = 1874477 |
+| today: read all values + write new file | 468.5 | 521.2 | 448263661 | byte copy, no decode/encode CPU |
+| proposed: initial build (values + index) | 775.5 | 888.8 | 607627168 | file 607627168 B |
+| proposed: no-op session (open+mmap+N lookups) | 475.5 | 516.9 | 0 |  |
+| proposed: session rewriting 1% (k = 18744), with N lookups | 567.7 | 864.0 | 4438960 | values 3636521 B; 14369 index pages dirtied; lookup part median 795.7 ms |
+| proposed: save part only, 1% | 50.5 | 68.3 | 4438960 | lock, k appends, k slot stores, end store |
+| proposed: session rewriting 5% (k = 93723), with N lookups | 946.6 | 1233.0 | 28231864 | values 24221785 B; 30913 index pages dirtied; lookup part median 888.9 ms |
+| proposed: save part only, 5% | 274.4 | 410.6 | 28231864 | lock, k appends, k slot stores, end store |
+| proposed: session rewriting 20% (k = 374895), with N lookups | 827.8 | 853.2 | 106234224 | values 90193933 B; 32767 index pages dirtied; lookup part median 461.0 ms |
+| proposed: save part only, 20% | 366.7 | 523.7 | 106234224 | lock, k appends, k slot stores, end store |
+| lookup: today footer HashMap, 100000 random reads | 58.0 | 80.0 | 0 | index by prev dep-node index |
+| lookup: proposed in-file index, 100000 random reads | 79.3 | 80.7 | 0 | index by (kind, key fingerprint) |
+| proposed: compaction at >=25% dead | 1499.7 | 2522.1 | 607627168 | dead 233559992 / live 473405344 B, file 841187160 -> 607627168 B |
+EXIT 0

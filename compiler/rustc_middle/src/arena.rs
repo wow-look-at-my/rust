@@ -2,9 +2,9 @@
 //! `Copy` type, and any `!Copy` type explicitly listed below.
 
 use rustc_serialize::Decodable;
-use rustc_span::{Span, Spanned};
+use rustc_span::Span;
 
-use crate::mono::MonoItem;
+use crate::mono::MonoItemUse;
 use crate::ty::codec::{RefDecodable, TyDecoder};
 use crate::ty::{self, Ty, TyCtxt};
 
@@ -201,14 +201,16 @@ impl_ref_decodable_into_arena! {
     (rustc_middle::middle::exported_symbols::ExportedSymbol<'tcx>, rustc_middle::middle::exported_symbols::SymbolExportInfo),
     (ty::Clause<'tcx>, Span),
     (ty::PolyTraitRef<'tcx>, Span),
-    Spanned<MonoItem<'tcx>>,
+    MonoItemUse<'tcx>,
     rustc_ast::InlineAsmTemplatePiece,
     rustc_ast::tokenstream::TokenStream,
     rustc_attr_ir::Attribute,
     rustc_data_structures::unord::UnordMap<rustc_span::def_id::DefId, rustc_middle::ty::EarlyBinder<'tcx, Ty<'tcx>>>,
     rustc_data_structures::unord::UnordSet<rustc_span::def_id::LocalDefId>,
     rustc_index::IndexVec<rustc_middle::mir::Promoted, rustc_middle::mir::Body<'tcx>>,
+    rustc_middle::middle::dead_code::DeadCodeBodyUse,
     rustc_middle::middle::deduced_param_attrs::DeducedParamAttrs,
+    rustc_middle::middle::reachable::ReachableBodyRef,
     rustc_middle::mir::Body<'tcx>,
     rustc_middle::traits::ImplSource<'tcx, ()>,
     rustc_middle::traits::specialization_graph::Graph,

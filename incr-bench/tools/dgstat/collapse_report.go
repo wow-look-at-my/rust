@@ -272,6 +272,8 @@ func analyzeCollapse(out io.Writer, defs []kindDef, f string, size int, g *cgrap
 	renum := make([]uint32, space)
 	var rows []collapseRow
 	for _, pol := range collapsePolicies(defs, count, edgeSum) {
+		// The arrays of the last policy are garbage now. Give them back before this allocates.
+		debug.FreeOSMemory()
 		t0 := time.Now()
 		pol.keep(g, ch.class, keep)
 		// renum[i] is the stream rank of the kept node with index i. An index with no kept node keeps its value.
@@ -381,13 +383,13 @@ func analyzeCollapse(out io.Writer, defs []kindDef, f string, size int, g *cgrap
 		}
 	}
 	mb := func(v int) string { return fmt.Sprintf("%.1f MB", float64(v)/1e6) }
-	fmt.Fprintf(out, "| policy | kept nodes | kept edges | max edges | avg edges | 38-byte layout | new layout | new, renumbered | max closure (kind) | closures / entries / peak live / walked again | missing targets | time |\n")
-	fmt.Fprintf(out, "|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+	fmt.Fprintf(out, "| policy | kept nodes | kept edges | max edges | avg edges | 38-byte layout | new layout | new, renumbered | max closure (kind) | closures / entries / peak live / walked again | missing targets | levels (widest) | time |\n")
+	fmt.Fprintf(out, "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, r := range rows {
-		fmt.Fprintf(out, "| %s %s | %d (%.1f%%) | %d (%.1f%%) | %d | %.2f | %s | %s | %s | %d (%s) | %d / %d / %d / %d | %d | %.1fs |\n",
+		fmt.Fprintf(out, "| %s %s | %d (%.1f%%) | %d (%.1f%%) | %d | %.2f | %s | %s | %s | %d (%s) | %d / %d / %d / %d | %d | %d (%d) | %.1fs |\n",
 			r.pol.name, r.pol.desc, r.cost.kept, pct(r.cost.kept, n), r.cost.edges, pct(r.cost.edges, int(g.edgeSum)), r.cost.maxE,
 			float64(r.cost.edges)/float64(max(r.cost.kept, 1)), mb(r.sizes.current), mb(r.sizes.newOrig), mb(r.sizes.newRenum),
-			r.st.maxClosure, r.closureKind, r.st.closures, r.st.closureEntries, r.st.peakLive, r.st.big, r.st.missing, r.elapsed.Seconds())
+			r.st.maxClosure, r.closureKind, r.st.closures, r.st.closureEntries, r.st.peakLive, r.st.big, r.st.missing, r.st.levels, r.st.widest, r.elapsed.Seconds())
 	}
 	return nil
 }
@@ -430,6 +432,21 @@ func anonPeak(stop <-chan struct{}, peak *atomic.Int64) {
 	}
 }
 
+// errWriter keeps the first write error, so a report that did not reach its file fails the run.
+type errWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (e *errWriter) Write(b []byte) (int, error) {
+	if e.err != nil {
+		return 0, e.err
+	}
+	n, err := e.w.Write(b)
+	e.err = err
+	return n, err
+}
+
 func cpuTime() time.Duration {
 	var ru syscall.Rusage
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
@@ -454,10 +471,14 @@ func init() {
 			}
 			// The closure lists churn, so the heap is kept close to its live size.
 			debug.SetGCPercent(25)
-			out := cmd.OutOrStdout()
+			debug.SetMemoryLimit(800 << 20)
+			out := &errWriter{w: cmd.OutOrStdout()}
 			for _, f := range args[1:] {
 				if err := collapseFile(out, defs, f, workers); err != nil {
 					return err
+				}
+				if out.err != nil {
+					return fmt.Errorf("writing the report for %s: %w", f, out.err)
 				}
 			}
 			return nil

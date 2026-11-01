@@ -95,18 +95,21 @@
 use std::cmp;
 use std::collections::hash_map::Entry;
 use std::fs::{self, File};
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use rustc_attr_ir::lang_items::LangItem;
 use rustc_attr_ir::{InlineAttr, Linkage};
 use rustc_data_structures::either::Either;
-use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
+use rustc_data_structures::fingerprint::Fingerprint;
+use rustc_data_structures::fx::{FxHasher, FxIndexMap, FxIndexSet};
 use rustc_data_structures::sync::par_join;
 use rustc_data_structures::unord::{UnordMap, UnordSet};
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, DefIdSet, LOCAL_CRATE};
 use rustc_hir::definitions::DefPathDataName;
+use rustc_middle::dep_graph::{DepKind, DepNode, hash_result, short_value_fingerprint};
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::middle::exported_symbols::{SymbolExportInfo, SymbolExportLevel};
 use rustc_middle::mir::StatementKind;
@@ -314,6 +317,37 @@ where
 
 // This function requires the CGUs to be sorted by name on input, and ensures
 // they are sorted by name on return, for deterministic behaviour.
+/// Merges each CGU into the bucket that a hash of its name picks, under
+/// `-Z incremental-stable-cgu-merge`. The merge by size moves CGUs between merged units when
+/// any CGU changes size, which renames those units, and a renamed unit is compiled again.
+/// Here a CGU stays in its bucket whatever the sizes are.
+fn merge_by_name_hash<'tcx>(
+    codegen_units: &mut Vec<CodegenUnit<'tcx>>,
+    cgu_contents: &mut UnordMap<Symbol, Vec<Symbol>>,
+    max_codegen_units: usize,
+) {
+    let mut buckets: Vec<Option<CodegenUnit<'tcx>>> =
+        (0..max_codegen_units).map(|_| None).collect();
+    // `codegen_units` is sorted by name, so the first CGU of a bucket in name order keeps its name.
+    for mut cgu in codegen_units.drain(..) {
+        let mut hasher = FxHasher::default();
+        cgu.name().as_str().hash(&mut hasher);
+        let bucket = &mut buckets[(hasher.finish() % max_codegen_units as u64) as usize];
+        match bucket {
+            None => *bucket = Some(cgu),
+            Some(dst) => {
+                dst.items_mut().append(cgu.items_mut());
+                let mut consumed = cgu_contents.remove(&cgu.name()).unwrap();
+                cgu_contents.get_mut(&dst.name()).unwrap().append(&mut consumed);
+            }
+        }
+    }
+    for mut cgu in buckets.into_iter().flatten() {
+        cgu.compute_size_estimate();
+        codegen_units.push(cgu);
+    }
+}
+
 fn merge_codegen_units<'tcx>(
     cx: &PartitioningCx<'_, 'tcx>,
     codegen_units: &mut Vec<CodegenUnit<'tcx>>,
@@ -342,6 +376,12 @@ fn merge_codegen_units<'tcx>(
     // then at least one of the biggest N will have to grow. codegen_units[N-1]
     // is the smallest of those, and so has the most room to grow.
     let max_codegen_units = cx.tcx.sess.codegen_units().as_usize();
+    if cx.tcx.sess.opts.incremental.is_some()
+        && cx.tcx.sess.opts.unstable_opts.incremental_stable_cgu_merge
+        && codegen_units.len() > max_codegen_units
+    {
+        merge_by_name_hash(codegen_units, &mut cgu_contents, max_codegen_units);
+    }
     while codegen_units.len() > max_codegen_units {
         // Sort small CGUs to the back.
         codegen_units.sort_by_key(|cgu| cmp::Reverse(cgu.size_estimate()));
@@ -1143,8 +1183,14 @@ where
 {
     let _prof_timer = tcx.prof.generic_activity("assert_symbols_are_distinct");
 
-    let mut symbols: Vec<_> =
-        mono_items.map(|mono_item| (mono_item, mono_item.symbol_name(tcx))).collect();
+    // A green `symbol_name` node holds the hash of the name it had.
+    let mut hashes: Vec<_> =
+        mono_items.map(|mono_item| (symbol_name_hash(tcx, mono_item), mono_item)).collect();
+    hashes.sort_unstable_by_key(|&(hash, _)| hash);
+    let mut symbols = Vec::new();
+    for run in hashes.chunk_by(|a, b| a.0 == b.0).filter(|run| run.len() > 1) {
+        symbols.extend(run.iter().map(|&(_, mono_item)| (mono_item, mono_item.symbol_name(tcx))));
+    }
 
     symbols.sort_by_key(|sym| sym.1);
 
@@ -1164,6 +1210,27 @@ where
             tcx.dcx().emit_fatal(SymbolAlreadyDefined { span, symbol: sym1.to_string() });
         }
     }
+}
+
+/// The hash the dep graph records for the symbol name of `mono_item`. Equal names give equal
+/// hashes, so only items that share a hash can share a name.
+fn symbol_name_hash<'tcx>(tcx: TyCtxt<'tcx>, mono_item: &MonoItem<'tcx>) -> Fingerprint {
+    let instance = match *mono_item {
+        MonoItem::Fn(instance) => instance,
+        MonoItem::Static(def_id) => ty::Instance::mono(tcx, def_id),
+        MonoItem::GlobalAsm(item_id) => ty::Instance::mono(tcx, item_id.owner_id.to_def_id()),
+    };
+    if tcx.dep_graph.is_fully_enabled() {
+        // A green node needs no name: the graph holds the hash of the one it had.
+        let node = DepNode::construct(tcx, DepKind::symbol_name, &instance);
+        if tcx.dep_graph.try_mark_green(tcx, &node).is_some()
+            && let Some(hash) = tcx.dep_graph.green_value_fingerprint(&node)
+        {
+            return hash;
+        }
+    }
+    let name = tcx.symbol_name(instance);
+    short_value_fingerprint(tcx.with_stable_hashing_context(|mut hcx| hash_result(&mut hcx, &name)))
 }
 
 fn collect_and_partition_mono_items(tcx: TyCtxt<'_>, (): ()) -> MonoItemPartitions<'_> {
@@ -1363,14 +1430,14 @@ pub(crate) fn provide(providers: &mut Providers) {
             .unwrap_or_else(|| panic!("failed to find cgu with name {name:?}"))
     };
 
-    providers.queries.size_estimate = |tcx, instance| {
-        match instance.def {
+    providers.queries.size_estimate = |tcx, instance_kind| {
+        match instance_kind {
             // "Normal" functions size estimate: the number of
             // statements, plus one for the terminator.
             InstanceKind::Item(..)
             | InstanceKind::Shim(ShimKind::DropGlue(..))
             | InstanceKind::Shim(ShimKind::AsyncDropGlueCtor(..)) => {
-                let mir = tcx.instance_mir(instance.def);
+                let mir = tcx.instance_mir(instance_kind);
                 mir.basic_blocks
                     .iter()
                     .map(|bb| {

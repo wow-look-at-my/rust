@@ -1,0 +1,6 @@
+run 1: persist_result_cache 0.062s serialize_result_cache 0.018s query-cache.bin 7028339 B
+run 2: persist_result_cache 0.083s serialize_result_cache 0.025s query-cache.bin 7028339 B
+run 3: persist_result_cache 0.060s serialize_result_cache 0.018s query-cache.bin 7028339 B
+run 4: persist_result_cache 0.064s serialize_result_cache 0.020s query-cache.bin 7028339 B
+run 5: persist_result_cache 0.064s serialize_result_cache 0.019s query-cache.bin 7028339 B
+EXIT 0
