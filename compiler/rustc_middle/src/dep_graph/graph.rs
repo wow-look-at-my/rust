@@ -18,6 +18,7 @@ use rustc_macros::{Decodable, Encodable};
 use rustc_serialize::opaque::{FileEncodeResult, FileEncoder};
 use rustc_session::Session;
 use rustc_span::Symbol;
+use rustc_span::def_id::StableCrateId;
 use smallvec::SmallVec;
 use tracing::instrument;
 #[cfg(debug_assertions)]
@@ -25,8 +26,10 @@ use {super::debug::EdgeFilter, std::env};
 
 use super::edges::{ReadsRecorder, SMALL_READS_MAX, TaskReads};
 use super::retained::RetainedDepGraph;
-use super::serialized::{GraphEncoder, SerializedDepGraph, SerializedDepNodeIndex};
-use super::{DepKind, DepNode, WorkProductId, read_deps, with_deps};
+use super::serialized::{
+    GraphEncoder, SerializedDepGraph, SerializedDepNodeIndex, short_value_fingerprint,
+};
+use super::{DepKind, DepNode, WorkProductId, dep_kind_from_label, read_deps, with_deps};
 use crate::ich::StableHashState;
 use crate::ty::TyCtxt;
 use crate::verify_ich::incremental_verify_ich;
@@ -77,12 +80,32 @@ rustc_data_structures::static_assert_size!(Option<DepNodeIndex>, 4);
 impl DepNodeIndex {
     const SINGLETON_ZERO_DEPS_ANON_NODE: DepNodeIndex = DepNodeIndex::ZERO;
     pub const FOREVER_RED_NODE: DepNodeIndex = DepNodeIndex::from_u32(1);
+    /// An index at or above this names the reads of a transparent task, not a node.
+    const TRANSPARENT_BASE: u32 = 1 << 31;
+
+    #[inline(always)]
+    fn transparent_slot(self) -> Option<usize> {
+        self.as_u32().checked_sub(Self::TRANSPARENT_BASE).map(|slot| slot as usize)
+    }
+}
+
+/// The reads of each transparent task of this session. A transparent task gets no node: a
+/// read of its index reads its reads instead.
+#[derive(Default)]
+struct TransparentReads {
+    starts: Vec<usize>,
+    reads: Vec<DepNodeIndex>,
 }
 
 impl From<DepNodeIndex> for QueryInvocationId {
     #[inline(always)]
     fn from(dep_node_index: DepNodeIndex) -> Self {
-        QueryInvocationId(dep_node_index.as_u32())
+        // The self-profiler refuses an id past its virtual limit, and no real node gets this far.
+        const TRANSPARENT_IDS: u32 = 50_000_000;
+        match dep_node_index.transparent_slot() {
+            Some(slot) => QueryInvocationId(TRANSPARENT_IDS + (slot as u32 % TRANSPARENT_IDS)),
+            None => QueryInvocationId(dep_node_index.as_u32()),
+        }
     }
 }
 
@@ -177,11 +200,17 @@ impl DepGraph {
         prev_graph: Arc<SerializedDepGraph>,
         prev_work_products: WorkProductMap,
         encoder: FileEncoder<'static>,
+        stable_crate_id: StableCrateId,
     ) -> DepGraph {
         let prev_index_space_len = prev_graph.index_space_len();
 
-        let current =
-            CurrentDepGraph::new(session, prev_index_space_len, encoder, Arc::clone(&prev_graph));
+        let current = CurrentDepGraph::new(
+            session,
+            prev_index_space_len,
+            encoder,
+            Arc::clone(&prev_graph),
+            stable_crate_id,
+        );
 
         let colors = DepNodeColorMap::new(prev_index_space_len);
 
@@ -414,7 +443,7 @@ impl DepGraphData {
     ///
     /// FIXME: This could perhaps return a `WithDepNode` to ensure that the
     /// user of this function actually performs the read.
-    fn with_anon_task_inner<'tcx, OP, R>(
+    pub fn with_anon_task_inner<'tcx, OP, R>(
         &self,
         tcx: TyCtxt<'tcx>,
         dep_kind: DepKind,
@@ -445,6 +474,10 @@ impl DepGraphData {
             1 => {
                 // When there is only one dependency, don't bother creating a node.
                 reads[0]
+            }
+            // A kind that is not anon gets here only as a transparent task.
+            _ if !dep_kind.is_anon() || self.current.is_transparent(dep_kind) => {
+                self.current.alloc_transparent(reads)
             }
             _ => {
                 // The dep node indices are hashed here instead of hashing the dep nodes of the
@@ -506,6 +539,9 @@ impl DepGraph {
     #[inline]
     pub fn read_index(&self, dep_node_index: DepNodeIndex) {
         if let Some(ref data) = self.data {
+            if dep_node_index.transparent_slot().is_some() {
+                return self.read_transparent(data, dep_node_index);
+            }
             read_deps(|task_deps| {
                 let mut task_deps = match task_deps {
                     TaskDepsRef::Allow(deps) => deps.lock(),
@@ -520,6 +556,11 @@ impl DepGraph {
                         panic_on_forbidden_read(data, dep_node_index)
                     }
                 };
+                // This node has no deps and is green in every session, so an edge to it
+                // can never turn a reader red.
+                if dep_node_index == DepNodeIndex::SINGLETON_ZERO_DEPS_ANON_NODE {
+                    return;
+                }
                 let task_deps = &mut *task_deps;
 
                 if cfg!(debug_assertions) {
@@ -543,6 +584,15 @@ impl DepGraph {
                     data.current.total_duplicate_read_count.fetch_add(1, Ordering::Relaxed);
                 }
             })
+        }
+    }
+
+    #[inline(never)]
+    fn read_transparent(&self, data: &DepGraphData, dep_node_index: DepNodeIndex) {
+        // Copied out, so no lock is held while the reads are recorded.
+        let reads = data.current.transparent_reads(dep_node_index);
+        for read in reads {
+            self.read_index(read);
         }
     }
 
@@ -693,11 +743,33 @@ impl DepGraphData {
         }
     }
 
+    /// True if a task of `kind` gets no node, and gives its reads to its readers instead.
+    #[inline]
+    pub fn is_transparent(&self, kind: DepKind) -> bool {
+        self.current.is_transparent(kind)
+    }
+
+    /// True if a lookup of `kind` of an item of another crate gets no node. It reads the
+    /// `extern_item_fingerprint` node of that item instead.
+    #[inline]
+    pub fn is_extern_item_transparent(&self, kind: DepKind) -> bool {
+        self.current.extern_items && super::reads_extern_item_entry(kind)
+    }
+
     /// Returns true if the given node has been marked as green during the
     /// current compilation session. Used in various assertions
     #[inline]
     pub fn is_index_green(&self, prev_index: SerializedDepNodeIndex) -> bool {
         matches!(self.colors.get(prev_index), DepNodeColor::Green(_))
+    }
+
+    /// The current index of a previous-session node that is green, or `None`.
+    #[inline]
+    pub fn green_index(&self, prev_index: SerializedDepNodeIndex) -> Option<DepNodeIndex> {
+        match self.colors.get(prev_index) {
+            DepNodeColor::Green(index) => Some(index),
+            DepNodeColor::Red | DepNodeColor::Unknown => None,
+        }
     }
 
     #[inline]
@@ -794,6 +866,7 @@ impl DepGraphData {
         edges: &[DepNodeIndex],
         value_fingerprint: Option<Fingerprint>,
     ) -> DepNodeIndex {
+        let value_fingerprint = value_fingerprint.map(short_value_fingerprint);
         if let Some(prev_index) = self.previous.node_to_index_opt(&key) {
             // Determine the color and index of the new `DepNode`.
             let is_green = if let Some(value_fingerprint) = value_fingerprint {
@@ -914,7 +987,10 @@ impl DepGraphData {
 
         match self.colors.get(prev_index) {
             DepNodeColor::Green(dep_node_index) => Some((prev_index, dep_node_index)),
-            DepNodeColor::Red => None,
+            DepNodeColor::Red => {
+                self.explain_red(tcx, prev_index);
+                None
+            }
             DepNodeColor::Unknown => {
                 // This DepNode and the corresponding query invocation existed
                 // in the previous compilation session too, so we can try to
@@ -927,9 +1003,39 @@ impl DepGraphData {
                 let result = self.try_mark_previous_green(tcx, prev_index, None, &mut edge_buf);
                 debug_assert!(edge_buf.is_empty());
                 self.green_edge_buf.set(edge_buf);
+                if result.is_none() {
+                    self.explain_red(tcx, prev_index);
+                }
                 result.map(|dep_node_index| (prev_index, dep_node_index))
             }
         }
+    }
+
+    /// Under `-Zincremental-explain-red`, prints why a node of a listed kind is not green. Each
+    /// node in the chain is the first red edge of the node before it.
+    #[cold]
+    fn explain_red<'tcx>(&self, tcx: TyCtxt<'tcx>, prev_index: SerializedDepNodeIndex) {
+        let Some(kinds) = &tcx.sess.opts.unstable_opts.incremental_explain_red else { return };
+        let node = self.previous.index_to_node(prev_index);
+        let kind = format!("{:?}", node.kind);
+        if !kinds.iter().any(|k| *k == kind) {
+            return;
+        }
+        let mut chain = vec![format!("{node:?}")];
+        let mut seen = FxHashSet::default();
+        let mut current = prev_index;
+        while chain.len() < 24 && seen.insert(current) {
+            let Some(next) = self
+                .previous
+                .edge_targets_from(current)
+                .find(|&dep| matches!(self.colors.get(dep), DepNodeColor::Red))
+            else {
+                break;
+            };
+            chain.push(format!("{:?}", self.previous.index_to_node(next)));
+            current = next;
+        }
+        eprintln!("[incremental] red: {}", chain.join(" <- "));
     }
 
     /// Try to mark a dep-node which existed in the previous compilation session as green.
@@ -1040,6 +1146,13 @@ impl DepGraph {
     /// current compilation session. Used in various assertions
     pub fn is_green(&self, dep_node: &DepNode) -> bool {
         matches!(self.node_color(dep_node), DepNodeColor::Green(_))
+    }
+
+    /// For a green node, the value fingerprint in the loaded dep graph. `None` for any other node.
+    pub fn green_value_fingerprint(&self, dep_node: &DepNode) -> Option<Fingerprint> {
+        let data = self.data()?;
+        let prev_index = data.previous.node_to_index_opt(dep_node)?;
+        data.is_index_green(prev_index).then(|| data.prev_value_fingerprint_of(prev_index))
     }
 
     pub fn assert_dep_node_not_yet_allocated_in_current_session<S: std::fmt::Display>(
@@ -1200,6 +1313,12 @@ pub(super) struct CurrentDepGraph {
     /// each anon node. The session-key is a hash of the number of previous sessions.
     anon_id_seed: Fingerprint,
 
+    /// The kinds that `-Zincremental-transparent` names.
+    transparent_kinds: [bool; DepKind::NUM_VARIANTS],
+    transparent_reads: Lock<TransparentReads>,
+    /// `-Zincremental-extern-items`.
+    extern_items: bool,
+
     /// These are simple counters that are for profiling and
     /// debugging and only active with `debug_assertions`.
     pub(super) total_read_count: AtomicU64,
@@ -1212,6 +1331,7 @@ impl CurrentDepGraph {
         prev_index_space_len: usize,
         encoder: FileEncoder<'static>,
         previous: Arc<SerializedDepGraph>,
+        stable_crate_id: StableCrateId,
     ) -> Self {
         let mut stable_hasher = StableHasher::new();
         previous.session_count().hash(&mut stable_hasher);
@@ -1228,12 +1348,31 @@ impl CurrentDepGraph {
 
         let new_node_count_estimate = 102 * previous.live_node_count() / 100 + 200;
 
+        let mut transparent_kinds = [false; DepKind::NUM_VARIANTS];
+        for name in session.opts.unstable_opts.incremental_transparent.iter().flatten() {
+            if !DepNode::has_label_string(name) {
+                session
+                    .dcx()
+                    .fatal(format!("`-Zincremental-transparent`: no dep kind is named `{name}`"));
+            }
+            transparent_kinds[dep_kind_from_label(name).as_usize()] = true;
+        }
+
         CurrentDepGraph {
-            encoder: GraphEncoder::new(session, encoder, prev_index_space_len, previous),
+            encoder: GraphEncoder::new(
+                session,
+                encoder,
+                prev_index_space_len,
+                previous,
+                stable_crate_id,
+            ),
             anon_node_to_index: ShardedHashMap::with_capacity(
                 3 * new_node_count_estimate / 100, // Reserve capacity for 3% anon nodes
             ),
             anon_id_seed,
+            transparent_kinds,
+            transparent_reads: Default::default(),
+            extern_items: session.opts.unstable_opts.incremental_extern_items,
             #[cfg(debug_assertions)]
             forbidden_edge,
             #[cfg(debug_assertions)]
@@ -1258,6 +1397,32 @@ impl CurrentDepGraph {
             .lock()
             .get_or_insert_with(dep_node_index, || value_fingerprint);
         assert_eq!(prior_value_fingerprint, value_fingerprint, "Unstable fingerprints for {key:?}");
+    }
+
+    #[inline(always)]
+    fn is_transparent(&self, kind: DepKind) -> bool {
+        self.transparent_kinds[kind.as_usize()]
+    }
+
+    /// Stores `reads` and returns the index that stands for them.
+    fn alloc_transparent(&self, reads: &[DepNodeIndex]) -> DepNodeIndex {
+        debug_assert!(reads.iter().all(|read| read.transparent_slot().is_none()));
+        let mut table = self.transparent_reads.lock();
+        let slot = u32::try_from(table.starts.len())
+            .ok()
+            .filter(|&slot| slot <= DepNodeIndex::MAX_AS_U32 - DepNodeIndex::TRANSPARENT_BASE)
+            .expect("too many transparent tasks");
+        let start = table.reads.len();
+        table.starts.push(start);
+        table.reads.extend_from_slice(reads);
+        DepNodeIndex::from_u32(DepNodeIndex::TRANSPARENT_BASE + slot)
+    }
+
+    fn transparent_reads(&self, index: DepNodeIndex) -> SmallVec<[DepNodeIndex; 16]> {
+        let slot = index.transparent_slot().unwrap();
+        let table = self.transparent_reads.lock();
+        let end = table.starts.get(slot + 1).copied().unwrap_or(table.reads.len());
+        table.reads[table.starts[slot]..end].iter().copied().collect()
     }
 
     /// Writes the node to the current dep-graph and allocates a `DepNodeIndex` for it.

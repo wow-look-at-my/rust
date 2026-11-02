@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Seek, Write};
 use std::marker::PhantomData;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -59,6 +59,29 @@ impl<'a> FileEncoder<'a> {
         let file =
             File::options().read(true).write(true).create(true).truncate(true).open(&path)?;
 
+        Ok(FileEncoder {
+            buf: vec![0u8; BUF_SIZE].into_boxed_slice().try_into().unwrap(),
+            path: path.as_ref().into(),
+            buffered: 0,
+            flushed: 0,
+            file,
+            res: Ok(()),
+            flush_strategy: None,
+            #[cfg(debug_assertions)]
+            finished: false,
+        })
+    }
+
+    /// Opens `path` to write after its last byte, creating it when it does not exist.
+    /// `position()` counts from the start of the file, so it includes the bytes already there.
+    pub fn append<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        let mut encoder = Self::new_without_truncate(path)?;
+        encoder.flushed = encoder.file.seek(io::SeekFrom::End(0))? as usize;
+        Ok(encoder)
+    }
+
+    fn new_without_truncate<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        let file = File::options().read(true).write(true).create(true).open(&path)?;
         Ok(FileEncoder {
             buf: vec![0u8; BUF_SIZE].into_boxed_slice().try_into().unwrap(),
             path: path.as_ref().into(),

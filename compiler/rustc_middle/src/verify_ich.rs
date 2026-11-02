@@ -5,7 +5,7 @@ use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_session::utils::was_invoked_from_cargo;
 use tracing::instrument;
 
-use crate::dep_graph::{DepGraphData, SerializedDepNodeIndex};
+use crate::dep_graph::{DepGraphData, SerializedDepNodeIndex, short_value_fingerprint};
 use crate::ich::StableHashState;
 use crate::ty::TyCtxt;
 
@@ -24,7 +24,7 @@ pub fn incremental_verify_ich<'tcx, V>(
     }
 
     let new_hash = hash_result.map_or(Fingerprint::ZERO, |f| {
-        tcx.with_stable_hashing_context(|mut hcx| f(&mut hcx, result))
+        short_value_fingerprint(tcx.with_stable_hashing_context(|mut hcx| f(&mut hcx, result)))
     });
 
     let old_hash = dep_graph_data.prev_value_fingerprint_of(prev_index);

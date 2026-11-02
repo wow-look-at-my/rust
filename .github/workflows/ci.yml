@@ -119,7 +119,8 @@ jobs:
       - name: checkout the source code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 2
+          # The upstream commit lookup walks the base branch past this fork's own commits.
+          fetch-depth: 100
 
       # Free up disk space on Linux by removing preinstalled components that
       # we do not need. We do this to enable some of the less resource

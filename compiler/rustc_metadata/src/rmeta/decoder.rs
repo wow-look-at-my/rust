@@ -6,6 +6,7 @@ use std::sync::{Arc, OnceLock};
 use std::{io, mem};
 
 pub(super) use cstore_impl::provide;
+pub use cstore_impl::read_extern_item;
 use rustc_ast as ast;
 use rustc_attr_ir::CanonicalSymbols;
 use rustc_attr_ir::diagnostic_items::DiagnosticItems;
@@ -46,6 +47,7 @@ use crate::rmeta::table::IsDefault;
 use crate::rmeta::*;
 
 mod cstore_impl;
+pub(super) mod prev_session;
 
 /// A reference to the raw binary version of crate metadata.
 /// This struct applies [`MemDecoder`]'s validation when constructed
@@ -142,6 +144,8 @@ pub(crate) struct CrateMetadata {
     private_dep: bool,
     /// The hash for the host proc macro. Used to support `-Z dual-proc-macro`.
     host_hash: Option<Svh>,
+    /// Every file of the crate is in the library directory of the sysroot.
+    from_sysroot: bool,
     /// The crate was used non-speculatively.
     used: bool,
 
@@ -1696,23 +1700,30 @@ impl CrateMetadata {
             // Slow path: We need to find out the new `DefIndex` of the provided
             // `DefPathHash`, if its still exists. This requires decoding every `DefPathHash`
             // stored in this crate.
-            let map = self.expn_hash_map.get_or_init(|| {
-                let end_id = self.root.expn_hashes.size() as u32;
-                let mut map =
-                    UnhashMap::with_capacity_and_hasher(end_id as usize, Default::default());
-                for i in 0..end_id {
-                    let i = ExpnIndex::from_u32(i);
-                    if let Some(hash) = self.root.expn_hashes.get(self, i) {
-                        map.insert(hash.decode((self, tcx)), i);
-                    }
-                }
-                map
-            });
-            map[&hash]
+            self.expn_hash_index_map(tcx)[&hash]
         };
 
         let data = self.root.expn_data.get(self, index).unwrap().decode((self, tcx));
         rustc_span::hygiene::register_expn_id(self.cnum, index, data, hash)
+    }
+
+    /// The index of the expansion with this hash, `None` when the crate no longer has it.
+    pub(crate) fn find_expn_index(&self, tcx: TyCtxt<'_>, hash: ExpnHash) -> Option<ExpnIndex> {
+        self.expn_hash_index_map(tcx).get(&hash).copied()
+    }
+
+    fn expn_hash_index_map(&self, tcx: TyCtxt<'_>) -> &UnhashMap<ExpnHash, ExpnIndex> {
+        self.expn_hash_map.get_or_init(|| {
+            let end_id = self.root.expn_hashes.size() as u32;
+            let mut map = UnhashMap::with_capacity_and_hasher(end_id as usize, Default::default());
+            for i in 0..end_id {
+                let i = ExpnIndex::from_u32(i);
+                if let Some(hash) = self.root.expn_hashes.get(self, i) {
+                    map.insert(hash.decode((self, tcx)), i);
+                }
+            }
+            map
+        })
     }
 
     /// Imports the source_map from an external crate into the source_map of the crate
@@ -2006,6 +2017,13 @@ impl CrateMetadata {
         // that does not copy any data. It just does some data verification.
         let def_path_hash_map = root.def_path_hash_map.decode(&blob);
 
+        let lib_dir = &tcx.sess.target_tlib_path.dir;
+        let lib_dir = std::fs::canonicalize(lib_dir).unwrap_or_else(|_| lib_dir.to_path_buf());
+        let from_sysroot = source.paths().next().is_some()
+            && source.paths().all(|path| {
+                std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()).starts_with(&lib_dir)
+            });
+
         let mut cdata = CrateMetadata {
             blob,
             root,
@@ -2023,6 +2041,7 @@ impl CrateMetadata {
             source: Arc::new(source),
             private_dep,
             host_hash,
+            from_sysroot,
             used: false,
             extern_crate: None,
             hygiene_context: Default::default(),
@@ -2068,6 +2087,10 @@ impl CrateMetadata {
 
     pub(crate) fn source(&self) -> &CrateSource {
         &*self.source
+    }
+
+    pub(crate) fn from_sysroot(&self) -> bool {
+        self.from_sysroot
     }
 
     pub(crate) fn dep_kind(&self) -> CrateDepKind {
