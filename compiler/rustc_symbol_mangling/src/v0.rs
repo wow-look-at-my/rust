@@ -18,7 +18,7 @@ use rustc_middle::ty::layout::IntegerExt;
 use rustc_middle::ty::print::{Print, PrintError, Printer};
 use rustc_middle::ty::{
     self, FloatTy, GenericArg, GenericArgKind, Instance, IntTy, ReifyReason, Ty, TyCtxt,
-    TypeVisitable, TypeVisitableExt, UintTy, Unnormalized,
+    TypeFoldable, TypeVisitable, TypeVisitableExt, UintTy, Unnormalized,
 };
 use rustc_span::{bug, sym};
 
@@ -383,7 +383,7 @@ impl<'tcx> Printer<'tcx> for V0SymbolMangler<'tcx> {
         // have anything to substitute the instance with.
         // NOTE: We don't support mangling partially substituted but still polymorphic
         // instances, like `impl<A> Tr<A> for ()` where `A` is substituted w/ `(T,)`.
-        let (typing_env, mut self_ty, mut impl_trait_ref) = if generics.count() > args.len()
+        let identity = generics.count() > args.len()
             || &args[..generics.count()]
                 == self
                     .tcx
@@ -391,10 +391,9 @@ impl<'tcx> Printer<'tcx> for V0SymbolMangler<'tcx> {
                         self.tcx,
                         impl_def_id,
                     ))
-                    .as_slice()
-        {
+                    .as_slice();
+        let (mut self_ty, mut impl_trait_ref) = if identity {
             (
-                ty::TypingEnv::post_analysis(self.tcx, impl_def_id),
                 self_ty.instantiate_identity().skip_norm_wip(),
                 impl_trait_ref
                     .map(|impl_trait_ref| impl_trait_ref.instantiate_identity().skip_norm_wip()),
@@ -406,7 +405,6 @@ impl<'tcx> Printer<'tcx> for V0SymbolMangler<'tcx> {
                 polymorphic instance: {impl_def_id:?} {args:?}"
             );
             (
-                ty::TypingEnv::fully_monomorphized(),
                 self_ty.instantiate(self.tcx, args).skip_norm_wip(),
                 impl_trait_ref.map(|impl_trait_ref| {
                     impl_trait_ref.instantiate(self.tcx, args).skip_norm_wip()
@@ -414,17 +412,31 @@ impl<'tcx> Printer<'tcx> for V0SymbolMangler<'tcx> {
             )
         };
 
+        // Without aliases, normalization only erases regions and never reads the typing env.
+        fn normalize<'tcx, T: TypeFoldable<TyCtxt<'tcx>>>(
+            tcx: TyCtxt<'tcx>,
+            identity: bool,
+            impl_def_id: DefId,
+            value: T,
+        ) -> T {
+            if !value.has_aliases() {
+                return tcx.erase_and_anonymize_regions(value);
+            }
+            let typing_env = if identity {
+                ty::TypingEnv::post_analysis(tcx, impl_def_id)
+            } else {
+                ty::TypingEnv::fully_monomorphized()
+            };
+            tcx.normalize_erasing_regions(typing_env, Unnormalized::new_wip(value))
+        }
         match &mut impl_trait_ref {
             Some(impl_trait_ref) => {
                 assert_eq!(impl_trait_ref.self_ty(), self_ty);
-                *impl_trait_ref = self
-                    .tcx
-                    .normalize_erasing_regions(typing_env, Unnormalized::new_wip(*impl_trait_ref));
+                *impl_trait_ref = normalize(self.tcx, identity, impl_def_id, *impl_trait_ref);
                 self_ty = impl_trait_ref.self_ty();
             }
             None => {
-                self_ty =
-                    self.tcx.normalize_erasing_regions(typing_env, Unnormalized::new_wip(self_ty));
+                self_ty = normalize(self.tcx, identity, impl_def_id, self_ty);
             }
         }
 

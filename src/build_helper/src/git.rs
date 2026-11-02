@@ -221,21 +221,28 @@ pub fn get_closest_upstream_commit(
     config: &GitConfig<'_>,
     env: CiEnv,
 ) -> Result<Option<String>, String> {
-    let base = match env {
-        CiEnv::None => "HEAD",
-        CiEnv::GitHubActions => {
-            // On CI, we should always have a non-upstream merge commit at the tip,
-            // and our first parent should be the most recently merged upstream commit.
-            // We thus simply return our first parent.
-            return resolve_commit_sha(git_dir, "HEAD^1").map(Some);
-        }
-    };
-
     let mut git = Command::new("git");
 
     if let Some(git_dir) = git_dir {
         git.current_dir(git_dir);
     }
+
+    let base = match env {
+        CiEnv::None => "HEAD",
+        CiEnv::GitHubActions => {
+            // On CI, we should always have a non-upstream merge commit at the
+            // tip, and our first parent is the tip of the base branch.
+            git.args([
+                "rev-list",
+                "--first-parent",
+                &format!("--author={}", &escape_email_git_regex(config.git_merge_commit_email)),
+                "-n1",
+                "HEAD^1",
+            ]);
+            let output = output_result(&mut git)?.trim().to_owned();
+            return Ok(if output.is_empty() { None } else { Some(output) });
+        }
+    };
 
     // We do not use `--first-parent`, because we can be in a situation (outside CI) where we have
     // a subtree merge that actually has the main rustc history as its second parent.
@@ -255,19 +262,6 @@ pub fn get_closest_upstream_commit(
 
     let output = output_result(&mut git)?.trim().to_owned();
     if output.is_empty() { Ok(None) } else { Ok(Some(output)) }
-}
-
-/// Resolve the commit SHA of `commit_ref`.
-fn resolve_commit_sha(git_dir: Option<&Path>, commit_ref: &str) -> Result<String, String> {
-    let mut git = Command::new("git");
-
-    if let Some(git_dir) = git_dir {
-        git.current_dir(git_dir);
-    }
-
-    git.args(["rev-parse", commit_ref]);
-
-    Ok(output_result(&mut git)?.trim().to_owned())
 }
 
 /// Returns the files that have been modified in the current branch compared to the master branch.

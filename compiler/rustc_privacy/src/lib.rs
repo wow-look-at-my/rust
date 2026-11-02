@@ -1734,6 +1734,7 @@ impl<'tcx> PrivateItemsInPublicInterfacesChecker<'_, 'tcx> {
 pub fn provide(providers: &mut Providers) {
     *providers = Providers {
         effective_visibilities,
+        effective_visibility: |tcx, def_id| tcx.effective_visibilities(()).effective_vis(def_id),
         check_private_in_public,
         check_mod_privacy,
         ..*providers
