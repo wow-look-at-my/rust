@@ -33,11 +33,12 @@ pub fn query_system<'tcx>(
     on_disk_cache: Option<OnDiskCache>,
     incremental: bool,
     track_present: bool,
+    uncache: &[String],
 ) -> QuerySystem<'tcx> {
     QuerySystem {
         arenas: Default::default(),
         dep_kind_vtables: dep_kind_vtables::make_dep_kind_vtables(arena),
-        query_vtables: query_vtables::make_query_vtables(incremental, track_present),
+        query_vtables: query_vtables::make_query_vtables(incremental, track_present, uncache),
         side_effects: Default::default(),
         used_features: Default::default(),
         on_disk_cache,
@@ -46,6 +47,15 @@ pub fn query_system<'tcx>(
         jobs: AtomicU64::new(1),
         cycle_handler_nesting: Lock::new(0),
     }
+}
+
+/// Returns the names in `uncache` that are not `cache_on_disk` queries, or that are fed.
+pub fn unknown_uncache_names(uncache: &[String]) -> Vec<&str> {
+    uncache
+        .iter()
+        .map(String::as_str)
+        .filter(|n| !query_vtables::QUERY_UNCACHEABLE.iter().any(|&(q, c)| c && q == *n))
+        .collect()
 }
 
 pub fn provide(providers: &mut rustc_middle::util::Providers) {

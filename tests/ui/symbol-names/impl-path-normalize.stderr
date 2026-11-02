@@ -1,0 +1,52 @@
+error: symbol-name(_RNvNvXs3_CsCRATE_HASH_19impl_path_normalizeINtB<REF>_5Wrap2pEINtB<REF>_2TrNtYpNtB<REF>_2Id3OutE1m5inner)
+  --> $DIR/impl-path-normalize.rs:41:9
+   |
+LL | /         #[rustc_dump_symbol_name]
+LL | |         fn inner() {}
+   | |__________________^
+   |
+   = note: demangling(<impl_path_normalize[68c767f68af18f45]::Wrap2<_> as impl_path_normalize[68c767f68af18f45]::Tr<<_ as impl_path_normalize[68c767f68af18f45]::Id>::Out>>::m::inner)
+   = note: demangling-alt(<impl_path_normalize::Wrap2<_> as impl_path_normalize::Tr<<_ as impl_path_normalize::Id>::Out>>::m::inner)
+
+error: symbol-name(_RNvNvXs4_CsCRATE_HASH_19impl_path_normalizeTpEINtB<REF>_2TrtE1m5inner)
+  --> $DIR/impl-path-normalize.rs:51:9
+   |
+LL | /         #[rustc_dump_symbol_name]
+LL | |         fn inner() {}
+   | |__________________^
+   |
+   = note: demangling(<(_,) as impl_path_normalize[68c767f68af18f45]::Tr<u16>>::m::inner)
+   = note: demangling-alt(<(_,) as impl_path_normalize::Tr<u16>>::m::inner)
+
+error: symbol-name(_RNvXs1_CsCRATE_HASH_19impl_path_normalizeNtB<REF>_3FooINtB<REF>_2TrhE1m)
+  --> $DIR/impl-path-normalize.rs:30:5
+   |
+LL | /     #[rustc_dump_symbol_name]
+LL | |     fn m() {}
+   | |__________^
+   |
+   = note: demangling(<impl_path_normalize[68c767f68af18f45]::Foo as impl_path_normalize[68c767f68af18f45]::Tr<u8>>::m)
+   = note: demangling-alt(<impl_path_normalize::Foo as impl_path_normalize::Tr<u8>>::m)
+
+error: symbol-name(_RNvXs2_CsCRATE_HASH_19impl_path_normalizeINtB<REF>_4WraphEINtB<REF>_2TrtE1m)
+  --> $DIR/impl-path-normalize.rs:35:5
+   |
+LL | /     #[rustc_dump_symbol_name]
+LL | |     fn m() {}
+   | |__________^
+   |
+   = note: demangling(<impl_path_normalize[68c767f68af18f45]::Wrap<u8> as impl_path_normalize[68c767f68af18f45]::Tr<u16>>::m)
+   = note: demangling-alt(<impl_path_normalize::Wrap<u8> as impl_path_normalize::Tr<u16>>::m)
+
+error: symbol-name(_RNvMs5_CsCRATE_HASH_19impl_path_normalizeINtB<REF>_4WraptE8inherent)
+  --> $DIR/impl-path-normalize.rs:57:5
+   |
+LL | /     #[rustc_dump_symbol_name]
+LL | |     fn inherent() {}
+   | |_________________^
+   |
+   = note: demangling(<impl_path_normalize[68c767f68af18f45]::Wrap<u16>>::inherent)
+   = note: demangling-alt(<impl_path_normalize::Wrap<u16>>::inherent)
+
+error: aborting due to 5 previous errors
+

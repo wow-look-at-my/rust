@@ -710,6 +710,18 @@ fn test_pr_ci_changed_in_pr() {
 }
 
 #[test]
+fn test_pr_ci_non_upstream_commit_on_base() {
+    git_test(|ctx| {
+        let sha = ctx.create_upstream_merge(&["a"]);
+        ctx.modify("x");
+        ctx.commit();
+        ctx.create_nonupstream_merge(&["b"]);
+        let src = ctx.check_modifications(&["c"], CiEnv::GitHubActions);
+        assert_eq!(src, PathFreshness::LastModifiedUpstream { upstream: sha });
+    });
+}
+
+#[test]
 fn test_auto_ci_unchanged_anywhere_select_parent() {
     git_test(|ctx| {
         let sha = ctx.create_upstream_merge(&["a"]);

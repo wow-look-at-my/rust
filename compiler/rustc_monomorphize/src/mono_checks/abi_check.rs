@@ -213,7 +213,14 @@ fn check_call_site_abi<'tcx>(
     caller: Instance<'tcx>,
     loc: impl Fn() -> (Span, HirId) + Copy,
 ) {
-    let extern_abi = callee.fn_sig(tcx).abi();
+    // `should_codegen_locally` reads `callee_facts` of each callee item. A second read of that
+    // node adds no edge, which a read of `fn_sig` would.
+    let extern_abi = match *callee.kind() {
+        ty::FnDef(def_id, _) => {
+            tcx.callee_facts(def_id).extern_abi.expect("a `FnDef` names a function")
+        }
+        _ => callee.fn_sig(tcx).abi(),
+    };
     if extern_abi.is_rustic_abi() || extern_abi == ExternAbi::LlvmIntrinsic {
         // We directly handle the soundness of Rust ABIs -- so let's skip the majority of
         // call sites to avoid a perf regression.
@@ -249,7 +256,7 @@ fn check_call_site_abi<'tcx>(
         }
         ty::FnDef(def_id, args) => {
             // Intrinsics are handled separately by the compiler.
-            if tcx.intrinsic(def_id).is_some() {
+            if tcx.callee_facts(def_id).intrinsic.is_some() {
                 return;
             }
             let instance = ty::Instance::expect_resolve(

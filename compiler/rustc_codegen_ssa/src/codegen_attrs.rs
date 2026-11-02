@@ -542,6 +542,10 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
         );
     }
 
+    if let Some(attrs) = tcx.prev_metadata_codegen_fn_attrs(did) {
+        return attrs;
+    }
+
     let mut codegen_fn_attrs = CodegenFnAttrs::new();
     let attrs = tcx.hir_attrs(tcx.local_def_id_to_hir_id(did));
 

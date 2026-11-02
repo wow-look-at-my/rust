@@ -1630,6 +1630,17 @@ pub fn decode_syntax_context<D: Decoder>(
     remapped_ctxt
 }
 
+/// The key of `ctxt`: its parent, its outer expansion and that expansion's transparency.
+pub fn syntax_context_key(ctxt: SyntaxContext) -> SyntaxContextKey {
+    HygieneData::with(|data| data.syntax_context_data[ctxt].key())
+}
+
+/// Interns the context of `key`, as `decode_syntax_context` does with decoded data.
+pub fn syntax_context_from_key(key: SyntaxContextKey) -> SyntaxContext {
+    let (parent, expn_id, transparency) = key;
+    HygieneData::with(|data| data.alloc_ctxt(parent, expn_id, transparency))
+}
+
 impl<E: SpanEncoder> Encodable<E> for LocalExpnId {
     fn encode(&self, e: &mut E) {
         self.to_expn_id().encode(e);
